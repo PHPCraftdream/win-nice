@@ -40,15 +40,20 @@ cmd.exe. This is a change from just checking for the character; it's a hard
 reject, not a best-effort escape.
 
 **Separately, and unaffected by the fail-closed fix above:** each tool ships
-as a pair — `name.bat` and `name.ps1`. Invoking the bare name (`cap ...`, no
-extension) from an actual PowerShell session resolves to the `.ps1` and gets
-the full argument handling described above. Invoking it from `cmd.exe`, or
-however a program like Node's `child_process` resolves a bare command on
-Windows (PATHEXT-based, which doesn't include `.PS1` by default), lands on the
-`.bat` file instead — and a `.bat` file corrupts any literal `%` in its own
-arguments before your command, and before `.ps1`, ever runs at all, confirmed
-with nothing more than a bare `echo %1` in a plain `.bat`. This is cmd.exe's
-own batch-parameter substitution (`%1`/`%*`) rescanning for `%...%` patterns
+as up to three files — `name.bat`, `name.ps1`, and a plain extensionless
+`name` shim (a `#!/bin/sh` script) — and which one a bare `name ...`
+invocation resolves to depends on the calling shell:
+
+| Calling shell | Resolves to | `%` handling |
+| --- | --- | --- |
+| PowerShell | `name.ps1` | full argument safety (see above) |
+| cmd.exe, or PATHEXT-based resolution (e.g. Node's `child_process`, which doesn't include `.PS1` in `PATHEXT` by default) | `name.bat` | corrupted before `.ps1` ever runs (see below) |
+| POSIX shell (Git Bash, WSL) — ignores `PATHEXT`/bare-name extension resolution entirely | `name` (no extension) | full argument safety — the shim `exec`s straight into `name.ps1` via `powershell -File`, the same direct-to-`.ps1` path PowerShell itself uses, no `.bat`/cmd.exe hop involved |
+
+The `.bat` file corrupts any literal `%` in its own arguments before your
+command, and before `.ps1`, ever runs at all, confirmed with nothing more
+than a bare `echo %1` in a plain `.bat`. This is cmd.exe's own
+batch-parameter substitution (`%1`/`%*`) rescanning for `%...%` patterns
 across the whole line while parsing the `.bat` entry point itself; there's no
 fix for it from inside a `.bat` file, and it happens before the `.ps1` (and
 its fail-closed `%` check) ever sees the arguments. Every other special
@@ -140,6 +145,23 @@ at 63 — a single affinity mask can't address more).
 pint 4 npm run build
 ```
 
+**A `cap`/`pint` limit sticks to any daemon the wrapped command leaves
+running**, for that daemon's entire lifetime — not just for the wrapped
+command's own run. Job Object membership is permanent for a process once
+assigned (short of an explicit, disallowed breakaway); a background process
+the command spawns and detaches from is still in the same job, still capped,
+for as long as it stays alive. This bites build tools that reuse a persistent
+process across invocations to skip cold-start cost: `dotnet build`'s
+`VBCSCompiler`/MSBuild node reuse, a Gradle daemon, file-watcher processes
+left running by `npm run watch`-style scripts. A follow-up **uncapped**
+`dotnet build` (or `gradle`) can end up running inside the *previous* `cap`
+call's Job Object without a new `cap`/`pint` invocation of its own, capped
+because a stale daemon from an earlier call is doing the work. Either don't
+leave the daemon running across a `cap`/`pint` call whose limit shouldn't
+persist (`dotnet build -p:UseSharedCompilation=false`, `gradle --no-daemon`),
+or accept that the limit is now effectively attached to the daemon until it's
+killed.
+
 ### `uiup`
 One-shot priority boost (`HIGH`) for the live shell/UI/audio processes so the
 desktop stays responsive while heavy background work runs underneath:
@@ -156,12 +178,19 @@ see the project history for the test.
 
 ### `admin <command> [args...]`
 Runs `command` elevated (as Administrator), waits for it to exit, propagates its
-exit code — the elevated equivalent of `idle`. If the calling shell isn't already
-elevated, triggers the standard UAC consent prompt (via `ShellExecute`, which
-always opens its own console window and always goes through the `cmd.exe /c`
-fallback path, never the direct-launch one — elevation has no direct-launch
-equivalent to use). If it's already elevated, runs inline sharing the current
-console, with the full direct-launch argument safety described above.
+exit code — the elevated equivalent of `idle`. If it's already elevated, runs
+inline sharing the current console, with the full direct-launch argument safety
+described above.
+
+If the calling shell isn't already elevated, triggers the standard UAC consent
+prompt (via `ShellExecute`, always opening its own console window, incompatible
+with sharing the caller's). Unlike a plain `ShellExecute("cmd.exe", "/c ...")`,
+this branch also tries a direct launch first: a `.bat`/`.cmd` target still needs
+the `cmd.exe /c` fallback (no elevation-capable equivalent of `CreateProcess`'s
+own `.bat`/`.cmd` auto-relaunch), but any other target launches directly via
+`-FilePath`, never touching cmd.exe — same as the already-elevated branch, a
+literal `%` in any argument is only refused when the `.bat`/`.cmd` fallback is
+actually needed, since a direct launch is never exposed to `%` expansion at all.
 
 ```
 admin npm install -g some-package
@@ -192,8 +221,14 @@ npm install -g win-nice
 
 This copies every tool above into `%LOCALAPPDATA%\win-nice\bin` and adds that
 directory to your user `PATH` (via `postinstall`). Restart your terminal
-afterwards so the new `PATH` takes effect. `npm uninstall -g win-nice` reverses
-it (via `preuninstall`).
+afterwards so the new `PATH` takes effect.
+
+`npm uninstall -g win-nice` does **not** reverse this — npm's `uninstall`
+lifecycle script was removed (npm ≥ 7 never runs it at all; there is no
+supported npm version where a `preuninstall` script would fire). Run
+`npx win-nice uninstall` (see below) before or after the `npm uninstall`,
+either order — `npx` re-fetches the package to run it, so it still works even
+after the global package itself is gone.
 
 The commands themselves are never registered through npm's own global `bin`
 shimming — `idle`/`cap`/etc. are too generic a name to risk colliding with
@@ -252,12 +287,50 @@ bundled with Windows — no separate install needed to run the tools. Node.js is
 only needed for the npm-based installer/tests, not for the tools themselves.
 `cy`/`cx` additionally need `claude`/`codex` installed and on `PATH`.
 
+**PowerShell execution policy:** Windows client editions default to
+`Restricted`, which blocks bare-name `.ps1` invocation entirely (`... cannot
+be loaded because running scripts is disabled on this system`) — this only
+affects the `.ps1` entry points (PowerShell's own bare-name resolution, and
+the Git Bash shim, which calls `.ps1` too), not the `.bat` files, which pass
+`-ExecutionPolicy Bypass` explicitly. Run once, as the user who'll run these
+tools:
+
+```
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+### Environment variables
+
+- `WIN_NICE_HOME` — overrides the install root (default
+  `%LOCALAPPDATA%\win-nice`). Used by the test suite; also useful for a
+  non-default install location.
+- `WIN_NICE_SKILL_HOME` — overrides the home directory `skill install`/
+  `skill uninstall` resolve `~/.claude/skills/...` and `~/.agents/skills/...`
+  against (default: the real user home). Mirrors `WIN_NICE_HOME`, for the
+  skill files instead of `bin/`.
+- `WIN_NICE_NO_PATH` — if set (to anything), `install`/`uninstall`/
+  `reinstall` skip the user `PATH` update/removal entirely, only managing
+  files under the install directory.
+
 ## Testing
 
 ```
 npm test                                       # installer logic (fast, no side effects)
 powershell -Command "Invoke-Pester -Path test\win-nice.Tests.ps1"   # real tool behavior
 ```
+
+Pin the Pester version before running the second command by hand: Windows
+ships Pester 3.4.0 built in, but a system with a newer Pester also installed
+(GitHub-hosted runners have both 3.4.0 and 5.x side by side) auto-loads the
+newer one, and this suite uses Pester 3's legacy assertion syntax (`Should
+Be`), which 5.x removed entirely. If bare `Invoke-Pester` fails immediately
+on every `It`, import the right version first:
+
+```
+powershell -Command "Import-Module Pester -MaximumVersion 3.99; Invoke-Pester -Path test\win-nice.Tests.ps1"
+```
+
+(this is what CI/publish do; see `.github/workflows/ci.yml`.)
 
 The Pester suite is an integration suite: it spawns real processes, checks
 actual `PriorityClass`, `ProcessorAffinity`, and Job Object CPU throttling

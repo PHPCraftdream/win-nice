@@ -1,0 +1,5 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# win-nice: managed-file
+# Git Bash ignores PATHEXT for bare-name resolution; this shim covers that shell.
+exec powershell -NoProfile -ExecutionPolicy Bypass -File "$(dirname "$0")/realtime.ps1" "$@"

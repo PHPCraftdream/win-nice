@@ -54,6 +54,16 @@ no race window), including anything it spawns, recursively.
   cores. `<thread-count>` must be between 1 and
   `min([Environment]::ProcessorCount, 63)`. Example: `pint 4 npm run build`.
 
+**A limit sticks to any daemon the wrapped command leaves running**, for that
+daemon's whole lifetime, not just the one `cap`/`pint` call — Job Object
+membership is permanent once assigned. Build tools that reuse a background
+process to skip cold-start cost (`dotnet build`'s VBCSCompiler/MSBuild node
+reuse, a Gradle daemon, `npm run watch`-style file watchers) can leave a
+*later, uncapped-looking* invocation actually running inside an earlier
+`cap`/`pint` call's job. Escape hatches: `dotnet build
+-p:UseSharedCompilation=false`, `gradle --no-daemon` — or accept the daemon
+stays limited until it's killed.
+
 ## Elevation / desktop responsiveness
 
 - `admin <command> [args...]` — runs elevated (as Administrator); triggers the
@@ -85,16 +95,26 @@ tool refuses to run, prints an error to stderr, and exits with code `1` — the
 command never reaches cmd.exe.
 
 **Separately, and unaffected by the fail-closed fix above:** each tool ships
-as a `name.bat` / `name.ps1` pair. Invoking the bare name from an actual
-PowerShell session resolves to the `.ps1` and gets the full argument safety
-above. Invoking it from `cmd.exe`, or via PATHEXT-based resolution the way
-Node's `child_process` (and most non-PowerShell launchers) resolve a bare
-command on Windows — PATHEXT doesn't include `.PS1` by default — lands on the
-`.bat` file instead, which corrupts any literal `%` in its arguments before
-the command, and before `.ps1` (and its fail-closed `%` check), ever runs at
-all (cmd.exe's own batch-parameter substitution rescanning for `%...%`
-patterns while parsing the `.bat` entry point itself; not fixable from inside
-a `.bat`). Every other special character survives that hop untouched.
+as up to three files, and which one a bare `name ...` invocation resolves to
+depends on the calling shell:
+
+| Calling shell | Resolves to | `%` handling |
+| --- | --- | --- |
+| PowerShell | `name.ps1` | full argument safety (see above) |
+| cmd.exe, or PATHEXT-based resolution (e.g. Node's `child_process` — `PATHEXT` doesn't include `.PS1` by default) | `name.bat` | corrupted before `.ps1` ever runs |
+| POSIX shell (Git Bash, WSL — ignores `PATHEXT`) | `name` (extensionless shim) | full argument safety — `exec`s straight into `name.ps1`, same as PowerShell |
+
+The `.bat` file corrupts any literal `%` in its arguments before the command,
+and before `.ps1` (and its fail-closed `%` check), ever runs at all
+(cmd.exe's own batch-parameter substitution rescanning for `%...%` patterns
+while parsing the `.bat` entry point itself; not fixable from inside a
+`.bat`). Every other special character survives that hop untouched.
+
+**PowerShell execution policy:** Windows client editions default to
+`Restricted`, which blocks `.ps1` invocation (both direct and via the Git
+Bash shim) with "running scripts is disabled on this system". One-time fix:
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. `.bat` files are
+unaffected (they pass `-ExecutionPolicy Bypass` themselves).
 
 ## Install / manage
 

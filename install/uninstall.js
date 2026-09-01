@@ -55,6 +55,12 @@ function uninstall({ updatePath = true } = {}) {
   if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
   if (fs.existsSync(manifestFile)) fs.unlinkSync(manifestFile);
 
+  // Leaves %LOCALAPPDATA%\win-nice itself behind otherwise - only bin/ and the
+  // manifest were ever tracked. Only remove it if uninstall left it truly empty;
+  // a user-added file there must survive.
+  const root = paths.installRoot();
+  if (fs.existsSync(root) && fs.readdirSync(root).length === 0) fs.rmdirSync(root);
+
   if (updatePath) {
     const current = paths.readUserPath();
     const next = paths.removeFromPathString(current, dir);

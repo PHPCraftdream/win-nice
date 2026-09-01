@@ -16,7 +16,7 @@ if (-not [int]::TryParse($args[0], [ref]$percentValue) -or $percentValue -lt 1 -
 $Command = @($args[1..($args.Count - 1)])
 
 # Fallback command line for when the target isn't a directly-launchable .exe (see
-# Capper.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
+# CapLauncher.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
 # neutralize its operators (&|<>^) and not just whitespace, or e.g. "A&B" gets split
 # into two commands. NOTE: a literal "%" in an argument can still trigger cmd.exe
 # environment-variable expansion (e.g. "%PATH%") even when quoted, and cmd.exe pairs
@@ -36,7 +36,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class Capper
+public static class CapLauncher
 {
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct STARTUPINFO
@@ -217,7 +217,13 @@ public static class Capper
             }
 
             string cmdExe = Environment.SystemDirectory + "\\cmd.exe";
-            var shellCommandLine = new StringBuilder("\"" + cmdExe + "\" /c " + cmdExeCommandLine);
+            // /d: skip HKCU AutoRun (user-writable registry key). /v:off: disable delayed
+            // expansion so "!var!" in an argument can't be expanded. /s plus the extra outer
+            // quote pair: cmd's /S rule strips exactly that outer pair and leaves the rest of
+            // the string untouched - without /S, cmd strips the first and last quote of the
+            // whole line instead, which breaks quoting whenever the target path itself needs
+            // quotes AND another argument is also quoted.
+            var shellCommandLine = new StringBuilder("\"" + cmdExe + "\" /d /v:off /s /c \"" + cmdExeCommandLine + "\"");
             created = CreateProcess(null, shellCommandLine, IntPtr.Zero, IntPtr.Zero, true,
                 CREATE_SUSPENDED, IntPtr.Zero, null, ref si, out pi);
             if (!created)
@@ -256,7 +262,7 @@ public static class Capper
 Add-Type -TypeDefinition $source -Language CSharp
 
 try {
-    exit ([Capper]::Run($percentValue, [string[]]$Command, $commandLine))
+    exit ([CapLauncher]::Run($percentValue, [string[]]$Command, $commandLine))
 } catch {
     Write-Error $_.Exception.InnerException.Message
     exit 1

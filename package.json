@@ -6,6 +6,14 @@
   "os": [
     "win32"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/phpcraftdream/win-nice.git"
+  },
+  "homepage": "https://github.com/phpcraftdream/win-nice#readme",
+  "bugs": {
+    "url": "https://github.com/phpcraftdream/win-nice/issues"
+  },
   "bin": {
     "win-nice": "install/cli.js"
   },
@@ -19,8 +27,7 @@
   ],
   "scripts": {
     "postinstall": "node install/cli.js install",
-    "preuninstall": "node install/cli.js uninstall",
-    "test": "node --test test/*.test.js"
+    "test": "node --test"
   },
   "keywords": [
     "windows",

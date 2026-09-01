@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 
 const { install } = require('../install/install');
 const { uninstall } = require('../install/uninstall');
@@ -149,9 +150,64 @@ test('install is a no-op guard when run from the source checkout without WIN_NIC
   const prev = process.env.WIN_NICE_HOME;
   delete process.env.WIN_NICE_HOME;
   try {
-    const result = install();
+    // updatePath: false - if this guard ever regresses, the test must not fall
+    // through to a real PATH read/write against the developer's actual registry.
+    const result = install({ updatePath: false });
     assert.equal(result, null);
   } finally {
     if (prev !== undefined) process.env.WIN_NICE_HOME = prev;
+  }
+});
+
+test('readRegistryString/writeRegistryString round-trip non-ASCII values exactly, on a scratch key', () => {
+  const keyPath = `HKCU:\\Software\\WinNiceTest\\${process.pid}`;
+  const valueName = 'ScratchPath';
+  const value = 'C:\\Users\\Марат\\bin;C:\\Users\\José\\bin';
+  try {
+    paths.writeRegistryString(keyPath, valueName, value);
+    const readBack = paths.readRegistryString(keyPath, valueName);
+    assert.equal(readBack, value);
+  } finally {
+    execFileSync('powershell', [
+      '-NoProfile',
+      '-Command',
+      'Remove-Item -LiteralPath $env:WIN_NICE_REG_KEY -Recurse -Force -ErrorAction SilentlyContinue',
+    ], { env: { ...process.env, WIN_NICE_REG_KEY: keyPath } });
+  }
+});
+
+test('writeRegistryString preserves REG_EXPAND_SZ across a round trip instead of flattening it', () => {
+  const keyPath = `HKCU:\\Software\\WinNiceTest\\${process.pid}`;
+  const valueName = 'ScratchExpand';
+  try {
+    execFileSync('powershell', [
+      '-NoProfile',
+      '-Command',
+      [
+        'if (-not (Test-Path -LiteralPath $env:WIN_NICE_REG_KEY)) { New-Item -Path $env:WIN_NICE_REG_KEY -Force | Out-Null }',
+        'Set-ItemProperty -LiteralPath $env:WIN_NICE_REG_KEY -Name $env:WIN_NICE_REG_VALUE -Value $env:WIN_NICE_REG_NEW_VALUE -Type ExpandString',
+      ].join('\n'),
+    ], {
+      env: { ...process.env, WIN_NICE_REG_KEY: keyPath, WIN_NICE_REG_VALUE: valueName, WIN_NICE_REG_NEW_VALUE: '%USERPROFILE%\\bin' },
+    });
+
+    // Round-trip through writeRegistryString, as install()/uninstall() do.
+    paths.writeRegistryString(keyPath, valueName, '%USERPROFILE%\\bin2;C:\\extra');
+
+    const kind = execFileSync('powershell', [
+      '-NoProfile',
+      '-Command',
+      '(Get-Item -LiteralPath $env:WIN_NICE_REG_KEY).GetValueKind($env:WIN_NICE_REG_VALUE)',
+    ], { encoding: 'utf8', env: { ...process.env, WIN_NICE_REG_KEY: keyPath, WIN_NICE_REG_VALUE: valueName } });
+    assert.equal(kind.trim(), 'ExpandString');
+
+    const raw = paths.readRegistryString(keyPath, valueName);
+    assert.equal(raw, '%USERPROFILE%\\bin2;C:\\extra', 'value must stay unexpanded');
+  } finally {
+    execFileSync('powershell', [
+      '-NoProfile',
+      '-Command',
+      'Remove-Item -LiteralPath $env:WIN_NICE_REG_KEY -Recurse -Force -ErrorAction SilentlyContinue',
+    ], { env: { ...process.env, WIN_NICE_REG_KEY: keyPath } });
   }
 });

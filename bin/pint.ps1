@@ -18,7 +18,7 @@ if (-not [int]::TryParse($args[0], [ref]$countValue) -or $countValue -lt 1 -or $
 $Command = @($args[1..($args.Count - 1)])
 
 # Fallback command line for when the target isn't a directly-launchable .exe (see
-# Pinner.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
+# PintLauncher.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
 # neutralize its operators (&|<>^) and not just whitespace - see cap.ps1 for the
 # same logic and its documented "%" limitation.
 $commandLine = ($Command | ForEach-Object {
@@ -31,7 +31,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class Pinner
+public static class PintLauncher
 {
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct STARTUPINFO
@@ -215,7 +215,13 @@ public static class Pinner
             }
 
             string cmdExe = Environment.SystemDirectory + "\\cmd.exe";
-            var shellCommandLine = new StringBuilder("\"" + cmdExe + "\" /c " + cmdExeCommandLine);
+            // /d: skip HKCU AutoRun (user-writable registry key). /v:off: disable delayed
+            // expansion so "!var!" in an argument can't be expanded. /s plus the extra outer
+            // quote pair: cmd's /S rule strips exactly that outer pair and leaves the rest of
+            // the string untouched - without /S, cmd strips the first and last quote of the
+            // whole line instead, which breaks quoting whenever the target path itself needs
+            // quotes AND another argument is also quoted.
+            var shellCommandLine = new StringBuilder("\"" + cmdExe + "\" /d /v:off /s /c \"" + cmdExeCommandLine + "\"");
             created = CreateProcess(null, shellCommandLine, IntPtr.Zero, IntPtr.Zero, true,
                 CREATE_SUSPENDED, IntPtr.Zero, null, ref si, out pi);
             if (!created)
@@ -257,7 +263,7 @@ Add-Type -TypeDefinition $source -Language CSharp
 # README. Bit-shift, not [Math]::Pow: doubles can't exactly represent 2^63.
 $affinityMask = ([uint64]1 -shl $countValue) - [uint64]1
 try {
-    exit ([Pinner]::Run($affinityMask, [string[]]$Command, $commandLine))
+    exit ([PintLauncher]::Run($affinityMask, [string[]]$Command, $commandLine))
 } catch {
     Write-Error $_.Exception.InnerException.Message
     exit 1

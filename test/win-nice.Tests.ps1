@@ -195,6 +195,39 @@ Describe 'abovenormal.bat / high.bat / realtime.bat' {
     }
 }
 
+# Group 6 regression: all 5 of these .bat files used to be "start ... /b /wait %*",
+# which disables Ctrl+C for the wrapped command - now thin shims delegating to
+# their own .ps1 ("powershell ... -File %~dp0<name>.ps1 %*"). Table-driven,
+# matching the priority-class and exit-code assertions the equivalent .ps1 tests
+# above already make, to confirm the rewrite didn't change either observable
+# behavior.
+$allPriorityBatTools = @(
+    @{ Name = 'idle'; Expected = 'Idle' }
+    @{ Name = 'belownormal'; Expected = 'BelowNormal' }
+    @{ Name = 'abovenormal'; Expected = 'AboveNormal' }
+    @{ Name = 'high'; Expected = 'High' }
+    @{ Name = 'realtime'; Expected = if ($script:isAdminRunner) { 'RealTime' } else { 'High' } }
+)
+
+Describe 'idle.bat / belownormal.bat / abovenormal.bat / high.bat / realtime.bat (priority + exit code)' {
+    It 'runs the given command at the expected priority (<Name> -> <Expected>)' -TestCases $allPriorityBatTools {
+        param($Name, $Expected)
+        $out = New-TempFile
+        try {
+            & (Join-Path $bin "$Name.bat") powershell -NoProfile -Command "(Get-Process -Id `$PID).PriorityClass | Out-File -FilePath '$out'"
+            (Get-Content $out).Trim() | Should Be $Expected
+        } finally {
+            Remove-Item $out -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'propagates the exit code of the wrapped command (<Name>)' -TestCases $allPriorityBatTools {
+        param($Name, $Expected)
+        & (Join-Path $bin "$Name.bat") cmd /c "exit 7"
+        $LASTEXITCODE | Should Be 7
+    }
+}
+
 Describe 'abovenormal.ps1 / high.ps1 / realtime.ps1' {
     It 'runs the given command at the expected priority (<Name> -> <Expected>)' -TestCases $priorityTools {
         param($Name, $Expected)
@@ -465,6 +498,67 @@ Describe '%-fail-closed on the cmd.exe fallback path' {
     }
 }
 
+# P1 regression: the cmd.exe /c fallback used to build its command line as
+# `"<cmd.exe>" /c <cmdExeCommandLine>` with no /S and no outer quote pair. cmd's
+# /C quote-stripping rule only cleanly strips a lone outer quote pair; as soon as
+# the target path itself needs quoting (e.g. contains a space) AND at least one
+# other argument is also quoted, cmd falls back to stripping the first and last
+# quote characters anywhere on the line instead - splitting the path at its space
+# and reopening the "&" injection the whole quoting layer exists to prevent. Fixed
+# via "/d /s /v:off" plus wrapping cmdExeCommandLine in an extra outer quote pair
+# (see any launcher's Run() for the exact rationale). Reproduced pre-fix with:
+#   powershell -File bin\cap.ps1 50 "<TEMP>\wn review N\t.bat" "A&B" plain
+# -> "'...\wn' is not recognized ...", "'B' is not recognized ...", exit=1
+function Test-SpacedTargetFallback {
+    param(
+        [Parameter(Mandatory = $true)][string]$Ps1,
+        [string[]]$Prefix = @()
+    )
+    $spacedDir = Join-Path $env:TEMP ("win-nice-pester-spaced " + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $spacedDir | Out-Null
+    $targetBat = Join-Path $spacedDir 't.bat'
+    Set-Content -Path $targetBat -Value "@echo off`r`necho BATOUT=%*`r`n"
+    try {
+        $stdout = & powershell -NoProfile -File $Ps1 @Prefix $targetBat 'A&B' 'plain'
+        $exitCode = $LASTEXITCODE
+        return [PSCustomObject]@{ Output = ($stdout | Select-Object -Last 1); ExitCode = $exitCode }
+    } finally {
+        Remove-Item $spacedDir -Recurse -ErrorAction SilentlyContinue
+    }
+}
+
+$spacedFallbackTools = @(
+    @{ Name = 'idle'; Prefix = @() }
+    @{ Name = 'belownormal'; Prefix = @() }
+    @{ Name = 'abovenormal'; Prefix = @() }
+    @{ Name = 'high'; Prefix = @() }
+    @{ Name = 'realtime'; Prefix = @() }
+    @{ Name = 'cap'; Prefix = @('50') }
+    @{ Name = 'pint'; Prefix = @('1') }
+)
+
+Describe 'cmd.exe fallback quoting survives a target path containing a space (<Name>)' {
+    It 'runs successfully and forwards an "&"-containing argument intact (<Name>)' -TestCases $spacedFallbackTools {
+        param($Name, $Prefix)
+        $r = Test-SpacedTargetFallback -Ps1 (Join-Path $bin "$Name.ps1") -Prefix $Prefix
+        $r.ExitCode | Should Be 0
+        $r.Output | Should Be 'BATOUT="A&B" plain'
+    }
+
+    It 'runs successfully and forwards an "&"-containing argument intact (admin, already elevated)' -Skip:(-not $script:isAdminRunner) {
+        $r = Test-SpacedTargetFallback -Ps1 (Join-Path $bin 'admin.ps1') -Prefix @()
+        $r.ExitCode | Should Be 0
+        $r.Output | Should Be 'BATOUT="A&B" plain'
+    }
+}
+
+# cy.ps1/cx.ps1's own target ("claude"/"codex") is a hardcoded bare word, never a
+# user-controlled path, so the "quoted target path" trigger above can't occur for
+# them directly - but Test-FakeLauncher's fake stand-in directory name (below)
+# includes a space, so every cy.ps1/cx.ps1 test that goes through it (including
+# the "A&B" case) already exercises the fix's compatibility with a spaced PATH
+# entry resolved by cmd.exe's own PATHEXT search.
+
 Describe 'pint.ps1 argument validation' {
     It 'rejects a non-numeric thread count' {
         & (Join-Path $bin 'pint.bat') abc cmd /c "echo hi" 2>&1 | Out-Null
@@ -568,14 +662,45 @@ Describe 'admin.bat' {
         $r.Output | Should Be 'A&B|SEP|A|B|SEP|100%OFF'
     }
 
-    It 'refuses to run and never attempts elevation when an argument contains "%" (not-yet-elevated branch)' -Skip:$script:isAdminRunner {
+    # admin.ps1's not-yet-elevated branch now has a real direct-launch path (no
+    # cmd.exe hop) for a target that isn't .bat/.cmd - the "%" check is scoped to
+    # ONLY the .bat/.cmd branch (matching AdminLauncher.Run's own fallback check),
+    # since a direct-launch target never touches cmd.exe and so isn't at risk of
+    # "%" expansion at all. Only the .bat/.cmd case is exercised here: proving the
+    # direct-launch case now ALLOWS "%" through would require actually reaching
+    # Start-Process -Verb RunAs, which pops a real interactive UAC prompt and would
+    # hang an automated run - that side is intentionally left unverified by an
+    # automated test (would need an elevated test runner and manual UAC approval).
+    It 'refuses to run and never attempts elevation when an argument contains "%" for a .bat/.cmd target (not-yet-elevated branch)' -Skip:$script:isAdminRunner {
         # This check runs directly in PowerShell before Start-Process -Verb RunAs is
         # ever called (see admin.ps1), so no UAC consent prompt is at risk here - if
         # this ever hangs, the check moved past the RunAs call and needs investigating.
-        $stderr = & powershell -NoProfile -File (Join-Path $bin 'admin.ps1') cmd /c '100%OFF' 2>&1
+        $stderr = & powershell -NoProfile -File (Join-Path $bin 'admin.ps1') 'somebatch.bat' /c '100%OFF' 2>&1
         $exitCode = $LASTEXITCODE
         $exitCode | Should Be 1
         ($stderr | Out-String) | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
+    }
+
+    It 'does not throw a MethodInvocation error when a non-string argument reaches the "%" check (not-yet-elevated branch, .bat/.cmd target)' -Skip:$script:isAdminRunner {
+        # Regression for the $a.Contains('%') -> "$a".Contains('%') fix: $a.Contains
+        # used to throw "does not contain a method named 'Contains'" for any $args
+        # element that isn't already a string (e.g. a bare integer). -File invocation
+        # from an external process always stringifies argv, so the only way to get a
+        # genuine non-string element into $args is a same-session "&" call with a
+        # parenthesized expression - hence the driver script below. First argument is
+        # a .bat target so the "%" check path is actually reached (it's now scoped to
+        # .bat/.cmd targets only); the second (5, an [int]) never contains "%", so the
+        # loop must move on to its third (string) argument, which does - proving the
+        # int didn't throw along the way.
+        $adminPs1 = Join-Path $bin 'admin.ps1'
+        $driverScript = New-TempScript
+        Set-Content -Path $driverScript -Value "& '$adminPs1' 'somebatch.bat' (5) '100%OFF'`r`nexit `$LASTEXITCODE`r`n"
+        $stderr = & powershell -NoProfile -File $driverScript 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+        $exitCode | Should Be 1
+        $stderr | Should Not Match 'does not contain a method'
+        $stderr | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
+        Remove-Item $driverScript -ErrorAction SilentlyContinue
     }
 }
 
@@ -590,13 +715,22 @@ function Test-FakeLauncher {
         [Parameter(Mandatory = $true)][string]$FakeTargetName,
         [Parameter(Mandatory = $true)][string[]]$ExtraArgs
     )
-    $fakeDir = Join-Path $env:TEMP ("win-nice-fakebin-" + [guid]::NewGuid().ToString("N"))
+    # Deliberate space in the dir name: cy.ps1/cx.ps1's target ("claude"/"codex")
+    # is a fixed bare word, never quoted on the cmd.exe command line itself, so this
+    # can't reproduce the P1 quoted-target-path bug the way a caller-supplied path
+    # can (see the spaced-target tests below) - but a space here still exercises
+    # cmd.exe's own PATHEXT resolution finding a PATH entry with a space in it, a
+    # common real-world case (e.g. "C:\Users\John Smith\AppData\Roaming\npm").
+    $fakeDir = Join-Path $env:TEMP ("win-nice-fakebin-spaced " + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $fakeDir | Out-Null
     $out = Join-Path $fakeDir 'out.txt'
     $fakeTarget = Join-Path $fakeDir $FakeTargetName
     Set-Content -Path $fakeTarget -Value "@echo off`r`n(echo %*)>`"$out`"`r`n"
     $prevPath = $env:PATH
-    $env:PATH = "$fakeDir;$env:PATH"
+    # REPLACE, not prepend: a real claude.exe/codex.exe elsewhere on the
+    # developer's PATH must never be reachable from this test, regardless of
+    # PATH order or cmd.exe's current-directory-first search quirk.
+    $env:PATH = "$fakeDir;$env:SystemRoot\System32;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
     try {
         $stderr = & powershell -NoProfile -File $Ps1 @ExtraArgs 2>&1 | Out-String
         $exitCode = $LASTEXITCODE
@@ -640,14 +774,57 @@ Describe 'cx.ps1' {
     }
 }
 
+# Regression: Test-FakeLauncher used to PREPEND $fakeDir to $env:PATH, so a real
+# claude.exe/codex.exe elsewhere on the developer's PATH stayed reachable as a
+# fallback (PATH order isn't the only lookup rule - e.g. cmd.exe checks the
+# current directory before PATH). These tests run with NO fake target present at
+# all, on the same replaced-not-prepended PATH cy.ps1/cx.ps1's own tests now use -
+# if isolation ever regressed back to a prepend and a real claude/codex leaked
+# through, the call would hang waiting on stdin instead of failing fast, so the
+# check runs in a job with a timeout rather than a plain synchronous call.
+$isolationTools = @(
+    @{ Name = 'cy'; Ps1 = 'cy.ps1' }
+    @{ Name = 'cx'; Ps1 = 'cx.ps1' }
+)
+
+Describe 'cy.ps1 / cx.ps1 PATH isolation' {
+    It 'fails fast (not silently, not hung) when no fake target is on the isolated PATH (<Name>)' -TestCases $isolationTools {
+        param($Name, $Ps1)
+        $fakeDir = Join-Path $env:TEMP ("win-nice-fakebin-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $fakeDir | Out-Null
+        $isolatedPath = "$fakeDir;$env:SystemRoot\System32;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+        $ps1Path = Join-Path $bin $Ps1
+        $job = Start-Job -ScriptBlock {
+            param($Ps1Path, $Path)
+            $env:PATH = $Path
+            $out = & powershell -NoProfile -File $Ps1Path 2>&1 | Out-String
+            [PSCustomObject]@{ Out = $out; ExitCode = $LASTEXITCODE }
+        } -ArgumentList $ps1Path, $isolatedPath
+        $done = Wait-Job $job -Timeout 20
+        if (-not $done) {
+            Stop-Job $job
+            Remove-Job $job -Force
+            Remove-Item $fakeDir -Recurse -ErrorAction SilentlyContinue
+            throw "$Name.ps1 did not exit within 20s under an isolated PATH with no fake target present - possible fallback to a real binary hanging on stdin."
+        }
+        $result = Receive-Job $job
+        Remove-Job $job -Force
+        $result.ExitCode | Should Not Be 0
+        $result.Out | Should Match '(is not recognized|cannot find|CreateProcess failed)'
+        Remove-Item $fakeDir -Recurse -ErrorAction SilentlyContinue
+    }
+}
+
 Describe 'sequential invocation in one PowerShell session' {
-    It 'runs idle/belownormal/abovenormal/high/realtime/cy/cx one after another without an Add-Type type-collision error' {
+    It 'runs idle/belownormal/abovenormal/high/realtime/cap/pint/cy/cx/admin one after another without an Add-Type type-collision error' {
         # Regression test: bare-name resolution (idle args..., not idle.bat) runs the
         # .ps1 in the CURRENT process/AppDomain, not a new one - each of these used to
         # Add-Type an identically-named "Launcher" class, so calling a second one in the
         # same session threw "Cannot add type. The type name 'Launcher' already exists."
         # (and, for cy/cx's different Run() signature, could fail outright). Confirmed
-        # empirically before the fix; each now has its own unique class name.
+        # empirically before the fix; each now has its own unique class name
+        # (IdleLauncher, BelowNormalLauncher, ..., CapLauncher, PintLauncher,
+        # CyLauncher, CxLauncher, AdminLauncher).
         $out = New-TempFile
         $probe = 'Set-Content -Path $env:WIN_NICE_TEST_OUT -Value "ok"'
         $probeFile = New-TempScript
@@ -657,17 +834,27 @@ Describe 'sequential invocation in one PowerShell session' {
         Set-Content -Path (Join-Path $fakeDir 'claude.bat') -Value "@echo off`r`nexit /b 0`r`n"
         Set-Content -Path (Join-Path $fakeDir 'codex.bat') -Value "@echo off`r`nexit /b 0`r`n"
 
+        # REPLACE, not prepend - same PATH-isolation rule as Test-FakeLauncher above.
         $script = @"
 `$env:WIN_NICE_TEST_OUT = '$out'
-`$env:PATH = '$fakeDir;' + `$env:PATH
+`$env:PATH = '$fakeDir;$env:SystemRoot\System32;$env:SystemRoot\System32\WindowsPowerShell\v1.0'
 foreach (`$name in @('idle', 'belownormal', 'abovenormal', 'high', 'realtime')) {
     & (Join-Path '$bin' "`$name.ps1") powershell -NoProfile -File '$probeFile'
     if (`$LASTEXITCODE -ne 0) { throw "`$name failed with exit `$LASTEXITCODE" }
 }
+& (Join-Path '$bin' 'cap.ps1') 50 powershell -NoProfile -File '$probeFile'
+if (`$LASTEXITCODE -ne 0) { throw "cap failed with exit `$LASTEXITCODE" }
+& (Join-Path '$bin' 'pint.ps1') 1 powershell -NoProfile -File '$probeFile'
+if (`$LASTEXITCODE -ne 0) { throw "pint failed with exit `$LASTEXITCODE" }
 & (Join-Path '$bin' 'cy.ps1')
 if (`$LASTEXITCODE -ne 0) { throw "cy failed with exit `$LASTEXITCODE" }
 & (Join-Path '$bin' 'cx.ps1')
 if (`$LASTEXITCODE -ne 0) { throw "cx failed with exit `$LASTEXITCODE" }
+# admin.ps1's own exit code depends on elevation state (refuses via the "%"
+# check when not elevated, runs "cmd" inline when already elevated) - only the
+# Add-Type collision is under test here, not admin's success/failure semantics.
+& (Join-Path '$bin' 'admin.ps1') cmd /c 'echo 100%OFF' 2>`$null
+exit 0
 "@
         $sessionScript = New-TempScript
         Set-Content -Path $sessionScript -Value $script
@@ -691,3 +878,17 @@ Describe 'uiup.ps1' {
         { Get-Command (Join-Path $bin 'uiup.ps1') -ErrorAction Stop } | Should Not Throw
     }
 }
+
+# Final best-effort sweep: most tests above Remove-Item their own temp files only
+# on the success path, so a failed `Should` assertion (a terminating error in
+# Pester) skips that cleanup and leaks the file/dir. Every temp name in this
+# suite - whether from New-TempFile/New-TempScript or an inline fakeDir/spacedDir
+# - shares one of these two prefixes, including ones later renamed to a different
+# extension (e.g. New-TempScript's .ps1 renamed to .bat before use), so a
+# name-pattern sweep catches those too, unlike tracking exact paths would. Pester
+# 3's Describe blocks run inline as this file executes top to bottom, so this
+# statement runs after every Describe above has finished.
+Get-ChildItem -Path $env:TEMP -Filter 'win-nice-pester-*' -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $env:TEMP -Filter 'win-nice-fakebin-*' -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue

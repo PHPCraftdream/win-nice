@@ -44,6 +44,8 @@ jobs:
       - name: Pester test suite (real tool behavior)
         shell: powershell
         run: |
+          # Runners ship Pester 3.4.0 and 5.9.0 side by side; the suite uses v3 syntax.
+          Import-Module Pester -MaximumVersion 3.99
           $result = Invoke-Pester -Path test\win-nice.Tests.ps1 -PassThru
           if ($result.FailedCount -gt 0) { exit 1 }
 

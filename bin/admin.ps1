@@ -11,9 +11,9 @@ if (-not $Command -or $Command.Count -eq 0) {
 }
 
 # Fallback command line for the UAC (-Verb RunAs) branch, and for the inline branch
-# when the target isn't a directly-launchable .exe (see Runner.Run below) - re-parsed
-# by cmd.exe, so quoting must neutralize its operators (&|<>^) and not just
-# whitespace - see cap.ps1 for the same logic and its documented "%" limitation.
+# when the target isn't a directly-launchable .exe (see AdminLauncher.Run below) -
+# re-parsed by cmd.exe, so quoting must neutralize its operators (&|<>^) and not
+# just whitespace - see cap.ps1 for the same logic and its documented "%" limitation.
 $commandLine = ($Command | ForEach-Object {
     $escaped = $_ -replace '"', '\"'
     if ($escaped -eq '' -or $escaped -match '[\s"&|<>^]') { '"' + $escaped + '"' } else { $escaped }
@@ -21,16 +21,17 @@ $commandLine = ($Command | ForEach-Object {
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
-if ($isAdmin) {
-    # Already elevated - launch inline, sharing the current console. Same
-    # direct-CreateProcess-first, cmd.exe-fallback strategy as cap.ps1: a direct .exe
-    # target never touches cmd.exe, so it isn't exposed to "%" expansion at all.
-    $source = @"
+# AdminLauncher (embedded C#): direct-CreateProcess-first, cmd.exe-fallback launcher,
+# same strategy as cap.ps1's Capper - a direct .exe target never touches cmd.exe, so
+# it isn't exposed to "%" expansion at all. Defined unconditionally (not only inside
+# the already-elevated branch below) because the not-yet-elevated branch also calls
+# AdminLauncher.BuildArgvCommandLine for its own direct (non-cmd.exe) -Verb RunAs launch.
+$source = @"
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class Runner
+public static class AdminLauncher
 {
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct STARTUPINFO
@@ -110,7 +111,10 @@ public static class Runner
         return result.ToString();
     }
 
-    static string BuildArgvCommandLine(string[] argv)
+    // Public: reused from PowerShell by the not-yet-elevated branch to build the
+    // -ArgumentList for a direct (non-cmd.exe) -Verb RunAs launch, so that path gets
+    // the same CRT argv quoting as this file's own direct-CreateProcess path.
+    public static string BuildArgvCommandLine(string[] argv)
     {
         var parts = new string[argv.Length];
         for (int i = 0; i < argv.Length; i++) parts[i] = ArgvQuote(argv[i]);
@@ -151,8 +155,19 @@ public static class Runner
                         "environment-variable expansion. See README's Argument handling section.");
             }
 
+            // /d /s /v:off plus wrapping cmdExeCommandLine in one more outer quote pair:
+            // cmd.exe's /C quote-stripping only cleanly strips the outer pair when it's
+            // the sole/last quote pair on the line; with cmdExeCommandLine's own internal
+            // quoted args present, cmd's "exactly two quotes" rule doesn't apply and it
+            // falls back to stripping the first char and the LAST quote anywhere on the
+            // line - which, without this extra wrap, is one of OUR internal quotes and
+            // corrupts the parse (reopening "&" injection). The extra pair guarantees the
+            // added closing quote is the true last character, so strip-first/strip-last
+            // removes exactly our wrap and nothing else. /v:off pre-empts delayed-expansion
+            // ("!VAR!") risk the same way the "%" check above pre-empts "%" expansion.
             string cmdExe = Environment.SystemDirectory + "\\cmd.exe";
-            var shellCommandLine = new StringBuilder("\"" + cmdExe + "\" /c " + cmdExeCommandLine);
+            var shellCommandLine = new StringBuilder(
+                "\"" + cmdExe + "\" /d /s /v:off /c \"" + cmdExeCommandLine + "\"");
             created = CreateProcess(null, shellCommandLine, IntPtr.Zero, IntPtr.Zero, true,
                 0, IntPtr.Zero, null, ref si, out pi);
             if (!created)
@@ -171,31 +186,55 @@ public static class Runner
     }
 }
 "@
-    Add-Type -TypeDefinition $source -Language CSharp
+Add-Type -TypeDefinition $source -Language CSharp
+
+if ($isAdmin) {
+    # Already elevated - launch inline, sharing the current console.
     try {
-        exit ([Runner]::Run([string[]]$Command, $commandLine))
+        exit ([AdminLauncher]::Run([string[]]$Command, $commandLine))
     } catch {
         Write-Error $_.Exception.InnerException.Message
         exit 1
     }
 }
 
-# Not elevated - -Verb RunAs triggers the UAC consent prompt. ShellExecute-based,
-# not CreateProcess, so this always opens its own console window (incompatible with
-# -NoNewWindow) and always goes through cmd.exe /c with the escaped command line
-# above, rather than the direct-launch path used in the already-elevated branch -
-# meaning this branch is ALWAYS exposed to "%" expansion risk, elevated besides.
-# Fail loudly rather than silently risk it - see cap.ps1/Runner.Run for the same
-# check on the inline branch.
-foreach ($a in $Command) {
-    if ($a.Contains('%')) {
-        Write-Error "Refusing to run: argument contains '%', which cmd.exe could expand as an environment variable during elevation. See README's Argument handling section."
-        exit 1
+# Not elevated - -Verb RunAs triggers the UAC consent prompt. ShellExecute-based, not
+# CreateProcess, so this always opens its own console window (incompatible with
+# -NoNewWindow). Same direct-launch-first, cmd.exe-fallback strategy as the
+# already-elevated branch above: a .bat/.cmd target still needs cmd.exe (no direct
+# elevation-capable equivalent to CreateProcess's own .bat/.cmd auto-relaunch), but
+# any other target launches directly via -FilePath, never touching cmd.exe and so
+# never exposed to "%"/quote-stripping risk - so the "%" check below only applies to
+# the .bat/.cmd branch, same as AdminLauncher.Run's own fallback check.
+$isBatOrCmd = $Command[0] -match '\.(bat|cmd)$'
+
+if ($isBatOrCmd) {
+    foreach ($a in $Command) {
+        if ("$a".Contains('%')) {
+            Write-Error "Refusing to run: argument contains '%', which cmd.exe could expand as an environment variable during elevation. See README's Argument handling section."
+            exit 1
+        }
     }
 }
 
 try {
-    $p = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $commandLine) -Verb RunAs -Wait -PassThru
+    if ($isBatOrCmd) {
+        # Same /d /s /v:off + outer-quote-wrap fix as AdminLauncher.Run's cmd.exe
+        # fallback, and for the same reason: cmd.exe's /C quote-stripping.
+        $p = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d', '/s', '/v:off', '/c', ('"' + $commandLine + '"')) -Verb RunAs -Wait -PassThru
+    } else {
+        $startArgs = @{
+            FilePath = $Command[0]
+            Verb = 'RunAs'
+            Wait = $true
+            PassThru = $true
+        }
+        if ($Command.Count -gt 1) {
+            $rest = [string[]]$Command[1..($Command.Count - 1)]
+            $startArgs.ArgumentList = [AdminLauncher]::BuildArgvCommandLine($rest)
+        }
+        $p = Start-Process @startArgs
+    }
 } catch {
     Write-Error "Elevation was cancelled or failed: $($_.Exception.Message)"
     exit 1

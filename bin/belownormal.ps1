@@ -155,7 +155,13 @@ public static class BelowNormalLauncher
             }
 
             string cmdExe = Environment.SystemDirectory + "\\cmd.exe";
-            var shellCommandLine = new StringBuilder("\"" + cmdExe + "\" /c " + cmdExeCommandLine);
+            // /d: skip HKCU AutoRun (user-writable registry key). /v:off: disable delayed
+            // expansion so "!var!" in an argument can't be expanded. /s plus the extra outer
+            // quote pair: cmd's /S rule strips exactly that outer pair and leaves the rest of
+            // the string untouched - without /S, cmd strips the first and last quote of the
+            // whole line instead, which breaks quoting whenever the target path itself needs
+            // quotes AND another argument is also quoted.
+            var shellCommandLine = new StringBuilder("\"" + cmdExe + "\" /d /v:off /s /c \"" + cmdExeCommandLine + "\"");
             created = CreateProcess(null, shellCommandLine, IntPtr.Zero, IntPtr.Zero, true,
                 priorityClass, IntPtr.Zero, null, ref si, out pi);
             if (!created)

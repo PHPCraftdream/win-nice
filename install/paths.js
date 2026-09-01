@@ -35,24 +35,75 @@ function removeFromPathString(currentPath, dir) {
   return parts.filter((p) => normalize(p) !== normalize(dir)).join(';');
 }
 
-// Real registry reads/writes - via [Environment]::...('User') rather than `setx`,
-// which truncates PATH silently past ~1024 chars. Not covered by unit tests;
-// addToPathString/removeFromPathString carry the actual logic and are.
+function runPowershell(script, extraEnv) {
+  return execFileSync('powershell', ['-NoProfile', '-Command', script], {
+    encoding: 'utf8',
+    env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
+  });
+}
+
+// Reads a registry string value without OEM-codepage corruption and without %VAR%
+// expansion. Stdout carries Base64 (pure ASCII, safe under any console code page)
+// instead of the raw value - PowerShell 5.1 writes redirected stdout in the console's
+// OEM code page, not UTF-8, which corrupts any non-ASCII character otherwise.
+// keyPath/valueName travel via env vars (UTF-16 on Windows) so they're never
+// re-encoded either. Exported standalone so tests can hit a scratch key, never Path.
+function readRegistryString(keyPath, valueName) {
+  const script = [
+    '$v = (Get-Item -LiteralPath $env:WIN_NICE_REG_KEY).GetValue(',
+    '  $env:WIN_NICE_REG_VALUE, \'\', \'DoNotExpandEnvironmentNames\')',
+    '[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$v))',
+  ].join('\n');
+  const out = runPowershell(script, { WIN_NICE_REG_KEY: keyPath, WIN_NICE_REG_VALUE: valueName });
+  return Buffer.from(out.trim(), 'base64').toString('utf8');
+}
+
+// Writes a registry string value, preserving REG_EXPAND_SZ if that was already the
+// value's kind (so %VAR% entries like WindowsApps survive a round trip instead of
+// being frozen into literals). Creates the key if missing, for scratch-key tests.
+function writeRegistryString(keyPath, valueName, value) {
+  const script = [
+    'if (-not (Test-Path -LiteralPath $env:WIN_NICE_REG_KEY)) {',
+    '  New-Item -Path $env:WIN_NICE_REG_KEY -Force | Out-Null',
+    '}',
+    '$kind = \'String\'',
+    'try {',
+    '  if ((Get-Item -LiteralPath $env:WIN_NICE_REG_KEY).GetValueKind($env:WIN_NICE_REG_VALUE) -eq [Microsoft.Win32.RegistryValueKind]::ExpandString) {',
+    '    $kind = \'ExpandString\'',
+    '  }',
+    '} catch {}',
+    'Set-ItemProperty -LiteralPath $env:WIN_NICE_REG_KEY -Name $env:WIN_NICE_REG_VALUE -Value $env:WIN_NICE_REG_NEW_VALUE -Type $kind',
+  ].join('\n');
+  runPowershell(script, {
+    WIN_NICE_REG_KEY: keyPath,
+    WIN_NICE_REG_VALUE: valueName,
+    WIN_NICE_REG_NEW_VALUE: value,
+  });
+}
+
+// A raw registry write (unlike [Environment]::SetEnvironmentVariable) doesn't notify
+// running processes. Broadcast WM_SETTINGCHANGE so Explorer/new shells pick it up.
+function broadcastEnvironmentChange() {
+  const script = [
+    'Add-Type -Namespace WinNice -Name NativeMethods -MemberDefinition \'[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);\'',
+    '$result = [UIntPtr]::Zero',
+    '[WinNice.NativeMethods]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null',
+  ].join('\n');
+  runPowershell(script);
+}
+
+const USER_ENV_KEY = 'HKCU:\\Environment';
+
+// Real registry reads/writes - via the registry directly rather than
+// [Environment]::...('User') (OEM-codepage + expansion pitfalls, see
+// readRegistryString) or `setx` (truncates PATH silently past ~1024 chars).
 function readUserPath() {
-  const out = execFileSync(
-    'powershell',
-    ['-NoProfile', '-Command', "[Environment]::GetEnvironmentVariable('Path','User')"],
-    { encoding: 'utf8' }
-  );
-  return out.replace(/\r?\n$/, '');
+  return readRegistryString(USER_ENV_KEY, 'Path');
 }
 
 function writeUserPath(newPath) {
-  execFileSync(
-    'powershell',
-    ['-NoProfile', '-Command', "[Environment]::SetEnvironmentVariable('Path', $env:WIN_NICE_NEW_PATH, 'User')"],
-    { env: { ...process.env, WIN_NICE_NEW_PATH: newPath } }
-  );
+  writeRegistryString(USER_ENV_KEY, 'Path', newPath);
+  broadcastEnvironmentChange();
 }
 
 module.exports = {
@@ -63,4 +114,6 @@ module.exports = {
   removeFromPathString,
   readUserPath,
   writeUserPath,
+  readRegistryString,
+  writeRegistryString,
 };
