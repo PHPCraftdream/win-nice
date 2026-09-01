@@ -178,13 +178,13 @@ Describe 'belownormal.ps1' {
     }
 }
 
-# realtime is downgraded to High without SeIncreaseBasePriorityPrivilege (elevated
-# processes have it by default) - this test runner isn't elevated, so it expects
-# the same downgraded result as "high". See README for why.
+# realtime is downgraded to High without SeIncreaseBasePriorityPrivilege - elevated
+# processes have it by default, unelevated ones don't - so the expectation follows
+# $script:isAdminRunner rather than a hardcoded literal. See README for why.
 $priorityTools = @(
     @{ Name = 'abovenormal'; Expected = 'AboveNormal' }
     @{ Name = 'high'; Expected = 'High' }
-    @{ Name = 'realtime'; Expected = 'High' }
+    @{ Name = 'realtime'; Expected = if ($script:isAdminRunner) { 'RealTime' } else { 'High' } }
 )
 
 Describe 'abovenormal.bat / high.bat / realtime.bat' {
@@ -427,6 +427,41 @@ Write-Output ("{0:N1}" -f $pct)
         if (-not $passed) { Write-Host "last attempt: baseline=$lastBaseline capped=$lastCapped cap=$cap" }
         $passed | Should Be $true
         Remove-Item $burnFile -ErrorAction SilentlyContinue
+    }
+}
+
+# Table-driven regression test for the "%"-fail-closed check added in b572594: each
+# launcher's embedded C# Run() throws before ever calling CreateProcess when the
+# cmd.exe fallback branch (.bat/.cmd target) sees an argument containing "%". Must
+# invoke the .ps1 directly, not the .bat wrapper - the .bat wrapper corrupts a
+# literal "%" itself before .ps1 ever runs (see the "known limitation" tests above),
+# which would test the wrong layer. Marker-file-on-success (same technique as the
+# cap.ps1 "fallback path" test above) proves the target never actually launched.
+$fallbackPercentTools = @(
+    @{ Name = 'idle'; Prefix = @() }
+    @{ Name = 'belownormal'; Prefix = @() }
+    @{ Name = 'abovenormal'; Prefix = @() }
+    @{ Name = 'high'; Prefix = @() }
+    @{ Name = 'realtime'; Prefix = @() }
+    @{ Name = 'cap'; Prefix = @('50') }
+    @{ Name = 'pint'; Prefix = @('1') }
+)
+
+Describe '%-fail-closed on the cmd.exe fallback path' {
+    It 'refuses to run and never launches the target when an argument contains "%" (<Name>)' -TestCases $fallbackPercentTools {
+        param($Name, $Prefix)
+        $marker = New-TempFile
+        Remove-Item $marker -ErrorAction SilentlyContinue
+        $targetBat = New-TempScript
+        $targetBat = $targetBat.Replace('.ps1', '.bat')
+        Set-Content -Path $targetBat -Value "@echo off`r`n(echo ran)>`"$marker`"`r`n"
+        $ps1 = Join-Path $bin "$Name.ps1"
+        $stderr = & powershell -NoProfile -File $ps1 @Prefix $targetBat '100%OFF' 2>&1
+        $exitCode = $LASTEXITCODE
+        $exitCode | Should Be 1
+        ($stderr | Out-String) | Should Match '%'
+        Test-Path $marker | Should Be $false
+        Remove-Item $targetBat, $marker -ErrorAction SilentlyContinue
     }
 }
 

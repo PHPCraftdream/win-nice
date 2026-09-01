@@ -20,27 +20,39 @@ none of the tools themselves need Node.js to run.
 Every tool tries to launch the wrapped command directly first (`CreateProcess`,
 no shell involved at all) and only falls back to `cmd.exe /c` when the target
 turns out to be a `.bat`/`.cmd` file or a cmd.exe builtin that genuinely needs
-one. On the direct path, arguments are immune to cmd.exe's special characters
-entirely — `&`, `|`, `<`, `>`, `^`, `%`, quotes, spaces, empty strings all pass
-through exactly as given, standard MSVCRT/`CommandLineToArgvW` quoting. On the
-`cmd.exe /c` fallback path, `&|<>^`/quotes/spaces/empty strings are still fully
-protected, but a literal `%` can still trigger environment-variable expansion —
-cmd.exe pairs up `%` characters across the *entire* command line, even across
-separate arguments. There's no reliable per-character escape for that at the
-`cmd.exe /c` level; it's an inherent limitation shared by anything that shells
-out through cmd.exe (Node's own `child_process` included).
+one.
 
-**Separately:** each tool ships as a pair — `name.bat` and `name.ps1`. Invoking
-the bare name (`cap ...`, no extension) from an actual PowerShell session
-resolves to the `.ps1` and gets the full argument safety described above.
-Invoking it from `cmd.exe`, or however a program like Node's `child_process`
-resolves a bare command on Windows (PATHEXT-based, which doesn't include
-`.PS1` by default), lands on the `.bat` file instead — and a `.bat` file
-corrupts any literal `%` in its own arguments before your command ever runs at
-all, confirmed with nothing more than a bare `echo %1` in a plain `.bat`. This
-is cmd.exe's own batch-parameter substitution rescanning for `%...%` patterns
-across the whole line; there's no fix for it from inside a `.bat` file. Every
-other special character (`&|<>^`) survives this hop untouched.
+**Direct-launch path** (the common case: the target is a real `.exe`): arguments
+are immune to cmd.exe's special characters entirely — `&`, `|`, `<`, `>`, `^`,
+`%`, quotes, spaces, empty strings all pass through exactly as given, standard
+MSVCRT/`CommandLineToArgvW` quoting. cmd.exe is never invoked on this path, so
+there's nothing to expand.
+
+**`cmd.exe /c` fallback path** (only reached for `.bat`/`.cmd` targets or
+cmd.exe builtins): `&|<>^`/quotes/spaces/empty strings are still fully
+protected. A literal `%` used to be able to trigger environment-variable
+expansion here — cmd.exe pairs up `%` characters across the *entire* command
+line, even across separate arguments, and there's no reliable per-character
+escape for that at the `cmd.exe /c` level. Rather than risk that, this path now
+**fails closed**: if any argument contains `%`, the tool refuses to run,
+prints an error to stderr, and exits with code `1` — the command never reaches
+cmd.exe. This is a change from just checking for the character; it's a hard
+reject, not a best-effort escape.
+
+**Separately, and unaffected by the fail-closed fix above:** each tool ships
+as a pair — `name.bat` and `name.ps1`. Invoking the bare name (`cap ...`, no
+extension) from an actual PowerShell session resolves to the `.ps1` and gets
+the full argument handling described above. Invoking it from `cmd.exe`, or
+however a program like Node's `child_process` resolves a bare command on
+Windows (PATHEXT-based, which doesn't include `.PS1` by default), lands on the
+`.bat` file instead — and a `.bat` file corrupts any literal `%` in its own
+arguments before your command, and before `.ps1`, ever runs at all, confirmed
+with nothing more than a bare `echo %1` in a plain `.bat`. This is cmd.exe's
+own batch-parameter substitution (`%1`/`%*`) rescanning for `%...%` patterns
+across the whole line while parsing the `.bat` entry point itself; there's no
+fix for it from inside a `.bat` file, and it happens before the `.ps1` (and
+its fail-closed `%` check) ever sees the arguments. Every other special
+character (`&|<>^`) survives this hop untouched.
 
 ## Tools
 

@@ -36,9 +36,16 @@ function main() {
       break;
     case 'skill': {
       const sub = process.argv[3];
-      if (sub === 'install') installSkill();
-      else if (sub === 'uninstall') uninstallSkill();
-      else {
+      if (sub === 'install') {
+        const results = installSkill();
+        if (results.some((r) => !r.installed)) process.exitCode = 1;
+      } else if (sub === 'uninstall') {
+        const results = uninstallSkill();
+        // 'missing' (nothing to remove) isn't a failure; a stripped/foreign
+        // marker (skip-due-to-conflict) is - it means removal didn't happen
+        // when a real file was there.
+        if (results.some((r) => !r.removed && r.reason !== 'missing')) process.exitCode = 1;
+      } else {
         console.error(`unknown skill command: ${sub}`);
         console.error('usage: win-nice skill <install|uninstall>');
         process.exitCode = 1;

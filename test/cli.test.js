@@ -118,3 +118,42 @@ test('cli rejects an unknown skill subcommand', () => {
     assert.match(res.stderr, /unknown skill command/);
   });
 });
+
+test('cli skill install exits nonzero when a target is skipped (foreign file present)', () => {
+  withSkillHome((home) => {
+    const claudeTarget = path.join(home, '.claude', 'skills', 'win-nice', 'SKILL.md');
+    fs.mkdirSync(path.dirname(claudeTarget), { recursive: true });
+    fs.writeFileSync(claudeTarget, 'not ours');
+
+    const res = runSkill(['install'], home);
+    assert.notEqual(res.status, 0);
+    assert.match(res.stdout, /skipped/);
+  });
+});
+
+test('cli skill install exits 0 on a clean install with no conflicts', () => {
+  withSkillHome((home) => {
+    const res = runSkill(['install'], home);
+    assert.equal(res.status, 0, res.stderr);
+  });
+});
+
+test('cli skill uninstall exits nonzero when a target was modified by the user (marker missing)', () => {
+  withSkillHome((home) => {
+    runSkill(['install'], home);
+    const claudeTarget = path.join(home, '.claude', 'skills', 'win-nice', 'SKILL.md');
+    fs.writeFileSync(claudeTarget, 'user replaced this file');
+
+    const res = runSkill(['uninstall'], home);
+    assert.notEqual(res.status, 0);
+    assert.match(res.stdout, /skipped/);
+  });
+});
+
+test('cli skill uninstall exits 0 for a normal uninstall of a clean install', () => {
+  withSkillHome((home) => {
+    runSkill(['install'], home);
+    const res = runSkill(['uninstall'], home);
+    assert.equal(res.status, 0, res.stderr);
+  });
+});
