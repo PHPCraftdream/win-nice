@@ -459,7 +459,7 @@ Describe '%-fail-closed on the cmd.exe fallback path' {
         $stderr = & powershell -NoProfile -File $ps1 @Prefix $targetBat '100%OFF' 2>&1
         $exitCode = $LASTEXITCODE
         $exitCode | Should Be 1
-        ($stderr | Out-String) | Should Match '%'
+        ($stderr | Out-String) | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
         Test-Path $marker | Should Be $false
         Remove-Item $targetBat, $marker -ErrorAction SilentlyContinue
     }
@@ -558,9 +558,24 @@ Describe 'admin.bat' {
     }
 
     It 'preserves cmd.exe metacharacters and "%" on the direct-launch path when already elevated' -Skip:(-not $script:isAdminRunner) {
-        $r = Get-ForwardedArgs -Exe (Join-Path $bin 'admin.bat') -ProbeArgs @('A&B', 'A|B', '100%OFF')
+        # Must drive admin.ps1 directly (Get-DirectForwardedArgs), not admin.bat
+        # (Get-ForwardedArgs) - admin.bat's own %* forwarding corrupts a literal "%"
+        # before admin.ps1 ever runs, same as every other tool's .bat wrapper (see
+        # admin.bat's own comment). This test is about the .ps1's direct-launch path,
+        # which only bare-name PowerShell invocation reaches.
+        $r = Get-DirectForwardedArgs -Ps1 (Join-Path $bin 'admin.ps1') -ProbeArgs @('A&B', 'A|B', '100%OFF')
         $r.ExitCode | Should Be 0
         $r.Output | Should Be 'A&B|SEP|A|B|SEP|100%OFF'
+    }
+
+    It 'refuses to run and never attempts elevation when an argument contains "%" (not-yet-elevated branch)' -Skip:$script:isAdminRunner {
+        # This check runs directly in PowerShell before Start-Process -Verb RunAs is
+        # ever called (see admin.ps1), so no UAC consent prompt is at risk here - if
+        # this ever hangs, the check moved past the RunAs call and needs investigating.
+        $stderr = & powershell -NoProfile -File (Join-Path $bin 'admin.ps1') cmd /c '100%OFF' 2>&1
+        $exitCode = $LASTEXITCODE
+        $exitCode | Should Be 1
+        ($stderr | Out-String) | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
     }
 }
 
@@ -583,14 +598,14 @@ function Test-FakeLauncher {
     $prevPath = $env:PATH
     $env:PATH = "$fakeDir;$env:PATH"
     try {
-        & powershell -NoProfile -File $Ps1 @ExtraArgs | Out-Null
+        $stderr = & powershell -NoProfile -File $Ps1 @ExtraArgs 2>&1 | Out-String
         $exitCode = $LASTEXITCODE
     } finally {
         $env:PATH = $prevPath
     }
     $result = if (Test-Path $out) { (Get-Content $out).Trim() } else { $null }
     Remove-Item $fakeDir -Recurse -ErrorAction SilentlyContinue
-    return [PSCustomObject]@{ Output = $result; ExitCode = $exitCode }
+    return [PSCustomObject]@{ Output = $result; ExitCode = $exitCode; StdErr = $stderr }
 }
 
 Describe 'cy.ps1' {
@@ -599,6 +614,15 @@ Describe 'cy.ps1' {
         $r.ExitCode | Should Be 0
         $r.Output | Should Be '--dangerously-skip-permissions -p "A&B"'
     }
+
+    It 'refuses to run and never launches the target when an argument contains "%" (cmd.exe fallback path)' {
+        # Fake claude.bat forces the .bat/.cmd fallback branch in cy.ps1's embedded
+        # C# Run(), the same code path covered by the table-driven test above.
+        $r = Test-FakeLauncher -Ps1 (Join-Path $bin 'cy.ps1') -FakeTargetName 'claude.bat' -ExtraArgs @('100%OFF')
+        $r.ExitCode | Should Be 1
+        $r.StdErr | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
+        $r.Output | Should Be $null
+    }
 }
 
 Describe 'cx.ps1' {
@@ -606,6 +630,13 @@ Describe 'cx.ps1' {
         $r = Test-FakeLauncher -Ps1 (Join-Path $bin 'cx.ps1') -FakeTargetName 'codex.bat' -ExtraArgs @('-p', 'A&B')
         $r.ExitCode | Should Be 0
         $r.Output | Should Be '--dangerously-bypass-approvals-and-sandbox -p "A&B"'
+    }
+
+    It 'refuses to run and never launches the target when an argument contains "%" (cmd.exe fallback path)' {
+        $r = Test-FakeLauncher -Ps1 (Join-Path $bin 'cx.ps1') -FakeTargetName 'codex.bat' -ExtraArgs @('100%OFF')
+        $r.ExitCode | Should Be 1
+        $r.StdErr | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
+        $r.Output | Should Be $null
     }
 }
 

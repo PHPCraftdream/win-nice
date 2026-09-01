@@ -239,6 +239,12 @@ there without the `win-nice: managed-skill` marker comment (reports it as
 skipped rather than clobbering it), and `uninstall` only removes a copy that
 still carries that marker.
 
+Exit code reflects this: `install`/`uninstall` exit 1 if any target was
+skipped due to a real conflict (foreign file present for `install`;
+marker-stripped/user-modified file for `uninstall`). A clean install/uninstall
+exits 0, and so does `uninstall` finding nothing to remove — a missing target
+isn't a conflict.
+
 ## Requirements
 
 Windows 8 / Server 2012 or newer (Job Object CPU rate control). PowerShell is

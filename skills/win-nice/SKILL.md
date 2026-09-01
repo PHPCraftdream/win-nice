@@ -70,24 +70,31 @@ no race window), including anything it spawns, recursively.
 
 Every tool tries to launch the wrapped command directly first (no shell
 involved) and only falls back to `cmd.exe /c` when the target is a `.bat`/
-`.cmd` file or a cmd.exe builtin that genuinely needs one. On the direct path,
-`&`, `|`, `<`, `>`, `^`, `%`, quotes, spaces, and empty strings all pass through
-exactly as given. On the `cmd.exe /c` fallback path, `&|<>^`/quotes/spaces are
-still fully protected, but a literal `%` can still trigger environment-variable
-expansion — there's no reliable per-character escape for that at the
-`cmd.exe /c` level (a limitation shared by anything that shells through
-cmd.exe, Node's own `child_process` included).
+`.cmd` file or a cmd.exe builtin that genuinely needs one.
 
-One more gotcha, independent of the above: each tool ships as a `name.bat` /
-`name.ps1` pair. Invoking the bare name from an actual PowerShell session
-resolves to the `.ps1` and gets full argument safety. Invoking it from
-`cmd.exe`, or via PATHEXT-based resolution the way Node's `child_process` (and
-most non-PowerShell launchers) resolve a bare command on Windows — PATHEXT
-doesn't include `.PS1` by default — lands on the `.bat` file instead, which
-corrupts any literal `%` in its arguments before the command ever runs at all
-(cmd.exe's own batch-parameter substitution rescanning for `%...%` patterns;
-not fixable from inside a `.bat`). Every other special character survives that
-hop untouched.
+**Direct-launch path** (the common case: a real `.exe`): `&`, `|`, `<`, `>`,
+`^`, `%`, quotes, spaces, and empty strings all pass through exactly as
+given — cmd.exe is never invoked, so there's nothing to expand.
+
+**`cmd.exe /c` fallback path** (`.bat`/`.cmd` targets or cmd.exe builtins
+only): `&|<>^`/quotes/spaces/empty strings are still fully protected. A
+literal `%` used to be able to trigger environment-variable expansion here;
+there's no reliable per-character escape for that at the `cmd.exe /c` level.
+This path now **fails closed** instead: if any argument contains `%`, the
+tool refuses to run, prints an error to stderr, and exits with code `1` — the
+command never reaches cmd.exe.
+
+**Separately, and unaffected by the fail-closed fix above:** each tool ships
+as a `name.bat` / `name.ps1` pair. Invoking the bare name from an actual
+PowerShell session resolves to the `.ps1` and gets the full argument safety
+above. Invoking it from `cmd.exe`, or via PATHEXT-based resolution the way
+Node's `child_process` (and most non-PowerShell launchers) resolve a bare
+command on Windows — PATHEXT doesn't include `.PS1` by default — lands on the
+`.bat` file instead, which corrupts any literal `%` in its arguments before
+the command, and before `.ps1` (and its fail-closed `%` check), ever runs at
+all (cmd.exe's own batch-parameter substitution rescanning for `%...%`
+patterns while parsing the `.bat` entry point itself; not fixable from inside
+a `.bat`). Every other special character survives that hop untouched.
 
 ## Install / manage
 
