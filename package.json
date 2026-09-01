@@ -1,0 +1,36 @@
+{
+  "name": "win-nice",
+  "version": "0.1.0",
+  "description": "Windows nice/renice/cpulimit for parallel AI coding agents - idle/belownormal priority, hard CPU quotas via Job Objects, and a UI responsiveness boost, with no dependencies.",
+  "license": "MIT OR Apache-2.0",
+  "os": [
+    "win32"
+  ],
+  "bin": {
+    "win-nice": "install/cli.js"
+  },
+  "files": [
+    "bin",
+    "install",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
+  "scripts": {
+    "postinstall": "node install/cli.js install",
+    "preuninstall": "node install/cli.js uninstall",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "windows",
+    "priority",
+    "cpu",
+    "job-object",
+    "nice",
+    "cpulimit",
+    "agents"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
