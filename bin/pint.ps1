@@ -2,30 +2,25 @@
 # win-nice: managed-file
 # Deliberately no param()/[CmdletBinding()]: a declared parameter name (even
 # without a [Parameter()] attribute) can still be ambiguously prefix-matched by
-# flags meant for the wrapped command (e.g. "-p" matching "-Percent"). Reading
+# flags meant for the wrapped command (e.g. "-c" matching "-Count"). Reading
 # everything from $args sidesteps PowerShell's parameter binder entirely.
+$processorCount = [Environment]::ProcessorCount
+$maxCount = [Math]::Min($processorCount, 63)
 if ($args.Count -lt 2) {
-    Write-Error "usage: cap <percent 1-100> <command> [args...]"
+    Write-Error "usage: pint <thread-count 1-$maxCount> <command> [args...]"
     exit 1
 }
-$percentValue = 0
-if (-not [int]::TryParse($args[0], [ref]$percentValue) -or $percentValue -lt 1 -or $percentValue -gt 100) {
-    Write-Error "usage: cap <percent 1-100> <command> [args...]"
+$countValue = 0
+if (-not [int]::TryParse($args[0], [ref]$countValue) -or $countValue -lt 1 -or $countValue -gt $maxCount) {
+    Write-Error "usage: pint <thread-count 1-$maxCount> <command> [args...]"
     exit 1
 }
 $Command = @($args[1..($args.Count - 1)])
 
 # Fallback command line for when the target isn't a directly-launchable .exe (see
-# Capper.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
-# neutralize its operators (&|<>^) and not just whitespace, or e.g. "A&B" gets split
-# into two commands. NOTE: a literal "%" in an argument can still trigger cmd.exe
-# environment-variable expansion (e.g. "%PATH%") even when quoted, and cmd.exe pairs
-# up "%" characters across argument/quote boundaries - two unrelated arguments that
-# each contain one "%" can corrupt each other. There is no reliable per-character
-# escape for this at the cmd.exe /c level; it's a known, inherent limitation shared
-# by anything that shells out through cmd.exe (Node's own child_process included).
-# This fallback path only runs for .bat/.cmd/builtin targets - a direct .exe target
-# never goes through cmd.exe at all, so it isn't exposed to this limitation.
+# Pinner.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
+# neutralize its operators (&|<>^) and not just whitespace - see cap.ps1 for the
+# same logic and its documented "%" limitation.
 $commandLine = ($Command | ForEach-Object {
     $escaped = $_ -replace '"', '\"'
     if ($escaped -eq '' -or $escaped -match '[\s"&|<>^]') { '"' + $escaped + '"' } else { $escaped }
@@ -36,7 +31,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class Capper
+public static class Pinner
 {
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct STARTUPINFO
@@ -71,10 +66,17 @@ public static class Capper
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    struct JOBOBJECT_CPU_RATE_CONTROL_INFORMATION
+    struct JOBOBJECT_BASIC_LIMIT_INFORMATION
     {
-        public uint ControlFlags;
-        public uint CpuRate;
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
     }
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -108,9 +110,8 @@ public static class Capper
     static extern bool CloseHandle(IntPtr hObject);
 
     const uint CREATE_SUSPENDED = 0x00000004;
-    const int JobObjectCpuRateControlInformation = 15;
-    const uint JOB_OBJECT_CPU_RATE_CONTROL_ENABLE = 0x1;
-    const uint JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP = 0x4;
+    const int JobObjectBasicLimitInformation = 2;
+    const uint JOB_OBJECT_LIMIT_AFFINITY = 0x00000010;
 
     // Standard MSVCRT/CommandLineToArgvW quoting: safe for a directly-launched .exe's
     // own argv parsing. No cmd.exe involved on this path, so none of its operator or
@@ -153,21 +154,21 @@ public static class Capper
         return string.Join(" ", parts);
     }
 
-    public static int Run(int percent, string[] argv, string cmdExeCommandLine)
+    public static int Run(ulong affinityMask, string[] argv, string cmdExeCommandLine)
     {
         IntPtr hJob = CreateJobObject(IntPtr.Zero, null);
         if (hJob == IntPtr.Zero)
             throw new InvalidOperationException("CreateJobObject failed: " + Marshal.GetLastWin32Error());
 
-        var cpuInfo = new JOBOBJECT_CPU_RATE_CONTROL_INFORMATION
+        var limitInfo = new JOBOBJECT_BASIC_LIMIT_INFORMATION
         {
-            ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
-            CpuRate = (uint)(percent * 100)
+            LimitFlags = JOB_OBJECT_LIMIT_AFFINITY,
+            Affinity = (UIntPtr)affinityMask
         };
-        int size = Marshal.SizeOf(cpuInfo);
+        int size = Marshal.SizeOf(limitInfo);
         IntPtr ptr = Marshal.AllocHGlobal(size);
-        Marshal.StructureToPtr(cpuInfo, ptr, false);
-        bool ok = SetInformationJobObject(hJob, JobObjectCpuRateControlInformation, ptr, (uint)size);
+        Marshal.StructureToPtr(limitInfo, ptr, false);
+        bool ok = SetInformationJobObject(hJob, JobObjectBasicLimitInformation, ptr, (uint)size);
         Marshal.FreeHGlobal(ptr);
         if (!ok)
         {
@@ -179,15 +180,9 @@ public static class Capper
         si.cb = Marshal.SizeOf(si);
         PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
 
-        // Try launching the target directly first (no shell at all) - unless it's a
-        // .bat/.cmd file. CreateProcess has an undocumented-but-real fallback of its
-        // own for those: instead of failing, it silently re-invokes them through
-        // cmd.exe using OUR unescaped argv text (ArgvQuote only protects CRT argv
-        // parsing, not cmd.exe's operators), reopening the exact "A&B" splits this
-        // whole file exists to prevent. A bare name with no extension is safe either
-        // way: CreateProcess only ever auto-appends ".exe" to it, never ".bat/.cmd",
-        // so it fails cleanly (ERROR_FILE_NOT_FOUND) when only a same-named .bat/.cmd
-        // exists, and falls through to the escaped path below.
+        // See cap.ps1 for why .bat/.cmd targets skip the direct attempt entirely:
+        // CreateProcess silently re-invokes them through cmd.exe on its own, using
+        // unescaped text, instead of failing the way a genuinely missing exe would.
         bool isBatOrCmd = argv.Length > 0 && (
             argv[0].EndsWith(".bat", StringComparison.OrdinalIgnoreCase) ||
             argv[0].EndsWith(".cmd", StringComparison.OrdinalIgnoreCase));
@@ -215,7 +210,7 @@ public static class Capper
 
         if (!AssignProcessToJobObject(hJob, pi.hProcess))
         {
-            // Can't guarantee the cap - kill instead of letting it run uncapped and orphaned.
+            // Can't guarantee the pin - kill instead of letting it run unpinned and orphaned.
             int err = Marshal.GetLastWin32Error();
             TerminateProcess(pi.hProcess, 1);
             CloseHandle(pi.hThread);
@@ -241,5 +236,8 @@ public static class Capper
 
 Add-Type -TypeDefinition $source -Language CSharp
 
-$exitCode = [Capper]::Run($percentValue, [string[]]$Command, $commandLine)
+# First $countValue logical processors, i.e. threads - not physical cores. See
+# README. Bit-shift, not [Math]::Pow: doubles can't exactly represent 2^63.
+$affinityMask = ([uint64]1 -shl $countValue) - [uint64]1
+$exitCode = [Pinner]::Run($affinityMask, [string[]]$Command, $commandLine)
 exit $exitCode

@@ -1,36 +1,24 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 # win-nice: managed-file
-$Command = $args
-# Deliberately no [Parameter()]/[CmdletBinding()] attributes: see cap.ps1 for why -
-# it would expose PowerShell's common parameters and make them ambiguously
-# prefix-match flags meant for the wrapped command.
+# No param(): $args sidesteps PowerShell's parameter binder entirely - see
+# cap.ps1 for why that matters (claude's own flags shouldn't get bound here).
+$Command = @('claude', '--dangerously-skip-permissions') + @($args)
 
-if (-not $Command -or $Command.Count -eq 0) {
-    Write-Error "usage: admin <command> [args...]"
-    exit 1
-}
-
-# Fallback command line for the UAC (-Verb RunAs) branch, and for the inline branch
-# when the target isn't a directly-launchable .exe (see Runner.Run below) - re-parsed
-# by cmd.exe, so quoting must neutralize its operators (&|<>^) and not just
-# whitespace - see cap.ps1 for the same logic and its documented "%" limitation.
+# Fallback command line for when claude isn't a directly-launchable .exe (it's
+# typically an npm-installed .cmd shim on Windows) - see Launcher.Run below and
+# cap.ps1 for the same logic and its documented "%" limitation. cy.bat has its own,
+# more severe "%" caveat (see there) that applies before this script ever runs.
 $commandLine = ($Command | ForEach-Object {
     $escaped = $_ -replace '"', '\"'
     if ($escaped -eq '' -or $escaped -match '[\s"&|<>^]') { '"' + $escaped + '"' } else { $escaped }
 }) -join ' '
 
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-
-if ($isAdmin) {
-    # Already elevated - launch inline, sharing the current console. Same
-    # direct-CreateProcess-first, cmd.exe-fallback strategy as cap.ps1: a direct .exe
-    # target never touches cmd.exe, so it isn't exposed to "%" expansion at all.
-    $source = @"
+$source = @"
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class Runner
+public static class Launcher
 {
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct STARTUPINFO
@@ -79,6 +67,9 @@ public static class Runner
     [DllImport("kernel32.dll")]
     static extern bool CloseHandle(IntPtr hObject);
 
+    // Standard MSVCRT/CommandLineToArgvW quoting: safe for a directly-launched .exe's
+    // own argv parsing. No cmd.exe involved on this path, so none of its operator or
+    // "%" expansion semantics apply - this is the safe path, used whenever possible.
     static string ArgvQuote(string arg)
     {
         if (arg.Length > 0 && arg.IndexOfAny(new char[] { ' ', '\t', '\n', '\v', '"' }) < 0)
@@ -123,6 +114,12 @@ public static class Runner
         si.cb = Marshal.SizeOf(si);
         PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
 
+        // See cap.ps1 for why .bat/.cmd targets skip the direct attempt entirely:
+        // CreateProcess silently re-invokes them through cmd.exe on its own, using
+        // unescaped text, instead of failing the way a genuinely missing exe would.
+        // A bare name like "claude" (typically an npm .cmd shim on Windows) isn't
+        // caught by that check, but CreateProcess only ever auto-appends ".exe" to
+        // it, so it fails cleanly here and falls through to the escaped path below.
         bool isBatOrCmd = argv.Length > 0 && (
             argv[0].EndsWith(".bat", StringComparison.OrdinalIgnoreCase) ||
             argv[0].EndsWith(".cmd", StringComparison.OrdinalIgnoreCase));
@@ -157,24 +154,8 @@ public static class Runner
     }
 }
 "@
-    Add-Type -TypeDefinition $source -Language CSharp
-    try {
-        exit ([Runner]::Run([string[]]$Command, $commandLine))
-    } catch {
-        Write-Error $_.Exception.Message
-        exit 1
-    }
-}
 
-# Not elevated - -Verb RunAs triggers the UAC consent prompt. ShellExecute-based,
-# not CreateProcess, so this always opens its own console window (incompatible with
-# -NoNewWindow) and always goes through cmd.exe /c with the escaped command line
-# above, rather than the direct-launch path used in the already-elevated branch.
-try {
-    $p = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $commandLine) -Verb RunAs -Wait -PassThru
-} catch {
-    Write-Error "Elevation was cancelled or failed: $($_.Exception.Message)"
-    exit 1
-}
+Add-Type -TypeDefinition $source -Language CSharp
 
-exit $p.ExitCode
+$exitCode = [Launcher]::Run([string[]]$Command, $commandLine)
+exit $exitCode

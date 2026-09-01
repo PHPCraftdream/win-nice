@@ -1,36 +1,34 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 # win-nice: managed-file
+# DANGEROUS: REALTIME_PRIORITY_CLASS outranks the OS's own input/audio/UI threads.
+# A busy realtime-priority process can make the desktop (mouse, keyboard, everything)
+# stop responding - the exact failure mode this whole project exists to prevent. See
+# README before using this.
+# No param(): nothing here needs a named parameter, and $args sidesteps
+# PowerShell's parameter binder entirely - see cap.ps1 for why that matters.
 $Command = $args
-# Deliberately no [Parameter()]/[CmdletBinding()] attributes: see cap.ps1 for why -
-# it would expose PowerShell's common parameters and make them ambiguously
-# prefix-match flags meant for the wrapped command.
 
 if (-not $Command -or $Command.Count -eq 0) {
-    Write-Error "usage: admin <command> [args...]"
+    Write-Error "usage: realtime <command> [args...]"
     exit 1
 }
 
-# Fallback command line for the UAC (-Verb RunAs) branch, and for the inline branch
-# when the target isn't a directly-launchable .exe (see Runner.Run below) - re-parsed
-# by cmd.exe, so quoting must neutralize its operators (&|<>^) and not just
-# whitespace - see cap.ps1 for the same logic and its documented "%" limitation.
+# Fallback command line for when the target isn't a directly-launchable .exe (see
+# Launcher.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
+# neutralize its operators (&|<>^) and not just whitespace - see cap.ps1 for the
+# same logic and its documented "%" limitation. realtime.bat has its own, more
+# severe "%" caveat (see there) that applies before this script ever runs.
 $commandLine = ($Command | ForEach-Object {
     $escaped = $_ -replace '"', '\"'
     if ($escaped -eq '' -or $escaped -match '[\s"&|<>^]') { '"' + $escaped + '"' } else { $escaped }
 }) -join ' '
 
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-
-if ($isAdmin) {
-    # Already elevated - launch inline, sharing the current console. Same
-    # direct-CreateProcess-first, cmd.exe-fallback strategy as cap.ps1: a direct .exe
-    # target never touches cmd.exe, so it isn't exposed to "%" expansion at all.
-    $source = @"
+$source = @"
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class Runner
+public static class Launcher
 {
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct STARTUPINFO
@@ -79,6 +77,9 @@ public static class Runner
     [DllImport("kernel32.dll")]
     static extern bool CloseHandle(IntPtr hObject);
 
+    // Standard MSVCRT/CommandLineToArgvW quoting: safe for a directly-launched .exe's
+    // own argv parsing. No cmd.exe involved on this path, so none of its operator or
+    // "%" expansion semantics apply - this is the safe path, used whenever possible.
     static string ArgvQuote(string arg)
     {
         if (arg.Length > 0 && arg.IndexOfAny(new char[] { ' ', '\t', '\n', '\v', '"' }) < 0)
@@ -117,12 +118,19 @@ public static class Runner
         return string.Join(" ", parts);
     }
 
-    public static int Run(string[] argv, string cmdExeCommandLine)
+    // Priority is passed via dwCreationFlags, applied atomically at creation - no
+    // Job Object needed. Windows' CreateProcess inherits IDLE/BELOW_NORMAL priority
+    // by default to children that don't request a priority of their own; REALTIME is
+    // NOT inherited by default (see README).
+    public static int Run(uint priorityClass, string[] argv, string cmdExeCommandLine)
     {
         var si = new STARTUPINFO();
         si.cb = Marshal.SizeOf(si);
         PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
 
+        // See cap.ps1 for why .bat/.cmd targets skip the direct attempt entirely:
+        // CreateProcess silently re-invokes them through cmd.exe on its own, using
+        // unescaped text, instead of failing the way a genuinely missing exe would.
         bool isBatOrCmd = argv.Length > 0 && (
             argv[0].EndsWith(".bat", StringComparison.OrdinalIgnoreCase) ||
             argv[0].EndsWith(".cmd", StringComparison.OrdinalIgnoreCase));
@@ -132,7 +140,7 @@ public static class Runner
         {
             var directCommandLine = new StringBuilder(BuildArgvCommandLine(argv));
             created = CreateProcess(null, directCommandLine, IntPtr.Zero, IntPtr.Zero, true,
-                0, IntPtr.Zero, null, ref si, out pi);
+                priorityClass, IntPtr.Zero, null, ref si, out pi);
         }
 
         if (!created)
@@ -140,7 +148,7 @@ public static class Runner
             string cmdExe = Environment.SystemDirectory + "\\cmd.exe";
             var shellCommandLine = new StringBuilder("\"" + cmdExe + "\" /c " + cmdExeCommandLine);
             created = CreateProcess(null, shellCommandLine, IntPtr.Zero, IntPtr.Zero, true,
-                0, IntPtr.Zero, null, ref si, out pi);
+                priorityClass, IntPtr.Zero, null, ref si, out pi);
             if (!created)
                 throw new InvalidOperationException("CreateProcess failed: " + Marshal.GetLastWin32Error());
         }
@@ -157,24 +165,9 @@ public static class Runner
     }
 }
 "@
-    Add-Type -TypeDefinition $source -Language CSharp
-    try {
-        exit ([Runner]::Run([string[]]$Command, $commandLine))
-    } catch {
-        Write-Error $_.Exception.Message
-        exit 1
-    }
-}
 
-# Not elevated - -Verb RunAs triggers the UAC consent prompt. ShellExecute-based,
-# not CreateProcess, so this always opens its own console window (incompatible with
-# -NoNewWindow) and always goes through cmd.exe /c with the escaped command line
-# above, rather than the direct-launch path used in the already-elevated branch.
-try {
-    $p = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $commandLine) -Verb RunAs -Wait -PassThru
-} catch {
-    Write-Error "Elevation was cancelled or failed: $($_.Exception.Message)"
-    exit 1
-}
+Add-Type -TypeDefinition $source -Language CSharp
 
-exit $p.ExitCode
+$REALTIME_PRIORITY_CLASS = 0x00000100
+$exitCode = [Launcher]::Run($REALTIME_PRIORITY_CLASS, [string[]]$Command, $commandLine)
+exit $exitCode

@@ -12,6 +12,7 @@
   "files": [
     "bin",
     "install",
+    "skills",
     "README.md",
     "LICENSE-MIT",
     "LICENSE-APACHE"

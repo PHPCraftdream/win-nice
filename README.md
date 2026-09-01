@@ -15,6 +15,33 @@ call the relevant Win32 APIs directly (Job Objects, process priority classes).
 npm is used only as a distribution/version channel and for the install CLI —
 none of the tools themselves need Node.js to run.
 
+## Argument handling
+
+Every tool tries to launch the wrapped command directly first (`CreateProcess`,
+no shell involved at all) and only falls back to `cmd.exe /c` when the target
+turns out to be a `.bat`/`.cmd` file or a cmd.exe builtin that genuinely needs
+one. On the direct path, arguments are immune to cmd.exe's special characters
+entirely — `&`, `|`, `<`, `>`, `^`, `%`, quotes, spaces, empty strings all pass
+through exactly as given, standard MSVCRT/`CommandLineToArgvW` quoting. On the
+`cmd.exe /c` fallback path, `&|<>^`/quotes/spaces/empty strings are still fully
+protected, but a literal `%` can still trigger environment-variable expansion —
+cmd.exe pairs up `%` characters across the *entire* command line, even across
+separate arguments. There's no reliable per-character escape for that at the
+`cmd.exe /c` level; it's an inherent limitation shared by anything that shells
+out through cmd.exe (Node's own `child_process` included).
+
+**Separately:** each tool ships as a pair — `name.bat` and `name.ps1`. Invoking
+the bare name (`cap ...`, no extension) from an actual PowerShell session
+resolves to the `.ps1` and gets the full argument safety described above.
+Invoking it from `cmd.exe`, or however a program like Node's `child_process`
+resolves a bare command on Windows (PATHEXT-based, which doesn't include
+`.PS1` by default), lands on the `.bat` file instead — and a `.bat` file
+corrupts any literal `%` in its own arguments before your command ever runs at
+all, confirmed with nothing more than a bare `echo %1` in a plain `.bat`. This
+is cmd.exe's own batch-parameter substitution rescanning for `%...%` patterns
+across the whole line; there's no fix for it from inside a `.bat` file. Every
+other special character (`&|<>^`) survives this hop untouched.
+
 ## Tools
 
 ### `idle <command> [args...]`
@@ -26,16 +53,79 @@ process doesn't request a priority of its own.
 ### `belownormal <command> [args...]`
 Same as `idle`, at `BELOW_NORMAL_PRIORITY_CLASS` — a lighter touch than idle.
 
+### `abovenormal <command> [args...]`
+Runs `command` at `ABOVE_NORMAL_PRIORITY_CLASS`, waits for it to exit, propagates
+its exit code.
+
+**Unlike `idle`/`belownormal`, this does *not* apply to the whole process tree** —
+confirmed empirically. Windows only inherits `IDLE`/`BELOW_NORMAL` priority into
+child processes by default; `ABOVE_NORMAL` and higher are not, so anything the
+wrapped command spawns runs back at ordinary `Normal` priority. Only useful when
+the command you're wrapping does the actual work itself rather than delegating to
+child processes.
+
+### `high <command> [args...]`
+Same as `abovenormal`, at `HIGH_PRIORITY_CLASS` — a stronger boost. Same
+single-process-only caveat applies.
+
+### `realtime <command> [args...]`
+Same shape, at `REALTIME_PRIORITY_CLASS`. **Dangerous, use with caution:**
+`REALTIME` outranks the OS's own input/audio/UI threads — a busy realtime-priority
+process can make the entire desktop (mouse, keyboard, everything) stop responding,
+which is the exact failure mode this project otherwise exists to prevent. It also
+needs the `SeIncreaseBasePriorityPrivilege` privilege (elevated/admin processes
+have it by default); without it, Windows doesn't error out, it silently downgrades
+the request to `HIGH_PRIORITY_CLASS` instead — confirmed empirically. Same
+single-process-only caveat as `abovenormal`/`high` applies on top of all that.
+
 ### `cap <percent> <command> [args...]`
 Hard CPU quota (1-100) for the whole process tree, enforced by a Windows Job
 Object (`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`, hard cap). Unlike `idle`/
 `belownormal`, this is a real ceiling on total CPU%, not just a scheduling
 priority — it holds even when nothing else on the machine is contending for CPU.
-Child processes are captured too (Windows nests job objects automatically since
-Windows 8). Blocks until the command exits, propagates its exit code.
+
+The cap covers the whole subtree from its very first instruction: the wrapped
+command is created suspended, assigned to the Job Object, and only then resumed
+— there's no window where it runs uncapped. Every process it spawns (and their
+children, recursively) automatically joins the same job; this is standard Job
+Object behavior on any supported Windows version, not something specific to
+newer ones. The only way out is a descendant explicitly requesting
+`CREATE_BREAKAWAY_FROM_JOB`, and since the job here never sets a
+breakaway-allowed flag, that fails closed — the child just fails to launch
+rather than silently escaping the cap.
+
+Windows 8+ specifically matters if something inside the wrapped command creates
+*its own* Job Object (some tools do, e.g. Chromium-based ones): before Windows 8
+a process could belong to only one job at a time, so that inner
+`AssignProcessToJobObject` call would fail. Windows 8+ allows nested jobs, so it
+succeeds instead, and both jobs' limits apply (whichever is more restrictive
+wins).
+
+Blocks until the command exits, propagates its exit code.
 
 ```
 cap 50 npm run build
+```
+
+### `pint <thread-count> <command> [args...]`
+Short for **pin threads**. Restricts the whole process tree to the first
+`<thread-count>` logical processors via Windows process affinity
+(`JOBOBJECT_BASIC_LIMIT_INFORMATION`, `JOB_OBJECT_LIMIT_AFFINITY`) — same
+suspend-then-assign-then-resume Job Object mechanism as `cap`, so the same
+"covers the whole subtree from the first instruction" and "breakaway fails
+closed" guarantees apply.
+
+Deliberately *threads*, not *cores*, in both the name and the semantics:
+Windows affinity masks address logical processors (hardware threads), not
+physical cores. On a machine with Hyper-Threading/SMT, `pint 4` pins to 4
+*logical processors* — depending on which ones, that could be 2 fully-used
+physical cores or 4 half-used ones; the affinity API has no concept of "whole
+core" grouping on its own. `<thread-count>` must be between 1 and the number
+of logical processors on the machine (`[Environment]::ProcessorCount`, capped
+at 63 — a single affinity mask can't address more).
+
+```
+pint 4 npm run build
 ```
 
 ### `uiup`
@@ -54,9 +144,12 @@ see the project history for the test.
 
 ### `admin <command> [args...]`
 Runs `command` elevated (as Administrator), waits for it to exit, propagates its
-exit code — the elevated equivalent of `idle`. Triggers the standard UAC consent
-prompt if the calling shell isn't already elevated; if it already is, runs directly
-with no extra prompt.
+exit code — the elevated equivalent of `idle`. If the calling shell isn't already
+elevated, triggers the standard UAC consent prompt (via `ShellExecute`, which
+always opens its own console window and always goes through the `cmd.exe /c`
+fallback path, never the direct-launch one — elevation has no direct-launch
+equivalent to use). If it's already elevated, runs inline sharing the current
+console, with the full direct-launch argument safety described above.
 
 ```
 admin npm install -g some-package
@@ -112,6 +205,21 @@ customization point. If the manifest itself is missing or corrupt, uninstall
 falls back to scanning the install directory and only removes files that still
 carry the `win-nice: managed-file` marker comment, so that scan doesn't delete
 unrelated files sitting in the same directory.
+
+### Claude Code / Codex skill
+
+```
+npx win-nice skill install     # add the win-nice reference skill
+npx win-nice skill uninstall   # remove it
+```
+
+Separate, opt-in install step — not run automatically by `postinstall`. Copies
+[`skills/win-nice/SKILL.md`](skills/win-nice/SKILL.md) (documents every tool
+above except `cy`/`cx`) to `~/.claude/skills/win-nice/SKILL.md` and
+`~/.codex/skills/win-nice/SKILL.md` — `SKILL.md` is a cross-agent format, so
+the same file works for both unmodified. `uninstall` only removes a copy that
+still carries the `win-nice: managed-skill` marker comment, same
+edited-files-survive contract as the marker-comment fallback above.
 
 ## Requirements
 

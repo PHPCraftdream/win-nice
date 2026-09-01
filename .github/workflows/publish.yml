@@ -20,15 +20,32 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
-      # OIDC trusted publishing needs a recent npm CLI (>=11.5).
-      - name: Update npm
-        run: npm install -g npm@latest
+      - name: Check tag matches package.json version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "Tag v$tag does not match package.json version $pkg" >&2
+            exit 1
+          fi
+
+      # OIDC trusted publishing needs npm CLI >=11.5 - pinned, not @latest, so a
+      # future npm release can't change publish behavior out from under this tag.
+      - name: Install pinned npm
+        run: npm install -g npm@11.5.1
 
       - name: Install
         run: npm install
 
-      - name: Test
+      - name: Node test suite (installer logic)
         run: npm test
+
+      - name: Pester test suite (real tool behavior)
+        shell: powershell
+        run: |
+          $result = Invoke-Pester -Path test\win-nice.Tests.ps1 -PassThru
+          if ($result.FailedCount -gt 0) { exit 1 }
 
       - name: Publish
         run: npm publish --provenance
