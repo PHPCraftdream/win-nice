@@ -1,5 +1,10 @@
 # win-nice
 
+[![CI](https://github.com/phpcraftdream/win-nice/actions/workflows/ci.yml/badge.svg)](https://github.com/phpcraftdream/win-nice/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/win-nice.svg)](https://www.npmjs.com/package/win-nice)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![platform](https://img.shields.io/badge/platform-win32-lightgrey.svg)](#requirements)
+
 Windows equivalent of the unix `nice` / `renice` / `cpulimit` family, built for a
 specific pain point: running several parallel AI coding agents (Claude Code, etc.)
 on one Windows box without their builds/tests pegging every core and freezing the
@@ -47,16 +52,43 @@ The boost does **not** propagate to apps you launch from Explorer afterwards:
 `CreateProcess` rules (only `IDLE`/`BELOW_NORMAL` are). Confirmed empirically —
 see the project history for the test.
 
+### `admin <command> [args...]`
+Runs `command` elevated (as Administrator), waits for it to exit, propagates its
+exit code — the elevated equivalent of `idle`. Triggers the standard UAC consent
+prompt if the calling shell isn't already elevated; if it already is, runs directly
+with no extra prompt.
+
+```
+admin npm install -g some-package
+```
+
+## AI CLI launchers
+
+Not part of the priority/CPU-limiting toolset above — these two are unrelated
+one-line convenience wrappers that happened to live alongside win-nice's own
+scripts and got folded into the same install/PATH mechanism.
+
+### `cy [args...]`
+Runs `claude --dangerously-skip-permissions [args...]`.
+
+### `cx [args...]`
+Runs `codex --dangerously-bypass-approvals-and-sandbox [args...]`.
+
+**Both bypass the tool's own permission/approval/sandbox prompts.** Only use them
+in a context where you'd already accept running that AI agent unattended (e.g.
+inside an already-sandboxed/disposable environment). They do not add any sandboxing
+of their own — the flag names describe exactly what they do.
+
 ## Install
 
 ```
 npm install -g win-nice
 ```
 
-This copies `idle`/`belownormal`/`cap`/`uiup` into `%LOCALAPPDATA%\win-nice\bin`
-and adds that directory to your user `PATH` (via `postinstall`). Restart your
-terminal afterwards so the new `PATH` takes effect. `npm uninstall -g win-nice`
-reverses it (via `preuninstall`).
+This copies every tool above into `%LOCALAPPDATA%\win-nice\bin` and adds that
+directory to your user `PATH` (via `postinstall`). Restart your terminal
+afterwards so the new `PATH` takes effect. `npm uninstall -g win-nice` reverses
+it (via `preuninstall`).
 
 The commands themselves are never registered through npm's own global `bin`
 shimming — `idle`/`cap`/etc. are too generic a name to risk colliding with
@@ -73,19 +105,20 @@ npx win-nice reinstall   # re-copy from the current package version
 npx win-nice uninstall   # remove files + PATH entry
 ```
 
-`uninstall`/`reinstall` only remove files that still carry the
-`win-nice: managed-file` marker comment — if you've edited one of the installed
-scripts yourself, it's left alone (reported as skipped) instead of being
-silently overwritten. File tracking is manifest-first
-(`%LOCALAPPDATA%\win-nice\install-manifest.json`), with a marker-comment scan
-of the install directory as a fallback if the manifest is missing or corrupt.
+`uninstall`/`reinstall` treat every file recorded in the install manifest
+(`%LOCALAPPDATA%\win-nice\install-manifest.json`) as owned by the package and
+remove it regardless of local edits — these are managed files, not a
+customization point. If the manifest itself is missing or corrupt, uninstall
+falls back to scanning the install directory and only removes files that still
+carry the `win-nice: managed-file` marker comment, so that scan doesn't delete
+unrelated files sitting in the same directory.
 
 ## Requirements
 
 Windows 8 / Server 2012 or newer (Job Object CPU rate control). PowerShell is
 bundled with Windows — no separate install needed to run the tools. Node.js is
-only needed for the npm-based installer/tests, not for `idle`/`cap`/`uiup`
-themselves.
+only needed for the npm-based installer/tests, not for the tools themselves.
+`cy`/`cx` additionally need `claude`/`codex` installed and on `PATH`.
 
 ## Testing
 

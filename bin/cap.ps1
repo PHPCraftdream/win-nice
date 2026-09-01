@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 # win-nice: managed-file
-param(
-    [string]$Percent,
-    [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]]$Command
-)
+param([string]$Percent)
+# Deliberately no [Parameter()]/[CmdletBinding()] attributes: those turn this into an
+# advanced function and expose PowerShell's common parameters (-ErrorAction, -Verbose,
+# etc.), which then ambiguously prefix-match flags meant for the wrapped command (e.g.
+# "-e" for node). Plain $args below picks up everything after $Percent untouched.
+$Command = $args
 
 $percentValue = 0
 if (-not [int]::TryParse($Percent, [ref]$percentValue) -or $percentValue -lt 1 -or $percentValue -gt 100) {
@@ -16,9 +17,17 @@ if (-not $Command -or $Command.Count -eq 0) {
     exit 1
 }
 
+# $commandLine is re-parsed by cmd.exe (via "cmd.exe /c" below), so quoting must
+# neutralize its operators (&|<>^) and not just whitespace, or e.g. "A&B" gets split
+# into two commands. NOTE: a literal "%" in an argument can still trigger cmd.exe
+# environment-variable expansion (e.g. "%PATH%") even when quoted, and cmd.exe pairs
+# up "%" characters across argument/quote boundaries - two unrelated arguments that
+# each contain one "%" can corrupt each other. There is no reliable per-character
+# escape for this at the cmd.exe /c level; it's a known, inherent limitation shared
+# by anything that shells out through cmd.exe (Node's own child_process included).
 $commandLine = ($Command | ForEach-Object {
     $escaped = $_ -replace '"', '\"'
-    if ($escaped -eq '' -or $escaped -match '\s') { '"' + $escaped + '"' } else { $escaped }
+    if ($escaped -eq '' -or $escaped -match '[\s"&|<>^]') { '"' + $escaped + '"' } else { $escaped }
 }) -join ' '
 
 $source = @"

@@ -55,7 +55,7 @@ test('uninstall removes every file listed in the manifest and the manifest itsel
   });
 });
 
-test('uninstall skips a file whose marker was stripped (user-modified) instead of deleting it', () => {
+test('uninstall removes a manifest-tracked file even if its marker was stripped (user-modified)', () => {
   withHome(freshHome(), () => {
     install({ updatePath: false });
     const dir = paths.binDir();
@@ -64,8 +64,8 @@ test('uninstall skips a file whose marker was stripped (user-modified) instead o
 
     const results = uninstall({ updatePath: false });
     const idleResult = results.find((r) => r.file === target);
-    assert.equal(idleResult.removed, false);
-    assert.equal(fs.existsSync(target), true, 'modified file must survive uninstall');
+    assert.equal(idleResult.removed, true);
+    assert.equal(fs.existsSync(target), false, 'manifest-tracked files are owned by the package');
   });
 });
 
@@ -92,6 +92,46 @@ test('uninstall fallback scan never removes an unmarked file dropped into binDir
 
     uninstall({ updatePath: false });
     assert.equal(fs.existsSync(foreign), true, 'unmarked foreign file must survive');
+  });
+});
+
+test('uninstall rejects a manifest entry that traverses outside the install directory', () => {
+  withHome(freshHome(), () => {
+    install({ updatePath: false });
+    const dir = paths.binDir();
+    const manifestFile = paths.manifestPath();
+    const data = manifest.read(manifestFile);
+
+    const outsideTarget = path.join(dir, '..', 'outside.txt');
+    fs.writeFileSync(outsideTarget, 'must survive');
+    data.files.push('../outside.txt');
+    manifest.write(manifestFile, data);
+
+    const results = uninstall({ updatePath: false });
+    assert.equal(fs.existsSync(outsideTarget), true, 'traversal target must survive uninstall');
+    const rejected = results.find((r) => path.resolve(r.file) === path.resolve(outsideTarget));
+    assert.equal(rejected.removed, false);
+    fs.rmSync(outsideTarget, { force: true });
+  });
+});
+
+test('uninstall rejects a manifest entry that is an absolute path outside the install directory', () => {
+  withHome(freshHome(), () => {
+    install({ updatePath: false });
+    const manifestFile = paths.manifestPath();
+    const data = manifest.read(manifestFile);
+
+    const outsideTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-abs-'));
+    const outsideFile = path.join(outsideTarget, 'evil.txt');
+    fs.writeFileSync(outsideFile, 'must survive');
+    data.files.push(outsideFile);
+    manifest.write(manifestFile, data);
+
+    const results = uninstall({ updatePath: false });
+    assert.equal(fs.existsSync(outsideFile), true, 'absolute-path target must survive uninstall');
+    const rejected = results.find((r) => r.reason === 'rejected (escapes install directory)');
+    assert.ok(rejected, 'the absolute-path entry must be explicitly rejected, not just missed');
+    fs.rmSync(outsideTarget, { recursive: true, force: true });
   });
 });
 

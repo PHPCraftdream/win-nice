@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install
+        run: npm install
+
+      - name: Node test suite (installer logic)
+        run: npm test
+
+      - name: Pester test suite (real tool behavior)
+        shell: powershell
+        run: |
+          $result = Invoke-Pester -Path test\win-nice.Tests.ps1 -PassThru
+          if ($result.FailedCount -gt 0) { exit 1 }

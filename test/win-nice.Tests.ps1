@@ -50,6 +50,26 @@ $c.WaitForExit()
         & (Join-Path $bin 'idle.bat') cmd /c "exit 7"
         $LASTEXITCODE | Should Be 7
     }
+
+    It 'preserves cmd.exe metacharacters (&, |, <, >, ^) as literal argument text' {
+        # idle.bat forwards a raw %* straight to "start"; unlike cap.bat/cap.ps1 it
+        # doesn't rebuild the command line itself, so this only needs to lock in
+        # today's correct behavior against a future regression.
+        $out = New-TempFile
+        $probe = @'
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$a)
+Set-Content -Path '{0}' -Value ($a -join '|SEP|')
+'@ -f $out
+        $probeFile = New-TempScript
+        Set-Content -Path $probeFile -Value $probe
+        $idleBat = Join-Path $bin 'idle.bat'
+        $driver = (New-TempScript).Replace('.ps1', '.bat')
+        Set-Content -Path $driver -Value "@echo off`r`n`"$idleBat`" powershell -NoProfile -File `"$probeFile`" `"A&B`" `"A|B`" `"A<B>C`" `"A^B`"`r`n"
+        & $driver
+        $LASTEXITCODE | Should Be 0
+        (Get-Content $out).Trim() | Should Be 'A&B|SEP|A|B|SEP|A<B>C|SEP|A^B'
+        Remove-Item $out, $probeFile, $driver -ErrorAction SilentlyContinue
+    }
 }
 
 Describe 'belownormal.bat' {
@@ -124,6 +144,46 @@ Set-Content -Path '{0}' -Value ($a.Count.ToString() + "|" + ($a -join ","))
         Remove-Item $out, $probeFile, $driver -ErrorAction SilentlyContinue
     }
 
+    It 'preserves cmd.exe metacharacters (&, |, <, >, ^) as literal argument text' {
+        # Unescaped, these would be re-parsed by the "cmd.exe /c" hop inside cap.ps1
+        # and split the wrapped command into separate commands (or drop the caret).
+        $out = New-TempFile
+        $probe = @'
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$a)
+Set-Content -Path '{0}' -Value ($a -join '|SEP|')
+'@ -f $out
+        $probeFile = New-TempScript
+        Set-Content -Path $probeFile -Value $probe
+        $capBat = Join-Path $bin 'cap.bat'
+        $driver = (New-TempScript).Replace('.ps1', '.bat')
+        Set-Content -Path $driver -Value "@echo off`r`n`"$capBat`" 50 powershell -NoProfile -File `"$probeFile`" `"A&B`" `"A|B`" `"A<B>C`" `"A^B`"`r`n"
+        & $driver
+        $LASTEXITCODE | Should Be 0
+        (Get-Content $out).Trim() | Should Be 'A&B|SEP|A|B|SEP|A<B>C|SEP|A^B'
+        Remove-Item $out, $probeFile, $driver -ErrorAction SilentlyContinue
+    }
+
+    It 'forwards flags that collide with PowerShell common parameters (e.g. -e, -Verbose) untouched' {
+        # cap.ps1 must not bind these as -ErrorAction/-Verbose itself; node -e is the
+        # motivating real-world case. The probe below deliberately uses bare $args
+        # (no [Parameter()] attribute) for the same reason cap.ps1 does - a declared
+        # ValueFromRemainingArguments parameter would make the *probe* itself subject
+        # to the same common-parameter ambiguity being tested here.
+        $out = New-TempFile
+        $probe = @'
+Set-Content -Path $env:WIN_NICE_TEST_OUT -Value ($args -join '|SEP|')
+'@
+        $probeFile = New-TempScript
+        Set-Content -Path $probeFile -Value $probe
+        $capBat = Join-Path $bin 'cap.bat'
+        $driver = (New-TempScript).Replace('.ps1', '.bat')
+        Set-Content -Path $driver -Value "@echo off`r`nset WIN_NICE_TEST_OUT=$out`r`n`"$capBat`" 50 powershell -NoProfile -File `"$probeFile`" -e 0 -Verbose`r`n"
+        & $driver
+        $LASTEXITCODE | Should Be 0
+        (Get-Content $out).Trim() | Should Be '-e|SEP|0|SEP|-Verbose'
+        Remove-Item $out, $probeFile, $driver -ErrorAction SilentlyContinue
+    }
+
     It 'holds CPU usage of a busy single process measurably below the uncapped baseline' {
         $burn = @'
 param([int]$Threads, [int]$Seconds)
@@ -157,6 +217,30 @@ Write-Output ("{0:N1}" -f $pct)
 
         $capped | Should BeLessThan $baseline
         Remove-Item $burnFile -ErrorAction SilentlyContinue
+    }
+}
+
+Describe 'admin.bat' {
+    It 'fails with a usage message when no command is given' {
+        & (Join-Path $bin 'admin.bat') 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'parses without syntax errors' {
+        $parseErrors = $null
+        [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $bin 'admin.ps1'), [ref]$null, [ref]$parseErrors) | Out-Null
+        $parseErrors.Count | Should Be 0
+    }
+
+    It 'runs the wrapped command inline and propagates its exit code when already elevated' {
+        # -Verb RunAs (the not-elevated branch) needs an interactive UAC click and
+        # can't be exercised in an automated test - this only covers the
+        # already-elevated branch, and only when the test runner itself is elevated.
+        $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if (-not $isAdmin) { return }
+
+        & (Join-Path $bin 'admin.bat') cmd /c "exit 5"
+        $LASTEXITCODE | Should Be 5
     }
 }
 
