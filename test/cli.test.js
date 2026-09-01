@@ -92,12 +92,12 @@ test('cli status tolerates a manifest whose "files" field is not an array', () =
   });
 });
 
-test('cli skill install places SKILL.md under both .claude and .codex skills dirs', () => {
+test('cli skill install places SKILL.md under both .claude and .agents skills dirs', () => {
   withSkillHome((home) => {
     const res = runSkill(['install'], home);
     assert.equal(res.status, 0, res.stderr);
     assert.ok(fs.existsSync(path.join(home, '.claude', 'skills', 'win-nice', 'SKILL.md')));
-    assert.ok(fs.existsSync(path.join(home, '.codex', 'skills', 'win-nice', 'SKILL.md')));
+    assert.ok(fs.existsSync(path.join(home, '.agents', 'skills', 'win-nice', 'SKILL.md')));
   });
 });
 
@@ -107,7 +107,7 @@ test('cli skill uninstall removes what skill install placed', () => {
     const res = runSkill(['uninstall'], home);
     assert.equal(res.status, 0, res.stderr);
     assert.equal(fs.existsSync(path.join(home, '.claude', 'skills', 'win-nice', 'SKILL.md')), false);
-    assert.equal(fs.existsSync(path.join(home, '.codex', 'skills', 'win-nice', 'SKILL.md')), false);
+    assert.equal(fs.existsSync(path.join(home, '.agents', 'skills', 'win-nice', 'SKILL.md')), false);
   });
 });
 

@@ -87,7 +87,7 @@ Describe 'idle.bat' {
     It 'propagates Idle priority to the whole spawned process tree' {
         $out = New-TempFile
         $script = @'
-$c = Start-Process cmd -ArgumentList "/c ping -n 3 127.0.0.1 >nul" -PassThru
+$c = Start-Process cmd -ArgumentList "/c ping -n 3 127.0.0.1 >nul" -WindowStyle Hidden -PassThru
 Start-Sleep -Milliseconds 500
 $c.Refresh()
 Set-Content -Path '{0}' -Value $c.PriorityClass
@@ -208,7 +208,7 @@ Describe 'abovenormal.ps1 / high.ps1 / realtime.ps1' {
         param($Name, $Expected)
         $out = New-TempFile
         $script = @'
-$c = Start-Process cmd -ArgumentList "/c ping -n 3 127.0.0.1 >nul" -PassThru
+$c = Start-Process cmd -ArgumentList "/c ping -n 3 127.0.0.1 >nul" -WindowStyle Hidden -PassThru
 Start-Sleep -Milliseconds 500
 $c.Refresh()
 Set-Content -Path '{0}' -Value $c.PriorityClass
@@ -394,17 +394,38 @@ Write-Output ("{0:N1}" -f $pct)
         Set-Content -Path $burnFile -Value $burn
         $threads = [Environment]::ProcessorCount
         $seconds = 4
-
         $cap = 30
-        $baseline = [double](powershell -NoProfile -File $burnFile $threads $seconds)
-        $cappedOut = & (Join-Path $bin 'cap.bat') $cap powershell -NoProfile -File $burnFile $threads $seconds
-        $capped = [double]($cappedOut | Select-Object -Last 1)
 
-        $capped | Should BeLessThan $baseline
-        # Not just "below baseline" - a badly wrong cap (e.g. barely below 100%)
-        # would also pass that alone. Generous tolerance for scheduler jitter on a
-        # busy CI runner; this only needs to catch the cap being wildly ignored.
-        $capped | Should BeLessThan ($cap + 20)
+        # Two absolute, separately-timed measurements are inherently noisy on a
+        # loaded machine (confirmed: baseline as low as 37% has been observed here
+        # even with no cap at all, from unrelated system load) - retry a few times
+        # and accept the first attempt with a clean signal, rather than failing on
+        # a single noisy sample. Relative thresholds (vs. $cap and vs. $baseline),
+        # not absolute ones - an absolute "baseline must exceed cap+20" gate was
+        # tried and rejected valid signal on a loaded machine (baseline=37.3,
+        # capped=25.6 - a real, working cap - got skipped for "baseline too low").
+        $passed = $false
+        $lastBaseline = $null
+        $lastCapped = $null
+        for ($attempt = 1; $attempt -le 3 -and -not $passed; $attempt++) {
+            $baseline = [double](powershell -NoProfile -File $burnFile $threads $seconds)
+            $cappedOut = & (Join-Path $bin 'cap.bat') $cap powershell -NoProfile -File $burnFile $threads $seconds
+            $capped = [double]($cappedOut | Select-Object -Last 1)
+            $lastBaseline = $baseline
+            $lastCapped = $capped
+
+            # A contention-poisoned baseline (system too busy to show what "uncapped"
+            # looks like even has room to exceed the cap) can't validate anything -
+            # retry instead of asserting on a meaningless comparison.
+            if ($baseline -lt ($cap * 1.15)) { continue }
+
+            # Not just "below baseline" - a badly wrong cap (e.g. barely below 100%)
+            # would also pass that alone. Generous tolerance for scheduler jitter.
+            if ($capped -lt $baseline -and $capped -lt ($cap + 15)) { $passed = $true }
+        }
+
+        if (-not $passed) { Write-Host "last attempt: baseline=$lastBaseline capped=$lastCapped cap=$cap" }
+        $passed | Should Be $true
         Remove-Item $burnFile -ErrorAction SilentlyContinue
     }
 }
@@ -470,7 +491,7 @@ Describe 'pint.ps1 behavior' {
     It 'pins the whole spawned process tree, not just the immediate child' {
         $out = New-TempFile
         $script = @'
-$c = Start-Process cmd -ArgumentList "/c ping -n 3 127.0.0.1 >nul" -PassThru
+$c = Start-Process cmd -ArgumentList "/c ping -n 3 127.0.0.1 >nul" -WindowStyle Hidden -PassThru
 Start-Sleep -Milliseconds 500
 $c.Refresh()
 Set-Content -Path '{0}' -Value ('0x' + $c.ProcessorAffinity.ToString('X'))
@@ -550,6 +571,46 @@ Describe 'cx.ps1' {
         $r = Test-FakeLauncher -Ps1 (Join-Path $bin 'cx.ps1') -FakeTargetName 'codex.bat' -ExtraArgs @('-p', 'A&B')
         $r.ExitCode | Should Be 0
         $r.Output | Should Be '--dangerously-bypass-approvals-and-sandbox -p "A&B"'
+    }
+}
+
+Describe 'sequential invocation in one PowerShell session' {
+    It 'runs idle/belownormal/abovenormal/high/realtime/cy/cx one after another without an Add-Type type-collision error' {
+        # Regression test: bare-name resolution (idle args..., not idle.bat) runs the
+        # .ps1 in the CURRENT process/AppDomain, not a new one - each of these used to
+        # Add-Type an identically-named "Launcher" class, so calling a second one in the
+        # same session threw "Cannot add type. The type name 'Launcher' already exists."
+        # (and, for cy/cx's different Run() signature, could fail outright). Confirmed
+        # empirically before the fix; each now has its own unique class name.
+        $out = New-TempFile
+        $probe = 'Set-Content -Path $env:WIN_NICE_TEST_OUT -Value "ok"'
+        $probeFile = New-TempScript
+        Set-Content -Path $probeFile -Value $probe
+        $fakeDir = Join-Path $env:TEMP ("win-nice-fakebin-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $fakeDir | Out-Null
+        Set-Content -Path (Join-Path $fakeDir 'claude.bat') -Value "@echo off`r`nexit /b 0`r`n"
+        Set-Content -Path (Join-Path $fakeDir 'codex.bat') -Value "@echo off`r`nexit /b 0`r`n"
+
+        $script = @"
+`$env:WIN_NICE_TEST_OUT = '$out'
+`$env:PATH = '$fakeDir;' + `$env:PATH
+foreach (`$name in @('idle', 'belownormal', 'abovenormal', 'high', 'realtime')) {
+    & (Join-Path '$bin' "`$name.ps1") powershell -NoProfile -File '$probeFile'
+    if (`$LASTEXITCODE -ne 0) { throw "`$name failed with exit `$LASTEXITCODE" }
+}
+& (Join-Path '$bin' 'cy.ps1')
+if (`$LASTEXITCODE -ne 0) { throw "cy failed with exit `$LASTEXITCODE" }
+& (Join-Path '$bin' 'cx.ps1')
+if (`$LASTEXITCODE -ne 0) { throw "cx failed with exit `$LASTEXITCODE" }
+"@
+        $sessionScript = New-TempScript
+        Set-Content -Path $sessionScript -Value $script
+        $errorOutput = & powershell -NoProfile -File $sessionScript 2>&1
+        $LASTEXITCODE | Should Be 0
+        ($errorOutput -join "`n") | Should Not Match 'already exists'
+
+        Remove-Item $out, $probeFile, $sessionScript -ErrorAction SilentlyContinue
+        Remove-Item $fakeDir -Recurse -ErrorAction SilentlyContinue
     }
 }
 

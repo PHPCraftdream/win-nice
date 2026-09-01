@@ -197,6 +197,23 @@ public static class Pinner
 
         if (!created)
         {
+            // Falling back to cmd.exe /c: a literal "%" in any argument could now
+            // trigger environment-variable expansion (cmd.exe pairs up "%" characters
+            // across the whole command line, even across separate arguments) and
+            // change what actually runs. Fail loudly here instead of silently risking
+            // that - there's no reliable per-character escape for "%" at this level.
+            foreach (var a in argv)
+            {
+                if (a.IndexOf('%') >= 0)
+                {
+                    CloseHandle(hJob);
+                    throw new InvalidOperationException(
+                        "Refusing to run: argument contains '%' and the target needs the cmd.exe " +
+                        "fallback (not a directly-launchable .exe), where '%' can trigger unintended " +
+                        "environment-variable expansion. See README's Argument handling section.");
+                }
+            }
+
             string cmdExe = Environment.SystemDirectory + "\\cmd.exe";
             var shellCommandLine = new StringBuilder("\"" + cmdExe + "\" /c " + cmdExeCommandLine);
             created = CreateProcess(null, shellCommandLine, IntPtr.Zero, IntPtr.Zero, true,
@@ -239,5 +256,9 @@ Add-Type -TypeDefinition $source -Language CSharp
 # First $countValue logical processors, i.e. threads - not physical cores. See
 # README. Bit-shift, not [Math]::Pow: doubles can't exactly represent 2^63.
 $affinityMask = ([uint64]1 -shl $countValue) - [uint64]1
-$exitCode = [Pinner]::Run($affinityMask, [string[]]$Command, $commandLine)
-exit $exitCode
+try {
+    exit ([Pinner]::Run($affinityMask, [string[]]$Command, $commandLine))
+} catch {
+    Write-Error $_.Exception.InnerException.Message
+    exit 1
+}

@@ -216,10 +216,16 @@ npx win-nice skill uninstall   # remove it
 Separate, opt-in install step — not run automatically by `postinstall`. Copies
 [`skills/win-nice/SKILL.md`](skills/win-nice/SKILL.md) (documents every tool
 above except `cy`/`cx`) to `~/.claude/skills/win-nice/SKILL.md` and
-`~/.codex/skills/win-nice/SKILL.md` — `SKILL.md` is a cross-agent format, so
-the same file works for both unmodified. `uninstall` only removes a copy that
-still carries the `win-nice: managed-skill` marker comment, same
-edited-files-survive contract as the marker-comment fallback above.
+`~/.agents/skills/win-nice/SKILL.md` (Codex CLI's personal-skill location) —
+`SKILL.md` is an open, cross-agent format (agentskills.io), so the same file
+works for both unmodified.
+
+Unlike the `bin/` install directory, `~/.claude/skills` and `~/.agents/skills`
+aren't exclusively win-nice's — a `win-nice` folder there could belong to
+something else entirely. `install` refuses to overwrite a file that's already
+there without the `win-nice: managed-skill` marker comment (reports it as
+skipped rather than clobbering it), and `uninstall` only removes a copy that
+still carries that marker.
 
 ## Requirements
 
@@ -236,9 +242,11 @@ powershell -Command "Invoke-Pester -Path test\win-nice.Tests.ps1"   # real tool 
 ```
 
 The Pester suite is an integration suite: it spawns real processes, checks
-actual `PriorityClass` and Job Object CPU throttling, and takes ~20-30s. It
-never touches the real system `PATH`/registry; the installer tests use
-`WIN_NICE_HOME` to redirect installs into a temp directory instead.
+actual `PriorityClass`, `ProcessorAffinity`, and Job Object CPU throttling
+across every tool, and takes roughly 1-2 minutes (more under system load - the
+CPU-cap test retries a few times if the machine is too busy to get a clean
+baseline). It never touches the real system `PATH`/registry; the installer
+tests use `WIN_NICE_HOME` to redirect installs into a temp directory instead.
 
 ## License
 

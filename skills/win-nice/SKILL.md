@@ -1,8 +1,9 @@
-<!-- win-nice: managed-skill -->
 ---
 name: win-nice
 description: Reference for win-nice's Windows CLI tools for process priority, hard CPU quotas, and CPU affinity (idle, belownormal, abovenormal, high, realtime, cap, pint, uiup, admin). Use when the user asks how to limit CPU usage, priority, or thread/core affinity for a command on Windows, wants to avoid a build/test freezing the desktop, or mentions any of these tool names.
 ---
+
+<!-- win-nice: managed-skill -->
 
 # win-nice
 

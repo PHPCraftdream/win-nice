@@ -137,6 +137,20 @@ public static class Runner
 
         if (!created)
         {
+            // Falling back to cmd.exe /c: a literal "%" in any argument could now
+            // trigger environment-variable expansion (cmd.exe pairs up "%" characters
+            // across the whole command line, even across separate arguments) and
+            // change what actually runs. Fail loudly here instead of silently risking
+            // that - there's no reliable per-character escape for "%" at this level.
+            foreach (var a in argv)
+            {
+                if (a.IndexOf('%') >= 0)
+                    throw new InvalidOperationException(
+                        "Refusing to run: argument contains '%' and the target needs the cmd.exe " +
+                        "fallback (not a directly-launchable .exe), where '%' can trigger unintended " +
+                        "environment-variable expansion. See README's Argument handling section.");
+            }
+
             string cmdExe = Environment.SystemDirectory + "\\cmd.exe";
             var shellCommandLine = new StringBuilder("\"" + cmdExe + "\" /c " + cmdExeCommandLine);
             created = CreateProcess(null, shellCommandLine, IntPtr.Zero, IntPtr.Zero, true,
@@ -161,7 +175,7 @@ public static class Runner
     try {
         exit ([Runner]::Run([string[]]$Command, $commandLine))
     } catch {
-        Write-Error $_.Exception.Message
+        Write-Error $_.Exception.InnerException.Message
         exit 1
     }
 }
@@ -169,7 +183,17 @@ public static class Runner
 # Not elevated - -Verb RunAs triggers the UAC consent prompt. ShellExecute-based,
 # not CreateProcess, so this always opens its own console window (incompatible with
 # -NoNewWindow) and always goes through cmd.exe /c with the escaped command line
-# above, rather than the direct-launch path used in the already-elevated branch.
+# above, rather than the direct-launch path used in the already-elevated branch -
+# meaning this branch is ALWAYS exposed to "%" expansion risk, elevated besides.
+# Fail loudly rather than silently risk it - see cap.ps1/Runner.Run for the same
+# check on the inline branch.
+foreach ($a in $Command) {
+    if ($a.Contains('%')) {
+        Write-Error "Refusing to run: argument contains '%', which cmd.exe could expand as an environment variable during elevation. See README's Argument handling section."
+        exit 1
+    }
+}
+
 try {
     $p = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $commandLine) -Verb RunAs -Wait -PassThru
 } catch {

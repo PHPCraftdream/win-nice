@@ -14,7 +14,7 @@ if (-not $Command -or $Command.Count -eq 0) {
 }
 
 # Fallback command line for when the target isn't a directly-launchable .exe (see
-# Launcher.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
+# RealtimeLauncher.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
 # neutralize its operators (&|<>^) and not just whitespace - see cap.ps1 for the
 # same logic and its documented "%" limitation. realtime.bat has its own, more
 # severe "%" caveat (see there) that applies before this script ever runs.
@@ -28,7 +28,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class Launcher
+public static class RealtimeLauncher
 {
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct STARTUPINFO
@@ -145,6 +145,20 @@ public static class Launcher
 
         if (!created)
         {
+            // Falling back to cmd.exe /c: a literal "%" in any argument could now
+            // trigger environment-variable expansion (cmd.exe pairs up "%" characters
+            // across the whole command line, even across separate arguments) and
+            // change what actually runs. Fail loudly here instead of silently risking
+            // that - there's no reliable per-character escape for "%" at this level.
+            foreach (var a in argv)
+            {
+                if (a.IndexOf('%') >= 0)
+                    throw new InvalidOperationException(
+                        "Refusing to run: argument contains '%' and the target needs the cmd.exe " +
+                        "fallback (not a directly-launchable .exe), where '%' can trigger unintended " +
+                        "environment-variable expansion. See README's Argument handling section.");
+            }
+
             string cmdExe = Environment.SystemDirectory + "\\cmd.exe";
             var shellCommandLine = new StringBuilder("\"" + cmdExe + "\" /c " + cmdExeCommandLine);
             created = CreateProcess(null, shellCommandLine, IntPtr.Zero, IntPtr.Zero, true,
@@ -169,5 +183,9 @@ public static class Launcher
 Add-Type -TypeDefinition $source -Language CSharp
 
 $REALTIME_PRIORITY_CLASS = 0x00000100
-$exitCode = [Launcher]::Run($REALTIME_PRIORITY_CLASS, [string[]]$Command, $commandLine)
-exit $exitCode
+try {
+    exit ([RealtimeLauncher]::Run($REALTIME_PRIORITY_CLASS, [string[]]$Command, $commandLine))
+} catch {
+    Write-Error $_.Exception.InnerException.Message
+    exit 1
+}

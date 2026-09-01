@@ -202,6 +202,20 @@ public static class Capper
 
         if (!created)
         {
+            // Falling back to cmd.exe /c: a literal "%" in any argument could now
+            // trigger environment-variable expansion (cmd.exe pairs up "%" characters
+            // across the whole command line, even across separate arguments) and
+            // change what actually runs. Fail loudly here instead of silently risking
+            // that - there's no reliable per-character escape for "%" at this level.
+            foreach (var a in argv)
+            {
+                if (a.IndexOf('%') >= 0)
+                    throw new InvalidOperationException(
+                        "Refusing to run: argument contains '%' and the target needs the cmd.exe " +
+                        "fallback (not a directly-launchable .exe), where '%' can trigger unintended " +
+                        "environment-variable expansion. See README's Argument handling section.");
+            }
+
             string cmdExe = Environment.SystemDirectory + "\\cmd.exe";
             var shellCommandLine = new StringBuilder("\"" + cmdExe + "\" /c " + cmdExeCommandLine);
             created = CreateProcess(null, shellCommandLine, IntPtr.Zero, IntPtr.Zero, true,
@@ -241,5 +255,9 @@ public static class Capper
 
 Add-Type -TypeDefinition $source -Language CSharp
 
-$exitCode = [Capper]::Run($percentValue, [string[]]$Command, $commandLine)
-exit $exitCode
+try {
+    exit ([Capper]::Run($percentValue, [string[]]$Command, $commandLine))
+} catch {
+    Write-Error $_.Exception.InnerException.Message
+    exit 1
+}

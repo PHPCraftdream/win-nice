@@ -5,7 +5,7 @@
 $Command = @('codex', '--dangerously-bypass-approvals-and-sandbox') + @($args)
 
 # Fallback command line for when codex isn't a directly-launchable .exe (it's
-# typically an npm-installed .cmd shim on Windows) - see Launcher.Run below and
+# typically an npm-installed .cmd shim on Windows) - see CxLauncher.Run below and
 # cap.ps1 for the same logic and its documented "%" limitation. cx.bat has its own,
 # more severe "%" caveat (see there) that applies before this script ever runs.
 $commandLine = ($Command | ForEach-Object {
@@ -18,7 +18,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class Launcher
+public static class CxLauncher
 {
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct STARTUPINFO
@@ -134,6 +134,20 @@ public static class Launcher
 
         if (!created)
         {
+            // Falling back to cmd.exe /c: a literal "%" in any argument could now
+            // trigger environment-variable expansion (cmd.exe pairs up "%" characters
+            // across the whole command line, even across separate arguments) and
+            // change what actually runs. Fail loudly here instead of silently risking
+            // that - there's no reliable per-character escape for "%" at this level.
+            foreach (var a in argv)
+            {
+                if (a.IndexOf('%') >= 0)
+                    throw new InvalidOperationException(
+                        "Refusing to run: argument contains '%' and the target needs the cmd.exe " +
+                        "fallback (not a directly-launchable .exe), where '%' can trigger unintended " +
+                        "environment-variable expansion. See README's Argument handling section.");
+            }
+
             string cmdExe = Environment.SystemDirectory + "\\cmd.exe";
             var shellCommandLine = new StringBuilder("\"" + cmdExe + "\" /c " + cmdExeCommandLine);
             created = CreateProcess(null, shellCommandLine, IntPtr.Zero, IntPtr.Zero, true,
@@ -157,5 +171,9 @@ public static class Launcher
 
 Add-Type -TypeDefinition $source -Language CSharp
 
-$exitCode = [Launcher]::Run([string[]]$Command, $commandLine)
-exit $exitCode
+try {
+    exit ([CxLauncher]::Run([string[]]$Command, $commandLine))
+} catch {
+    Write-Error $_.Exception.InnerException.Message
+    exit 1
+}
