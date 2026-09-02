@@ -201,14 +201,30 @@ if ($isAdmin) {
 # Not elevated - -Verb RunAs triggers the UAC consent prompt. ShellExecute-based, not
 # CreateProcess, so this always opens its own console window (incompatible with
 # -NoNewWindow). Same direct-launch-first, cmd.exe-fallback strategy as the
-# already-elevated branch above: a .bat/.cmd target still needs cmd.exe (no direct
-# elevation-capable equivalent to CreateProcess's own .bat/.cmd auto-relaunch), but
-# any other target launches directly via -FilePath, never touching cmd.exe and so
-# never exposed to "%"/quote-stripping risk - so the "%" check below only applies to
-# the .bat/.cmd branch, same as AdminLauncher.Run's own fallback check.
-$isBatOrCmd = $Command[0] -match '\.(bat|cmd)$'
+# already-elevated branch above (AdminLauncher.Run): a target that resolves to a real
+# Application (.exe) launches directly via -FilePath - never touching cmd.exe and so
+# never exposed to "%"/quote-stripping risk - while a .bat/.cmd target (no direct
+# elevation-capable equivalent to CreateProcess's own .bat/.cmd auto-relaunch) and a
+# target that resolves to no Application at all both go through the cmd.exe fallback
+# below. The unresolvable case is the important one: cmd.exe BUILTINS (ver, dir,
+# echo, set, start, ...) aren't files, so Start-Process -FilePath would die with
+# "The system cannot find the file specified" before any UAC prompt - they must take
+# the fallback like every other launcher's CreateProcess-failed branch does.
+# Get-Command with -CommandType Application is the resolver: builtins and PowerShell
+# aliases/functions (dir, echo, start) are invisible to it, which routes them to the
+# fallback, while real executables resolve. Standalone function so the routing
+# decision is testable without ever reaching -Verb RunAs (a real UAC prompt).
+function Get-AdminLaunchRoute {
+    param([Parameter(Mandatory = $true)][string]$Target)
+    if ($Target -match '\.(bat|cmd)$') { return 'CmdFallback' }
+    $resolved = Get-Command -Name ([System.Management.Automation.WildcardPattern]::Escape($Target)) -CommandType Application -ErrorAction SilentlyContinue
+    if ($resolved -and $resolved.Path -and $resolved.Path -notmatch '\.(bat|cmd)$') { return 'Direct' }
+    return 'CmdFallback'
+}
 
-if ($isBatOrCmd) {
+$route = Get-AdminLaunchRoute -Target $Command[0]
+
+if ($route -eq 'CmdFallback') {
     foreach ($a in $Command) {
         if ("$a".Contains('%')) {
             Write-Error "Refusing to run: argument contains '%', which cmd.exe could expand as an environment variable during elevation. See README's Argument handling section."
@@ -218,7 +234,7 @@ if ($isBatOrCmd) {
 }
 
 try {
-    if ($isBatOrCmd) {
+    if ($route -eq 'CmdFallback') {
         # Same /d /s /v:off + outer-quote-wrap fix as AdminLauncher.Run's cmd.exe
         # fallback, and for the same reason: cmd.exe's /C quote-stripping.
         $p = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d', '/s', '/v:off', '/c', ('"' + $commandLine + '"')) -Verb RunAs -Wait -PassThru

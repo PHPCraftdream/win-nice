@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const crypto = require('node:crypto');
 
 const { install } = require('../install/install');
 const { uninstall } = require('../install/uninstall');
@@ -159,8 +160,14 @@ test('install is a no-op guard when run from the source checkout without WIN_NIC
   }
 });
 
+// PID alone can be reused across runs/reboots, so a crashed run could leave a
+// colliding scratch key behind; the GUID makes that impossible.
+function scratchKey() {
+  return `HKCU:\\Software\\WinNiceTest\\${process.pid}-${crypto.randomUUID()}`;
+}
+
 test('readRegistryString/writeRegistryString round-trip non-ASCII values exactly, on a scratch key', () => {
-  const keyPath = `HKCU:\\Software\\WinNiceTest\\${process.pid}`;
+  const keyPath = scratchKey();
   const valueName = 'ScratchPath';
   const value = 'C:\\Users\\Марат\\bin;C:\\Users\\José\\bin';
   try {
@@ -177,7 +184,7 @@ test('readRegistryString/writeRegistryString round-trip non-ASCII values exactly
 });
 
 test('writeRegistryString preserves REG_EXPAND_SZ across a round trip instead of flattening it', () => {
-  const keyPath = `HKCU:\\Software\\WinNiceTest\\${process.pid}`;
+  const keyPath = scratchKey();
   const valueName = 'ScratchExpand';
   try {
     execFileSync('powershell', [
@@ -210,4 +217,34 @@ test('writeRegistryString preserves REG_EXPAND_SZ across a round trip instead of
       'Remove-Item -LiteralPath $env:WIN_NICE_REG_KEY -Recurse -Force -ErrorAction SilentlyContinue',
     ], { env: { ...process.env, WIN_NICE_REG_KEY: keyPath } });
   }
+});
+
+test('addToPathString/removeFromPathString treat a raw %LOCALAPPDATA% entry as its expanded equivalent', () => {
+  const expanded = path.join(process.env.LOCALAPPDATA, 'win-nice', 'bin');
+  const raw = '%LOCALAPPDATA%\\win-nice\\bin';
+  assert.equal(paths.addToPathString(raw, expanded), raw, 'add must dedup against the raw equivalent, not append a duplicate');
+  assert.equal(paths.removeFromPathString(raw, expanded), '', 'remove must strip the raw equivalent entry');
+});
+
+test('addToPathString/removeFromPathString treat a raw %USERPROFILE% entry as its expanded equivalent', () => {
+  const expanded = path.join(process.env.USERPROFILE, 'somewhere', 'bin');
+  const raw = '%USERPROFILE%\\somewhere\\bin';
+  assert.equal(paths.addToPathString(raw, expanded), raw);
+  assert.equal(paths.removeFromPathString(raw, expanded), '');
+});
+
+test('%VAR% name matching is case-insensitive (%localappdata% matches %LOCALAPPDATA%)', () => {
+  const expanded = path.join(process.env.LOCALAPPDATA, 'win-nice', 'bin');
+  const raw = '%localappdata%\\win-nice\\bin';
+  assert.equal(paths.addToPathString(raw, expanded), raw);
+  assert.equal(paths.removeFromPathString(raw, expanded), '');
+});
+
+test('unknown %VAR% stays literal text and never matches an unrelated directory', () => {
+  const expanded = path.join(process.env.LOCALAPPDATA, 'win-nice', 'bin');
+  const raw = '%NOT_A_REAL_VAR%\\win-nice\\bin';
+  const added = paths.addToPathString(raw, expanded);
+  assert.equal(added, `${raw};${expanded}`, 'unexpandable entry must not dedup against the expanded dir');
+  assert.equal(paths.removeFromPathString(added, expanded), raw, 'removal must drop only the expanded entry and keep the literal one');
+  assert.equal(paths.removeFromPathString(raw, path.join('C:', 'nope', 'bin')), raw, 'literal entry survives removal of a different directory');
 });

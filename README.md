@@ -48,7 +48,13 @@ invocation resolves to depends on the calling shell:
 | --- | --- | --- |
 | PowerShell | `name.ps1` | full argument safety (see above) |
 | cmd.exe, or PATHEXT-based resolution (e.g. Node's `child_process`, which doesn't include `.PS1` in `PATHEXT` by default) | `name.bat` | corrupted before `.ps1` ever runs (see below) |
-| POSIX shell (Git Bash, WSL) — ignores `PATHEXT`/bare-name extension resolution entirely | `name` (no extension) | full argument safety — the shim `exec`s straight into `name.ps1` via `powershell -File`, the same direct-to-`.ps1` path PowerShell itself uses, no `.bat`/cmd.exe hop involved |
+| POSIX shell (Git Bash only — ignores `PATHEXT`/bare-name extension resolution entirely) | `name` (no extension) | full argument safety — the shim `exec`s straight into `name.ps1` via `powershell -File`, the same direct-to-`.ps1` path PowerShell itself uses, with MSYS argument conversion disabled so slash-style switches (`/c`, `/d`) and Windows paths arrive untouched; no `.bat`/cmd.exe hop involved |
+
+The extensionless shims are Git Bash-specific; WSL is not supported — WSL has
+no bare `powershell` (only `powershell.exe`), Windows PowerShell can't resolve
+the `/mnt/...` script path such a shim would pass to `-File`, and a WSL-side
+npm refuses this package anyway (`"os": ["win32"]` in `package.json`). Install
+through Windows Node/npm and call the tools from Git Bash.
 
 The `.bat` file corrupts any literal `%` in its own arguments before your
 command, and before `.ps1`, ever runs at all, confirmed with nothing more
@@ -288,12 +294,14 @@ only needed for the npm-based installer/tests, not for the tools themselves.
 `cy`/`cx` additionally need `claude`/`codex` installed and on `PATH`.
 
 **PowerShell execution policy:** Windows client editions default to
-`Restricted`, which blocks bare-name `.ps1` invocation entirely (`... cannot
-be loaded because running scripts is disabled on this system`) — this only
-affects the `.ps1` entry points (PowerShell's own bare-name resolution, and
-the Git Bash shim, which calls `.ps1` too), not the `.bat` files, which pass
-`-ExecutionPolicy Bypass` explicitly. Run once, as the user who'll run these
-tools:
+`Restricted`, which blocks a bare `.ps1` invoked directly by PowerShell itself
+(`... cannot be loaded because running scripts is disabled on this system`).
+The `.bat` files are unaffected (they pass `-ExecutionPolicy Bypass`
+explicitly), and so are the Git Bash shims — each one runs
+`powershell -NoProfile -ExecutionPolicy Bypass -File ...` itself, so only
+invoking a bare `name.ps1` from PowerShell needs the one-time fix below.
+Caveat: Group Policy can still override `-ExecutionPolicy Bypass` in some
+managed environments. Run once, as the user who'll run these tools:
 
 ```
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
@@ -315,7 +323,7 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ## Testing
 
 ```
-npm test                                       # installer logic (fast, no side effects)
+npm test                                       # installer logic (fast; isolated scratch registry key, cleaned up automatically)
 powershell -Command "Invoke-Pester -Path test\win-nice.Tests.ps1"   # real tool behavior
 ```
 

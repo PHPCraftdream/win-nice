@@ -9,6 +9,9 @@ on:
 jobs:
   test:
     runs-on: windows-latest
+    # Upper bound for the whole job (npm install + both suites): an unbounded hang
+    # would otherwise occupy the runner for the 6-hour default.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

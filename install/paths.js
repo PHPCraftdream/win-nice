@@ -23,16 +23,38 @@ function normalize(p) {
   return path.normalize(p).replace(/\\+$/, '').toLowerCase();
 }
 
+// Comparison-only stand-in for [Environment]::ExpandEnvironmentVariables: %VAR%
+// references resolve case-insensitively against the current process env (Windows
+// var names are case-insensitive and so is process.env lookup on win32); unknown
+// or malformed references stay literal text instead of throwing or vanishing.
+// Never used on anything we write back - the raw registry string is preserved
+// exactly; this only lets add/remove recognize a raw %VAR% entry (e.g.
+// %LOCALAPPDATA%\win-nice\bin) as the same location as its expanded form.
+function expandEnvRefs(s) {
+  return s.replace(/%([^%]*)%/g, (whole, name) => {
+    const value = process.env[name];
+    return value === undefined ? whole : value;
+  });
+}
+
+// Two PATH entries point at the same location if their %VAR% references expand
+// to the same directories, even though the registry stores the raw text.
+function comparisonForm(p) {
+  return normalize(expandEnvRefs(p));
+}
+
 function addToPathString(currentPath, dir) {
   const parts = currentPath.split(';').filter(Boolean);
-  const already = parts.some((p) => normalize(p) === normalize(dir));
+  const target = comparisonForm(dir);
+  const already = parts.some((p) => comparisonForm(p) === target);
   if (already) return currentPath;
   return [...parts, dir].join(';');
 }
 
 function removeFromPathString(currentPath, dir) {
   const parts = currentPath.split(';').filter(Boolean);
-  return parts.filter((p) => normalize(p) !== normalize(dir)).join(';');
+  const target = comparisonForm(dir);
+  return parts.filter((p) => comparisonForm(p) !== target).join(';');
 }
 
 function runPowershell(script, extraEnv) {

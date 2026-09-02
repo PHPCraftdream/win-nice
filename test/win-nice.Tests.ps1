@@ -11,14 +11,22 @@ $bin = Join-Path $root 'bin'
 # non-elevated run reports them as Skipped instead of a plain (misleading) pass.
 $script:isAdminRunner = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
+# One unique root per RUN (not per test): every temp artifact this suite creates
+# lives inside it, and the final cleanup at the bottom of this file removes exactly
+# this directory - nothing else under the shared %TEMP%. The old wildcard sweep
+# over %TEMP% deleted the still-in-use artifacts of any OTHER concurrent run
+# (second checkout, parallel CI matrix, parallel worktrees) that finished later.
+$script:testRoot = Join-Path $env:TEMP ('win-nice-pester-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $script:testRoot -Force | Out-Null
+
 function New-TempFile {
-    $f = Join-Path $env:TEMP ("win-nice-pester-" + [guid]::NewGuid().ToString("N") + ".tmp")
+    $f = Join-Path $script:testRoot ("win-nice-pester-" + [guid]::NewGuid().ToString("N") + ".tmp")
     Remove-Item $f -ErrorAction SilentlyContinue
     return $f
 }
 
 function New-TempScript {
-    $f = Join-Path $env:TEMP ("win-nice-pester-" + [guid]::NewGuid().ToString("N") + ".ps1")
+    $f = Join-Path $script:testRoot ("win-nice-pester-" + [guid]::NewGuid().ToString("N") + ".ps1")
     Remove-Item $f -ErrorAction SilentlyContinue
     return $f
 }
@@ -88,10 +96,16 @@ Describe 'idle.bat' {
         $out = New-TempFile
         $script = @'
 $c = Start-Process cmd -ArgumentList "/c ping -n 3 127.0.0.1 >nul" -WindowStyle Hidden -PassThru
-Start-Sleep -Milliseconds 500
-$c.Refresh()
-Set-Content -Path '{0}' -Value $c.PriorityClass
-$c.WaitForExit()
+try {{
+    Start-Sleep -Milliseconds 500
+    $c.Refresh()
+    Set-Content -Path '{0}' -Value $c.PriorityClass
+    # ping -n 3 takes ~2s: 15s is a generous upper bound, so a wedged probe can't
+    # hang the suite indefinitely (a bare WaitForExit() here once blocked 206s).
+    if (-not $c.WaitForExit(15000)) {{ $c.Kill() }}
+}} finally {{
+    if (-not $c.HasExited) {{ $c.Kill() }}
+}}
 '@ -f $out
         $scriptFile = New-TempScript
         Set-Content -Path $scriptFile -Value $script
@@ -242,10 +256,16 @@ Describe 'abovenormal.ps1 / high.ps1 / realtime.ps1' {
         $out = New-TempFile
         $script = @'
 $c = Start-Process cmd -ArgumentList "/c ping -n 3 127.0.0.1 >nul" -WindowStyle Hidden -PassThru
-Start-Sleep -Milliseconds 500
-$c.Refresh()
-Set-Content -Path '{0}' -Value $c.PriorityClass
-$c.WaitForExit()
+try {{
+    Start-Sleep -Milliseconds 500
+    $c.Refresh()
+    Set-Content -Path '{0}' -Value $c.PriorityClass
+    # ping -n 3 takes ~2s: 15s is a generous upper bound, so a wedged probe can't
+    # hang the suite indefinitely (a bare WaitForExit() here once blocked 206s).
+    if (-not $c.WaitForExit(15000)) {{ $c.Kill() }}
+}} finally {{
+    if (-not $c.HasExited) {{ $c.Kill() }}
+}}
 '@ -f $out
         $scriptFile = New-TempScript
         Set-Content -Path $scriptFile -Value $script
@@ -492,7 +512,10 @@ Describe '%-fail-closed on the cmd.exe fallback path' {
         $stderr = & powershell -NoProfile -File $ps1 @Prefix $targetBat '100%OFF' 2>&1
         $exitCode = $LASTEXITCODE
         $exitCode | Should Be 1
-        ($stderr | Out-String) | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
+        # The child powershell wraps Write-Error text at the console buffer width
+        # before 2>&1 captures it, so match whitespace-normalized text: the raw text
+        # only matches when the wrap point happens to fall outside the pattern.
+        (($stderr | Out-String) -replace '\s+', ' ') | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
         Test-Path $marker | Should Be $false
         Remove-Item $targetBat, $marker -ErrorAction SilentlyContinue
     }
@@ -514,7 +537,7 @@ function Test-SpacedTargetFallback {
         [Parameter(Mandatory = $true)][string]$Ps1,
         [string[]]$Prefix = @()
     )
-    $spacedDir = Join-Path $env:TEMP ("win-nice-pester-spaced " + [guid]::NewGuid().ToString("N"))
+    $spacedDir = Join-Path $script:testRoot ("win-nice-pester-spaced " + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $spacedDir | Out-Null
     $targetBat = Join-Path $spacedDir 't.bat'
     Set-Content -Path $targetBat -Value "@echo off`r`necho BATOUT=%*`r`n"
@@ -621,10 +644,16 @@ Describe 'pint.ps1 behavior' {
         $out = New-TempFile
         $script = @'
 $c = Start-Process cmd -ArgumentList "/c ping -n 3 127.0.0.1 >nul" -WindowStyle Hidden -PassThru
-Start-Sleep -Milliseconds 500
-$c.Refresh()
-Set-Content -Path '{0}' -Value ('0x' + $c.ProcessorAffinity.ToString('X'))
-$c.WaitForExit()
+try {{
+    Start-Sleep -Milliseconds 500
+    $c.Refresh()
+    Set-Content -Path '{0}' -Value ('0x' + $c.ProcessorAffinity.ToString('X'))
+    # ping -n 3 takes ~2s: 15s is a generous upper bound, so a wedged probe can't
+    # hang the suite indefinitely (a bare WaitForExit() here once blocked 206s).
+    if (-not $c.WaitForExit(15000)) {{ $c.Kill() }}
+}} finally {{
+    if (-not $c.HasExited) {{ $c.Kill() }}
+}}
 '@ -f $out
         $scriptFile = New-TempScript
         Set-Content -Path $scriptFile -Value $script
@@ -678,7 +707,7 @@ Describe 'admin.bat' {
         $stderr = & powershell -NoProfile -File (Join-Path $bin 'admin.ps1') 'somebatch.bat' /c '100%OFF' 2>&1
         $exitCode = $LASTEXITCODE
         $exitCode | Should Be 1
-        ($stderr | Out-String) | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
+        (($stderr | Out-String) -replace '\s+', ' ') | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
     }
 
     It 'does not throw a MethodInvocation error when a non-string argument reaches the "%" check (not-yet-elevated branch, .bat/.cmd target)' -Skip:$script:isAdminRunner {
@@ -699,8 +728,82 @@ Describe 'admin.bat' {
         $exitCode = $LASTEXITCODE
         $exitCode | Should Be 1
         $stderr | Should Not Match 'does not contain a method'
-        $stderr | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
+        ($stderr -replace '\s+', ' ') | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
         Remove-Item $driverScript -ErrorAction SilentlyContinue
+    }
+}
+
+# P1 regression (docs/reviews/2026-09-02-0650-0cb8a1b-code-review.md): the
+# not-yet-elevated branch used to pick the cmd.exe fallback purely from a
+# ".bat/.cmd suffix" regex on the first argument, so a cmd.exe BUILTIN target
+# (ver, set, echo, ... - not files at all) went straight to
+# Start-Process -Verb RunAs -FilePath and died there with "The system cannot find
+# the file specified" before any UAC prompt, losing the CreateProcess-failed ->
+# cmd.exe-fallback semantic every other launcher has. The route now comes from
+# admin.ps1's Get-AdminLaunchRoute: Application-resolvable target -> direct
+# -FilePath launch; .bat/.cmd or unresolvable (builtins) -> cmd.exe fallback.
+# Two layers of coverage, both UAC-safe (no test here ever reaches -Verb RunAs):
+# - the routing function itself, AST-extracted from admin.ps1 and evaluated here,
+#   so the decision table is asserted without launching anything. Builtin targets
+#   are 'ver'/'set' only: other builtin names are PATH-dependent (Git for Windows
+#   ships a real dir.exe, so 'dir' legitimately resolves Direct on such machines -
+#   matching the elevated branch's own CreateProcess lookup).
+# - the fail-closed "%" check: it now guards the whole fallback route (builtins
+#   included) and runs BEFORE Start-Process -Verb RunAs, so a builtin target with a
+#   "%" argument must end in the refusal message - not the old pre-UAC "cannot find
+#   the file specified" - which discriminates the route taken with no elevation
+#   ever attempted.
+$adminPs1ForRouting = Join-Path $bin 'admin.ps1'
+
+Describe 'admin.ps1 launch routing (not-yet-elevated branch)' {
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($adminPs1ForRouting, [ref]$null, [ref]$parseErrors)
+    $fnAst = $ast.Find({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq 'Get-AdminLaunchRoute' }, $true)
+    if ($fnAst) { Invoke-Expression $fnAst.Extent.Text }
+
+    It 'exposes the routing decision as a testable function (parsed from admin.ps1)' {
+        $parseErrors.Count | Should Be 0
+        $fnAst | Should Not Be $null
+        Get-Command Get-AdminLaunchRoute -ErrorAction SilentlyContinue | Should Not Be $null
+    }
+
+    It 'routes cmd.exe builtins (no file at all) to the cmd.exe fallback (<Target>)' -TestCases @(
+        @{ Target = 'ver' }
+        @{ Target = 'set' }
+    ) {
+        param($Target)
+        Get-AdminLaunchRoute -Target $Target | Should Be 'CmdFallback'
+    }
+
+    It 'routes a resolvable Application target to the direct launch (<Target>)' -TestCases @(
+        @{ Target = 'cmd' }
+        @{ Target = $env:ComSpec }
+    ) {
+        param($Target)
+        Get-AdminLaunchRoute -Target $Target | Should Be 'Direct'
+    }
+
+    It 'routes a .bat target to the cmd.exe fallback even though Get-Command resolves it' {
+        $bat = Join-Path $script:testRoot 'routing-probe.bat'
+        Set-Content -Path $bat -Value "@echo off`r`nexit /b 0`r`n"
+        Get-AdminLaunchRoute -Target $bat | Should Be 'CmdFallback'
+    }
+
+    It 'routes an unresolvable bare word to the cmd.exe fallback' {
+        Get-AdminLaunchRoute -Target ('no-such-tool-' + [guid]::NewGuid().ToString('N')) | Should Be 'CmdFallback'
+    }
+
+    It 'attempts the cmd.exe fallback route (not a pre-UAC file-not-found failure) for a builtin target with a "%" argument' -Skip:$script:isAdminRunner {
+        # Skipped on elevated runners: there the same refusal comes from
+        # AdminLauncher.Run's own fallback check instead, so the not-yet-elevated
+        # routing under test wouldn't be exercised (same message, wrong branch).
+        foreach ($target in @('ver', 'set')) {
+            $stderr = & powershell -NoProfile -File $adminPs1ForRouting $target '100%OFF' 2>&1
+            $exitCode = $LASTEXITCODE
+            $exitCode | Should Be 1
+            (($stderr | Out-String) -replace '\s+', ' ') | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
+            (($stderr | Out-String) -replace '\s+', ' ') | Should Not Match 'cannot\s+find\s+the\s+file'
+        }
     }
 }
 
@@ -721,7 +824,7 @@ function Test-FakeLauncher {
     # can (see the spaced-target tests below) - but a space here still exercises
     # cmd.exe's own PATHEXT resolution finding a PATH entry with a space in it, a
     # common real-world case (e.g. "C:\Users\John Smith\AppData\Roaming\npm").
-    $fakeDir = Join-Path $env:TEMP ("win-nice-fakebin-spaced " + [guid]::NewGuid().ToString("N"))
+    $fakeDir = Join-Path $script:testRoot ("win-nice-fakebin-spaced " + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $fakeDir | Out-Null
     $out = Join-Path $fakeDir 'out.txt'
     $fakeTarget = Join-Path $fakeDir $FakeTargetName
@@ -754,7 +857,7 @@ Describe 'cy.ps1' {
         # C# Run(), the same code path covered by the table-driven test above.
         $r = Test-FakeLauncher -Ps1 (Join-Path $bin 'cy.ps1') -FakeTargetName 'claude.bat' -ExtraArgs @('100%OFF')
         $r.ExitCode | Should Be 1
-        $r.StdErr | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
+        ($r.StdErr -replace '\s+', ' ') | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
         $r.Output | Should Be $null
     }
 }
@@ -769,7 +872,7 @@ Describe 'cx.ps1' {
     It 'refuses to run and never launches the target when an argument contains "%" (cmd.exe fallback path)' {
         $r = Test-FakeLauncher -Ps1 (Join-Path $bin 'cx.ps1') -FakeTargetName 'codex.bat' -ExtraArgs @('100%OFF')
         $r.ExitCode | Should Be 1
-        $r.StdErr | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
+        ($r.StdErr -replace '\s+', ' ') | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
         $r.Output | Should Be $null
     }
 }
@@ -790,7 +893,7 @@ $isolationTools = @(
 Describe 'cy.ps1 / cx.ps1 PATH isolation' {
     It 'fails fast (not silently, not hung) when no fake target is on the isolated PATH (<Name>)' -TestCases $isolationTools {
         param($Name, $Ps1)
-        $fakeDir = Join-Path $env:TEMP ("win-nice-fakebin-" + [guid]::NewGuid().ToString("N"))
+        $fakeDir = Join-Path $script:testRoot ("win-nice-fakebin-" + [guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Path $fakeDir | Out-Null
         $isolatedPath = "$fakeDir;$env:SystemRoot\System32;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
         $ps1Path = Join-Path $bin $Ps1
@@ -829,7 +932,7 @@ Describe 'sequential invocation in one PowerShell session' {
         $probe = 'Set-Content -Path $env:WIN_NICE_TEST_OUT -Value "ok"'
         $probeFile = New-TempScript
         Set-Content -Path $probeFile -Value $probe
-        $fakeDir = Join-Path $env:TEMP ("win-nice-fakebin-" + [guid]::NewGuid().ToString("N"))
+        $fakeDir = Join-Path $script:testRoot ("win-nice-fakebin-" + [guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Path $fakeDir | Out-Null
         Set-Content -Path (Join-Path $fakeDir 'claude.bat') -Value "@echo off`r`nexit /b 0`r`n"
         Set-Content -Path (Join-Path $fakeDir 'codex.bat') -Value "@echo off`r`nexit /b 0`r`n"
@@ -879,16 +982,12 @@ Describe 'uiup.ps1' {
     }
 }
 
-# Final best-effort sweep: most tests above Remove-Item their own temp files only
+# Final best-effort cleanup: most tests above Remove-Item their own temp files only
 # on the success path, so a failed `Should` assertion (a terminating error in
-# Pester) skips that cleanup and leaks the file/dir. Every temp name in this
-# suite - whether from New-TempFile/New-TempScript or an inline fakeDir/spacedDir
-# - shares one of these two prefixes, including ones later renamed to a different
-# extension (e.g. New-TempScript's .ps1 renamed to .bat before use), so a
-# name-pattern sweep catches those too, unlike tracking exact paths would. Pester
-# 3's Describe blocks run inline as this file executes top to bottom, so this
-# statement runs after every Describe above has finished.
-Get-ChildItem -Path $env:TEMP -Filter 'win-nice-pester-*' -ErrorAction SilentlyContinue |
-    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-Get-ChildItem -Path $env:TEMP -Filter 'win-nice-fakebin-*' -ErrorAction SilentlyContinue |
-    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+# Pester) skips that cleanup and leaks the artifact. Everything lands inside
+# $script:testRoot, so removing exactly that one directory - this run's own root,
+# never a wildcard over the shared %TEMP% - catches every leak without touching a
+# concurrent run's artifacts. Pester 3's Describe blocks run inline as this file
+# executes top to bottom, so this statement runs after every Describe above has
+# finished.
+Remove-Item $script:testRoot -Recurse -Force -ErrorAction SilentlyContinue

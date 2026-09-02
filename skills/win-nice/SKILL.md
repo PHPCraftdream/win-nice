@@ -102,7 +102,7 @@ depends on the calling shell:
 | --- | --- | --- |
 | PowerShell | `name.ps1` | full argument safety (see above) |
 | cmd.exe, or PATHEXT-based resolution (e.g. Node's `child_process` — `PATHEXT` doesn't include `.PS1` by default) | `name.bat` | corrupted before `.ps1` ever runs |
-| POSIX shell (Git Bash, WSL — ignores `PATHEXT`) | `name` (extensionless shim) | full argument safety — `exec`s straight into `name.ps1`, same as PowerShell |
+| POSIX shell (Git Bash only — ignores `PATHEXT`; WSL not supported) | `name` (extensionless shim) | full argument safety — `exec`s straight into `name.ps1` with MSYS argument conversion disabled, same as PowerShell |
 
 The `.bat` file corrupts any literal `%` in its arguments before the command,
 and before `.ps1` (and its fail-closed `%` check), ever runs at all
@@ -111,10 +111,12 @@ while parsing the `.bat` entry point itself; not fixable from inside a
 `.bat`). Every other special character survives that hop untouched.
 
 **PowerShell execution policy:** Windows client editions default to
-`Restricted`, which blocks `.ps1` invocation (both direct and via the Git
-Bash shim) with "running scripts is disabled on this system". One-time fix:
-`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. `.bat` files are
-unaffected (they pass `-ExecutionPolicy Bypass` themselves).
+`Restricted`, which blocks a bare `.ps1` invoked directly by PowerShell with
+"running scripts is disabled on this system". One-time fix:
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. `.bat` files and the
+Git Bash shims are unaffected — both pass `-ExecutionPolicy Bypass`
+themselves (each shim runs powershell with that flag explicitly). Group
+Policy can still override this in managed environments.
 
 ## Install / manage
 
