@@ -21,32 +21,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   simple minimum). See README's "Chaining these tools together" section for
   the full picture.
 
-### Fixed
-
-- `capm`'s addressable-size guard used to reject every non-zero size on
-  Windows PowerShell 5.1: `[UIntPtr]::MaxValue` doesn't exist on .NET
-  Framework and silently read as `$null`, so the guard compared against 0.
-  Fixed via `[UIntPtr]::Size` instead.
-- `capm`'s size argument no longer accepts a `%` suffix or a bare-decimal
-  fraction (both existed only pre-release, never published): a `%` in an
-  argument trips every tool's fail-closed check the moment a chain hop needs
-  the `cmd.exe` fallback, so `cap 50 capm 25% ...` failed while `capm 25% cap
-  50 ...` worked - an order-dependent bug. A bare integer percent (matching
-  `cap`'s own convention) never contains `%`, so it sidesteps this for every
-  chain order.
-- `capm` no longer leaks a raw PowerShell type-conversion error (with file
-  path and line number) to stderr for an arbitrarily long `<size>` digit
-  string - parsing now uses `[double]::TryParse` instead of a raw cast, so
-  every invalid size hits the same clean usage error.
-
 ### Changed
 
 - Every launcher's embedded native-process primitive now checks `ResumeThread`/
   `WaitForSingleObject`/`GetExitCodeProcess` return values instead of assuming
   success, and `AllocHGlobal`/`FreeHGlobal` around each Job Object limit
-  struct is wrapped in `try`/`finally` (`cap`, `pint`, `capm` also terminate a
-  still-suspended child instead of waiting on it forever if `ResumeThread`
-  itself fails). Hardening for a class of rare Win32 failures - not a fix for
+  struct is wrapped in `try`/`finally`. On a `ResumeThread` or
+  `WaitForSingleObject` failure, the launcher now attempts to terminate the
+  child instead of either waiting on a still-suspended process forever or
+  reporting failure while it may still be running unmanaged in the
+  background. Hardening for a class of rare Win32 failures - not a fix for
   an observed regression.
 
 ## [0.1.0] - 2026-09-02

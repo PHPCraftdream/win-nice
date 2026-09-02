@@ -263,7 +263,11 @@ public static class PintLauncher
 
         if (WaitForSingleObject(pi.hProcess, 0xFFFFFFFF) == 0xFFFFFFFF)
         {
+            // The child's actual state is unknown here - don't just report
+            // failure and potentially leave it running unmanaged in the
+            // background. Best-effort kill before giving up.
             int waitErr = Marshal.GetLastWin32Error();
+            TerminateProcess(pi.hProcess, 1);
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
             CloseHandle(hJob);

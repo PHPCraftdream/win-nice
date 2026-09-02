@@ -457,10 +457,15 @@ Write-Output ("{0:N1}" -f $pct)
         # not absolute ones - an absolute "baseline must exceed cap+20" gate was
         # tried and rejected valid signal on a loaded machine (baseline=37.3,
         # capped=25.6 - a real, working cap - got skipped for "baseline too low").
+        # 5 attempts, not 3: a sustained contention spike (e.g. this test running
+        # right after a long, heavy back-to-back Pester run) can poison every
+        # attempt's baseline in a 3-attempt window - confirmed: isolated re-run
+        # passed cleanly in 9.4s immediately after a 3-attempt exhaustion inside
+        # a 180s full-suite run (baseline=20.5 < cap*1.15=34.5 on every attempt).
         $passed = $false
         $lastBaseline = $null
         $lastCapped = $null
-        for ($attempt = 1; $attempt -le 3 -and -not $passed; $attempt++) {
+        for ($attempt = 1; $attempt -le 5 -and -not $passed; $attempt++) {
             $baseline = [double](powershell -NoProfile -File $burnFile $threads $seconds)
             $cappedOut = & (Join-Path $bin 'cap.bat') $cap powershell -NoProfile -File $burnFile $threads $seconds
             $capped = [double]($cappedOut | Select-Object -Last 1)
@@ -613,13 +618,20 @@ Describe 'pint.ps1 argument validation' {
 }
 
 Describe 'pint.ps1 behavior' {
+    # 1, not a higher count: these tests only care about exit-code propagation,
+    # argument forwarding, and metacharacter preservation - none of that needs
+    # more than one logical processor, and pint itself supports thread-count 1
+    # with no minimum-processor-count requirement documented anywhere. A
+    # hardcoded higher count here would fail argument validation before ever
+    # reaching the behavior under test on a genuinely 1-processor machine
+    # (release review 1745-708cb53 P2).
     It 'propagates the exit code of the wrapped command' {
-        & (Join-Path $bin 'pint.bat') 2 cmd /c "exit 3"
+        & (Join-Path $bin 'pint.bat') 1 cmd /c "exit 3"
         $LASTEXITCODE | Should Be 3
     }
 
     It 'forwards a flag that would ambiguously prefix-match the declared -Count parameter name (e.g. -c)' {
-        $r = Get-ForwardedArgs -Exe (Join-Path $bin 'pint.bat') -Prefix @('2') -ProbeArgs @('-c', '0')
+        $r = Get-ForwardedArgs -Exe (Join-Path $bin 'pint.bat') -Prefix @('1') -ProbeArgs @('-c', '0')
         $r.ExitCode | Should Be 0
         $r.Output | Should Be '-c|SEP|0'
     }
@@ -627,22 +639,29 @@ Describe 'pint.ps1 behavior' {
     It 'preserves cmd.exe metacharacters and a literal "%" on the direct-launch path' {
         # Must invoke pint.ps1 directly (not through pint.bat, which has its own
         # separate, documented "%" corruption at the %* forwarding step).
-        $r = Get-DirectForwardedArgs -Ps1 (Join-Path $bin 'pint.ps1') -Prefix @('2') -ProbeArgs @('A&B', 'A|B', '100%OFF')
+        $r = Get-DirectForwardedArgs -Ps1 (Join-Path $bin 'pint.ps1') -Prefix @('1') -ProbeArgs @('A&B', 'A|B', '100%OFF')
         $r.ExitCode | Should Be 0
         $r.Output | Should Be 'A&B|SEP|A|B|SEP|100%OFF'
     }
 
     It 'pins the process to exactly the first N logical processors' {
+        # min(3, ProcessorCount): the point of this test is proving "first N,
+        # not just 1 or all" - N=3 needs 3 processors, but the test must still
+        # be meaningful (N > 1) down to a 2-processor machine.
+        $n = [Math]::Min(3, [Environment]::ProcessorCount)
+        $expectedMask = '0x' + (([uint64]1 -shl $n) - [uint64]1).ToString('X')
         $out = New-TempFile
         $probe = "Set-Content -Path '$out' -Value ('0x' + (Get-Process -Id `$PID).ProcessorAffinity.ToString('X'))"
         $probeFile = New-TempScript
         Set-Content -Path $probeFile -Value $probe
-        & (Join-Path $bin 'pint.bat') 3 powershell -NoProfile -File $probeFile
-        (Get-Content $out).Trim() | Should Be '0x7'
+        & (Join-Path $bin 'pint.bat') $n powershell -NoProfile -File $probeFile
+        (Get-Content $out).Trim() | Should Be $expectedMask
         Remove-Item $out, $probeFile -ErrorAction SilentlyContinue
     }
 
     It 'pins the whole spawned process tree, not just the immediate child' {
+        $n = [Math]::Min(3, [Environment]::ProcessorCount)
+        $expectedMask = '0x' + (([uint64]1 -shl $n) - [uint64]1).ToString('X')
         $out = New-TempFile
         $script = @'
 $c = Start-Process cmd -ArgumentList "/c ping -n 3 127.0.0.1 >nul" -WindowStyle Hidden -PassThru
@@ -659,8 +678,8 @@ try {{
 '@ -f $out
         $scriptFile = New-TempScript
         Set-Content -Path $scriptFile -Value $script
-        & (Join-Path $bin 'pint.bat') 3 powershell -NoProfile -File $scriptFile
-        (Get-Content $out).Trim() | Should Be '0x7'
+        & (Join-Path $bin 'pint.bat') $n powershell -NoProfile -File $scriptFile
+        (Get-Content $out).Trim() | Should Be $expectedMask
         Remove-Item $out, $scriptFile -ErrorAction SilentlyContinue
     }
 }
@@ -1036,7 +1055,16 @@ Write-Output ("{0:N1}" -f $pct)
         Remove-Item $burnFile -ErrorAction SilentlyContinue
     }
 
-    It 'clamps a nested "pint 2 pint 3" to the OUTER (tighter) mask, not the inner (wider) request' {
+    It 'clamps a nested "pint 1 pint 2" to the OUTER (tighter) mask, not the inner (wider) request' -Skip:([Environment]::ProcessorCount -lt 2) {
+        # 1/2, not 2/3: pint itself rejects a thread-count above the machine's
+        # own logical processor count, and the product doesn't document a
+        # minimum-processor-count requirement - a hardcoded "pint 2 pint 3"
+        # here would fail argument validation on a 1-2 processor machine
+        # before ever reaching the nested-affinity behavior under test
+        # (release review 1745-708cb53 P2). Skipped outright (not run with a
+        # smaller/meaningless count) on a genuinely 1-processor machine, since
+        # there's no way to express "wider than 1" below thread-count 2 there.
+        #
         # Empirically verified (release review 1609-8824cf7 P3): a nested pint
         # requesting a WIDER mask than its parent job allows does not error out
         # and does not get the wider mask either - the effective affinity comes
@@ -1051,9 +1079,9 @@ Write-Output ("{0:N1}" -f $pct)
             $probe = "(Get-Process -Id `$PID).ProcessorAffinity.ToString('X') | Out-File -FilePath '$out'; exit 8"
             $probeFile = New-TempScript
             Set-Content -Path $probeFile -Value $probe
-            & powershell -NoProfile -File (Join-Path $bin 'pint.ps1') 2 pint 3 powershell -NoProfile -File $probeFile
+            & powershell -NoProfile -File (Join-Path $bin 'pint.ps1') 1 pint 2 powershell -NoProfile -File $probeFile
             $LASTEXITCODE | Should Be 8
-            ('0x' + (Get-Content $out).Trim()) | Should Be '0x3'
+            ('0x' + (Get-Content $out).Trim()) | Should Be '0x1'
             Remove-Item $out, $probeFile -ErrorAction SilentlyContinue
         } finally {
             $env:PATH = $prevPath
