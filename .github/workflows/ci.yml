@@ -33,6 +33,16 @@ jobs:
       - name: Pester test suite (real tool behavior)
         shell: powershell
         run: |
+          # GitHub Actions defaults $ErrorActionPreference to 'Stop' for powershell-
+          # shell steps; that leaks into Invoke-Pester's own scope (Pester 3 runs each
+          # It block in-process) and turns every non-terminating stderr line from a
+          # wrapped tool's Write-Error (captured via 2>&1) into a terminating error,
+          # aborting the test before its own Should assertion ever runs - confirmed:
+          # every one of this suite's "expect a Write-Error + nonzero exit" tests
+          # failed this way on a real run, none of the "expect success" tests did.
+          # Reset to PowerShell's normal default so native-command stderr behaves the
+          # same way here as it does locally.
+          $ErrorActionPreference = 'Continue'
           # Runners ship Pester 3.4.0 and 5.9.0 side by side; the suite uses v3 syntax.
           Import-Module Pester -MaximumVersion 3.99
           $result = Invoke-Pester -Path test\win-nice.Tests.ps1 -PassThru

@@ -2,8 +2,11 @@
 
 [![CI](https://github.com/phpcraftdream/win-nice/actions/workflows/ci.yml/badge.svg)](https://github.com/phpcraftdream/win-nice/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/win-nice.svg)](https://www.npmjs.com/package/win-nice)
+[![npm downloads](https://img.shields.io/npm/dm/win-nice.svg)](https://www.npmjs.com/package/win-nice)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![platform](https://img.shields.io/badge/platform-win32-lightgrey.svg)](#requirements)
+[![node](https://img.shields.io/node/v/win-nice.svg)](package.json)
+[![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](package.json)
 
 Windows equivalent of the unix `nice` / `renice` / `cpulimit` family, built for a
 specific pain point: running several parallel AI coding agents (Claude Code, etc.)

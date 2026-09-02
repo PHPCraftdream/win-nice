@@ -44,6 +44,11 @@ jobs:
       - name: Pester test suite (real tool behavior)
         shell: powershell
         run: |
+          # See ci.yml's identical step for why: GitHub Actions defaults
+          # $ErrorActionPreference to 'Stop' for powershell-shell steps, which turns
+          # every wrapped tool's non-terminating Write-Error (captured via 2>&1) into
+          # a terminating error inside Invoke-Pester's own scope.
+          $ErrorActionPreference = 'Continue'
           # Runners ship Pester 3.4.0 and 5.9.0 side by side; the suite uses v3 syntax.
           Import-Module Pester -MaximumVersion 3.99
           $result = Invoke-Pester -Path test\win-nice.Tests.ps1 -PassThru
@@ -51,3 +56,13 @@ jobs:
 
       - name: Publish
         run: npm publish --provenance
+        env:
+          # First-ever publish: npm's OIDC "Trusted Publisher" can only be configured
+          # on a package that already exists on the registry (there's no settings page
+          # for a name that's never been published), so this uses a classic token for
+          # auth. --provenance still works with token auth - it only needs id-token:
+          # write (already granted above) for the attestation signature, independent
+          # of how the publish itself authenticates. Once this first publish creates
+          # the package, npm's Trusted Publisher can be configured on its settings
+          # page for future releases, and this can switch to token-free OIDC auth.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
