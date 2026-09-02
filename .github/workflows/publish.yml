@@ -55,7 +55,12 @@ jobs:
           if ($result.FailedCount -gt 0) { exit 1 }
 
       - name: Publish
-        run: npm publish --provenance
+        # --access public: required for provenance on a package's first publish -
+        # npm refuses to generate a provenance attestation for a new/private-looking
+        # package without it, even though "win-nice" is unscoped and public by
+        # default (confirmed: EUSAGE "Can't generate provenance for new or private
+        # package, you must set `access` to public" on the first real publish attempt).
+        run: npm publish --provenance --access public
         env:
           # First-ever publish: npm's OIDC "Trusted Publisher" can only be configured
           # on a package that already exists on the registry (there's no settings page
