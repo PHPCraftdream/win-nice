@@ -160,135 +160,130 @@ public static class PintLauncher
         if (hJob == IntPtr.Zero)
             throw new InvalidOperationException("CreateJobObject failed: " + Marshal.GetLastWin32Error());
 
-        var limitInfo = new JOBOBJECT_BASIC_LIMIT_INFORMATION
-        {
-            LimitFlags = JOB_OBJECT_LIMIT_AFFINITY,
-            Affinity = (UIntPtr)affinityMask
-        };
-        int size = Marshal.SizeOf(limitInfo);
-        IntPtr ptr = Marshal.AllocHGlobal(size);
-        bool ok;
+        // Single owner for every handle this method acquires. The finally below closes
+        // hThread/hProcess/hJob - in that order - on EVERY way out: normal return, any
+        // of the InvalidOperationExceptions thrown here, and an unexpected managed
+        // exception (allocation/marshalling failure) between acquisition and use.
+        // hProcess/hThread stay IntPtr.Zero until CreateProcess has actually succeeded,
+        // so each handle is closed exactly once and only if it was really acquired.
+        IntPtr hProcess = IntPtr.Zero;
+        IntPtr hThread = IntPtr.Zero;
         try
         {
-            Marshal.StructureToPtr(limitInfo, ptr, false);
-            ok = SetInformationJobObject(hJob, JobObjectBasicLimitInformation, ptr, (uint)size);
+            var limitInfo = new JOBOBJECT_BASIC_LIMIT_INFORMATION
+            {
+                LimitFlags = JOB_OBJECT_LIMIT_AFFINITY,
+                Affinity = (UIntPtr)affinityMask
+            };
+            int size = Marshal.SizeOf(limitInfo);
+            IntPtr ptr = Marshal.AllocHGlobal(size);
+            bool ok;
+            try
+            {
+                Marshal.StructureToPtr(limitInfo, ptr, false);
+                ok = SetInformationJobObject(hJob, JobObjectBasicLimitInformation, ptr, (uint)size);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(ptr);
+            }
+            if (!ok)
+                throw new InvalidOperationException("SetInformationJobObject failed: " + Marshal.GetLastWin32Error());
+
+            var si = new STARTUPINFO();
+            si.cb = Marshal.SizeOf(si);
+            PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
+
+            // See cap.ps1 for why .bat/.cmd targets skip the direct attempt entirely:
+            // CreateProcess silently re-invokes them through cmd.exe on its own, using
+            // unescaped text, instead of failing the way a genuinely missing exe would.
+            bool isBatOrCmd = argv.Length > 0 && (
+                argv[0].EndsWith(".bat", StringComparison.OrdinalIgnoreCase) ||
+                argv[0].EndsWith(".cmd", StringComparison.OrdinalIgnoreCase));
+
+            bool created = false;
+            if (!isBatOrCmd)
+            {
+                var directCommandLine = new StringBuilder(BuildArgvCommandLine(argv));
+                created = CreateProcess(null, directCommandLine, IntPtr.Zero, IntPtr.Zero, true,
+                    CREATE_SUSPENDED, IntPtr.Zero, null, ref si, out pi);
+            }
+
+            if (!created)
+            {
+                // Falling back to cmd.exe /c: a literal "%" in any argument could now
+                // trigger environment-variable expansion (cmd.exe pairs up "%" characters
+                // across the whole command line, even across separate arguments) and
+                // change what actually runs. Fail loudly here instead of silently risking
+                // that - there's no reliable per-character escape for "%" at this level.
+                foreach (var a in argv)
+                {
+                    if (a.IndexOf('%') >= 0)
+                        throw new InvalidOperationException(
+                            "Refusing to run: argument contains '%' and the target needs the cmd.exe " +
+                            "fallback (not a directly-launchable .exe), where '%' can trigger unintended " +
+                            "environment-variable expansion. See README's Argument handling section.");
+                }
+
+                string cmdExe = Environment.SystemDirectory + "\\cmd.exe";
+                // /d: skip HKCU AutoRun (user-writable registry key). /v:off: disable delayed
+                // expansion so "!var!" in an argument can't be expanded. /s plus the extra outer
+                // quote pair: cmd's /S rule strips exactly that outer pair and leaves the rest of
+                // the string untouched - without /S, cmd strips the first and last quote of the
+                // whole line instead, which breaks quoting whenever the target path itself needs
+                // quotes AND another argument is also quoted.
+                var shellCommandLine = new StringBuilder("\"" + cmdExe + "\" /d /v:off /s /c \"" + cmdExeCommandLine + "\"");
+                created = CreateProcess(null, shellCommandLine, IntPtr.Zero, IntPtr.Zero, true,
+                    CREATE_SUSPENDED, IntPtr.Zero, null, ref si, out pi);
+                if (!created)
+                    throw new InvalidOperationException("CreateProcess failed: " + Marshal.GetLastWin32Error());
+            }
+
+            // Ownership of the child's handles transfers here, once CreateProcess has
+            // actually succeeded - from this point the finally below is what closes them.
+            hProcess = pi.hProcess;
+            hThread = pi.hThread;
+
+            if (!AssignProcessToJobObject(hJob, hProcess))
+            {
+                // Can't guarantee the pin - kill instead of letting it run unpinned and orphaned.
+                int err = Marshal.GetLastWin32Error();
+                TerminateProcess(hProcess, 1);
+                throw new InvalidOperationException("AssignProcessToJobObject failed: " + err);
+            }
+
+            if (ResumeThread(hThread) == 0xFFFFFFFF)
+            {
+                // Still suspended - an unbounded wait below would hang forever. Kill
+                // it instead of leaving an orphaned, permanently-suspended process.
+                int resumeErr = Marshal.GetLastWin32Error();
+                TerminateProcess(hProcess, 1);
+                throw new InvalidOperationException("ResumeThread failed: " + resumeErr);
+            }
+
+            if (WaitForSingleObject(hProcess, 0xFFFFFFFF) == 0xFFFFFFFF)
+            {
+                // The child's actual state is unknown here - don't just report
+                // failure and potentially leave it running unmanaged in the
+                // background. Best-effort kill before giving up.
+                int waitErr = Marshal.GetLastWin32Error();
+                TerminateProcess(hProcess, 1);
+                throw new InvalidOperationException("WaitForSingleObject failed: " + waitErr);
+            }
+
+            uint exitCode;
+            if (!GetExitCodeProcess(hProcess, out exitCode))
+                throw new InvalidOperationException("GetExitCodeProcess failed: " + Marshal.GetLastWin32Error());
+
+            return (int)exitCode;
         }
         finally
         {
-            Marshal.FreeHGlobal(ptr);
+            // Same order as the code this replaces: thread handle, process handle, job handle.
+            if (hThread != IntPtr.Zero) CloseHandle(hThread);
+            if (hProcess != IntPtr.Zero) CloseHandle(hProcess);
+            if (hJob != IntPtr.Zero) CloseHandle(hJob);
         }
-        if (!ok)
-        {
-            CloseHandle(hJob);
-            throw new InvalidOperationException("SetInformationJobObject failed: " + Marshal.GetLastWin32Error());
-        }
-
-        var si = new STARTUPINFO();
-        si.cb = Marshal.SizeOf(si);
-        PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
-
-        // See cap.ps1 for why .bat/.cmd targets skip the direct attempt entirely:
-        // CreateProcess silently re-invokes them through cmd.exe on its own, using
-        // unescaped text, instead of failing the way a genuinely missing exe would.
-        bool isBatOrCmd = argv.Length > 0 && (
-            argv[0].EndsWith(".bat", StringComparison.OrdinalIgnoreCase) ||
-            argv[0].EndsWith(".cmd", StringComparison.OrdinalIgnoreCase));
-
-        bool created = false;
-        if (!isBatOrCmd)
-        {
-            var directCommandLine = new StringBuilder(BuildArgvCommandLine(argv));
-            created = CreateProcess(null, directCommandLine, IntPtr.Zero, IntPtr.Zero, true,
-                CREATE_SUSPENDED, IntPtr.Zero, null, ref si, out pi);
-        }
-
-        if (!created)
-        {
-            // Falling back to cmd.exe /c: a literal "%" in any argument could now
-            // trigger environment-variable expansion (cmd.exe pairs up "%" characters
-            // across the whole command line, even across separate arguments) and
-            // change what actually runs. Fail loudly here instead of silently risking
-            // that - there's no reliable per-character escape for "%" at this level.
-            foreach (var a in argv)
-            {
-                if (a.IndexOf('%') >= 0)
-                {
-                    CloseHandle(hJob);
-                    throw new InvalidOperationException(
-                        "Refusing to run: argument contains '%' and the target needs the cmd.exe " +
-                        "fallback (not a directly-launchable .exe), where '%' can trigger unintended " +
-                        "environment-variable expansion. See README's Argument handling section.");
-                }
-            }
-
-            string cmdExe = Environment.SystemDirectory + "\\cmd.exe";
-            // /d: skip HKCU AutoRun (user-writable registry key). /v:off: disable delayed
-            // expansion so "!var!" in an argument can't be expanded. /s plus the extra outer
-            // quote pair: cmd's /S rule strips exactly that outer pair and leaves the rest of
-            // the string untouched - without /S, cmd strips the first and last quote of the
-            // whole line instead, which breaks quoting whenever the target path itself needs
-            // quotes AND another argument is also quoted.
-            var shellCommandLine = new StringBuilder("\"" + cmdExe + "\" /d /v:off /s /c \"" + cmdExeCommandLine + "\"");
-            created = CreateProcess(null, shellCommandLine, IntPtr.Zero, IntPtr.Zero, true,
-                CREATE_SUSPENDED, IntPtr.Zero, null, ref si, out pi);
-            if (!created)
-            {
-                CloseHandle(hJob);
-                throw new InvalidOperationException("CreateProcess failed: " + Marshal.GetLastWin32Error());
-            }
-        }
-
-        if (!AssignProcessToJobObject(hJob, pi.hProcess))
-        {
-            // Can't guarantee the pin - kill instead of letting it run unpinned and orphaned.
-            int err = Marshal.GetLastWin32Error();
-            TerminateProcess(pi.hProcess, 1);
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-            CloseHandle(hJob);
-            throw new InvalidOperationException("AssignProcessToJobObject failed: " + err);
-        }
-
-        if (ResumeThread(pi.hThread) == 0xFFFFFFFF)
-        {
-            // Still suspended - an unbounded wait below would hang forever. Kill
-            // it instead of leaving an orphaned, permanently-suspended process.
-            int resumeErr = Marshal.GetLastWin32Error();
-            TerminateProcess(pi.hProcess, 1);
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-            CloseHandle(hJob);
-            throw new InvalidOperationException("ResumeThread failed: " + resumeErr);
-        }
-
-        if (WaitForSingleObject(pi.hProcess, 0xFFFFFFFF) == 0xFFFFFFFF)
-        {
-            // The child's actual state is unknown here - don't just report
-            // failure and potentially leave it running unmanaged in the
-            // background. Best-effort kill before giving up.
-            int waitErr = Marshal.GetLastWin32Error();
-            TerminateProcess(pi.hProcess, 1);
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-            CloseHandle(hJob);
-            throw new InvalidOperationException("WaitForSingleObject failed: " + waitErr);
-        }
-
-        uint exitCode;
-        if (!GetExitCodeProcess(pi.hProcess, out exitCode))
-        {
-            int exitErr = Marshal.GetLastWin32Error();
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-            CloseHandle(hJob);
-            throw new InvalidOperationException("GetExitCodeProcess failed: " + exitErr);
-        }
-
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        CloseHandle(hJob);
-
-        return (int)exitCode;
     }
 }
 "@

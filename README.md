@@ -456,6 +456,14 @@ CPU-cap test retries a few times if the machine is too busy to get a clean
 baseline). It never touches the real system `PATH`/registry; the installer
 tests use `WIN_NICE_HOME` to redirect installs into a temp directory instead.
 
+3 of its cases only exercise `admin.ps1`'s already-elevated branch, which
+needs the whole test-runner process to already be elevated (not just
+`admin.ps1` itself) - a normal, unelevated run reports them `Skipped`, which
+is expected, not a failure. `npm run test:elevated` (`test/run-elevated.ps1`)
+is a single entry point for that: one UAC prompt elevates the runner once,
+then the full suite - all cases, not just those 3 - runs inside that one
+elevated session, with the result relayed back to the original console.
+
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache License, Version 2.0](LICENSE-APACHE),

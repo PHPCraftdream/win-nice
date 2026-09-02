@@ -32,7 +32,8 @@
   ],
   "scripts": {
     "postinstall": "node install/cli.js install",
-    "test": "node --test test/cli.test.js test/docs-sync.test.js test/gitbash-shims.test.js test/install-uninstall.test.js test/manifest.test.js test/paths.test.js test/skill.test.js"
+    "test": "node --test test/cli.test.js test/docs-sync.test.js test/gitbash-shims.test.js test/install-uninstall.test.js test/manifest.test.js test/paths.test.js test/skill.test.js",
+    "test:elevated": "powershell -NoProfile -ExecutionPolicy Bypass -File test\\run-elevated.ps1"
   },
   "keywords": [
     "windows",

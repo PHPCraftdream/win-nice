@@ -1344,6 +1344,476 @@ Describe 'cy.ps1 / cx.ps1 PATH isolation' {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Fault-injection harness. bin/ is NOT modified by any of this.
+#
+# ResumeThread / WaitForSingleObject / GetExitCodeProcess /
+# AssignProcessToJobObject only ever fail on handles the launcher itself just
+# created, so no command line can reach those branches - the integration tests
+# above can only ever exercise the success paths. Instead of adding a toggle to
+# production code, these tests take the SAME embedded C# out of the .ps1 (via
+# the AST, like the admin routing tests above), swap individual [DllImport]
+# declarations for instrumented managed stubs that forward to the real entry
+# point (or force a documented failure on demand), compile that copy into its
+# own namespace, and call Run() directly.
+function Get-LauncherCSharp {
+    param([Parameter(Mandatory = $true)][string]$Ps1Path)
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($Ps1Path, [ref]$null, [ref]$null)
+    $node = $ast.Find({
+        param($a)
+        $a -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+        $a.StringConstantType -eq 'DoubleQuotedHereString' -and
+        $a.Value -match 'public static class \w+Launcher'
+    }, $true)
+    if (-not $node) { throw "no embedded C# here-string found in $Ps1Path" }
+    # LF-normalized so the anchors below don't have to care about CRLF.
+    return ($node.Value -replace "`r`n", "`n")
+}
+
+# Anchored single-occurrence replacement. Throws when the anchor is missing OR
+# ambiguous, so a launcher edit that moves it fails the test loudly instead of
+# quietly producing an uninstrumented (always-green) probe.
+function Edit-SourceOnce {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Find,
+        [Parameter(Mandatory = $true)][string]$Replace,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $needle = $Find -replace "`r`n", "`n"
+    $i = $Text.IndexOf($needle, [StringComparison]::Ordinal)
+    if ($i -lt 0) { throw "fault-probe anchor '$Label' not found - launcher source changed shape" }
+    if ($Text.IndexOf($needle, $i + 1, [StringComparison]::Ordinal) -ge 0) { throw "fault-probe anchor '$Label' is not unique" }
+    return $Text.Substring(0, $i) + ($Replace -replace "`r`n", "`n") + $Text.Substring($i + $needle.Length)
+}
+
+# Builds (once) an instrumented copy of a launcher's class and returns its Type.
+# -JobObject additionally instruments the three Job-Object-only imports.
+function New-LauncherFaultProbe {
+    param(
+        [Parameter(Mandatory = $true)][string]$Ps1Path,
+        [Parameter(Mandatory = $true)][string]$Namespace,
+        [Parameter(Mandatory = $true)][string]$ClassName,
+        [switch]$JobObject
+    )
+    $already = [System.Management.Automation.PSTypeName]"$Namespace.$ClassName"
+    if ($already.Type) { return $already.Type }
+
+    $src = Get-LauncherCSharp -Ps1Path $Ps1Path
+
+    # CloseHandle: record every close, forward to the real one, count failures.
+    # A double close would make the second CloseHandle return false, so
+    # "CloseHandleFailures -eq 0 and every logged handle distinct" IS the
+    # closed-exactly-once oracle. All shared probe state lives here.
+    $src = Edit-SourceOnce $src @'
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr hObject);
+'@ @'
+    [DllImport("kernel32.dll", EntryPoint = "CloseHandle")]
+    static extern bool CloseHandleReal(IntPtr hObject);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern void SetLastError(uint dwErrCode);
+
+    public static bool FailWait;
+    public static bool FailResume;
+    public static bool FailAssign;
+    public static bool FailSetInfo;
+    public static bool FailGetExitCode;
+    public static int TerminateCalls;
+    public static int CloseHandleFailures;
+    public static int LastProcessId;
+    public static System.Collections.Generic.List<IntPtr> ClosedHandles = new System.Collections.Generic.List<IntPtr>();
+
+    public static void ResetProbe()
+    {
+        FailWait = false; FailResume = false; FailAssign = false;
+        FailSetInfo = false; FailGetExitCode = false;
+        TerminateCalls = 0; CloseHandleFailures = 0; LastProcessId = 0;
+        ClosedHandles.Clear();
+    }
+
+    static bool CloseHandle(IntPtr hObject)
+    {
+        ClosedHandles.Add(hObject);
+        bool ok = CloseHandleReal(hObject);
+        if (!ok) CloseHandleFailures++;
+        return ok;
+    }
+'@ 'CloseHandle'
+
+    $src = Edit-SourceOnce $src @'
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+'@ @'
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "TerminateProcess")]
+    static extern bool TerminateProcessReal(IntPtr hProcess, uint uExitCode);
+
+    static bool TerminateProcess(IntPtr hProcess, uint uExitCode)
+    {
+        TerminateCalls++;
+        return TerminateProcessReal(hProcess, uExitCode);
+    }
+'@ 'TerminateProcess'
+
+    # ERROR_INVALID_HANDLE (6) via a real SetLastError P/Invoke, so
+    # Marshal.GetLastWin32Error() returns a deterministic value - asserting on
+    # it proves the launcher captures the error BEFORE calling TerminateProcess.
+    $src = Edit-SourceOnce $src @'
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+'@ @'
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "WaitForSingleObject")]
+    static extern uint WaitForSingleObjectReal(IntPtr hHandle, uint dwMilliseconds);
+
+    static uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds)
+    {
+        if (FailWait) { SetLastError(6); return 0xFFFFFFFF; }
+        return WaitForSingleObjectReal(hHandle, dwMilliseconds);
+    }
+'@ 'WaitForSingleObject'
+
+    $src = Edit-SourceOnce $src @'
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
+'@ @'
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "GetExitCodeProcess")]
+    static extern bool GetExitCodeProcessReal(IntPtr hProcess, out uint lpExitCode);
+
+    static bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode)
+    {
+        if (FailGetExitCode) { lpExitCode = 0; SetLastError(6); return false; }
+        return GetExitCodeProcessReal(hProcess, out lpExitCode);
+    }
+'@ 'GetExitCodeProcess'
+
+    # Records the child's PID so a test can assert the process is really gone
+    # after an injected failure (the orphan-child concern from the release review).
+    $src = Edit-SourceOnce $src @'
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool CreateProcess(string lpApplicationName, StringBuilder lpCommandLine,
+        IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles,
+        uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory,
+        ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
+'@ @'
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "CreateProcess")]
+    static extern bool CreateProcessReal(string lpApplicationName, StringBuilder lpCommandLine,
+        IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles,
+        uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory,
+        ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
+
+    static bool CreateProcess(string lpApplicationName, StringBuilder lpCommandLine,
+        IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles,
+        uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory,
+        ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation)
+    {
+        bool ok = CreateProcessReal(lpApplicationName, lpCommandLine, lpProcessAttributes,
+            lpThreadAttributes, bInheritHandles, dwCreationFlags, lpEnvironment,
+            lpCurrentDirectory, ref lpStartupInfo, out lpProcessInformation);
+        if (ok) LastProcessId = lpProcessInformation.dwProcessId;
+        return ok;
+    }
+'@ 'CreateProcess'
+
+    if ($JobObject) {
+        $src = Edit-SourceOnce $src @'
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern uint ResumeThread(IntPtr hThread);
+'@ @'
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "ResumeThread")]
+    static extern uint ResumeThreadReal(IntPtr hThread);
+
+    static uint ResumeThread(IntPtr hThread)
+    {
+        if (FailResume) { SetLastError(5); return 0xFFFFFFFF; }
+        return ResumeThreadReal(hThread);
+    }
+'@ 'ResumeThread'
+
+        $src = Edit-SourceOnce $src @'
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+'@ @'
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "AssignProcessToJobObject")]
+    static extern bool AssignProcessToJobObjectReal(IntPtr hJob, IntPtr hProcess);
+
+    static bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess)
+    {
+        if (FailAssign) { SetLastError(5); return false; }
+        return AssignProcessToJobObjectReal(hJob, hProcess);
+    }
+'@ 'AssignProcessToJobObject'
+
+        $src = Edit-SourceOnce $src @'
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetInformationJobObject(IntPtr hJob, int JobObjectInfoClass, IntPtr lpJobObjectInfo, uint cbJobObjectInfoLength);
+'@ @'
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "SetInformationJobObject")]
+    static extern bool SetInformationJobObjectReal(IntPtr hJob, int JobObjectInfoClass, IntPtr lpJobObjectInfo, uint cbJobObjectInfoLength);
+
+    static bool SetInformationJobObject(IntPtr hJob, int JobObjectInfoClass, IntPtr lpJobObjectInfo, uint cbJobObjectInfoLength)
+    {
+        if (FailSetInfo) { SetLastError(87); return false; }
+        return SetInformationJobObjectReal(hJob, JobObjectInfoClass, lpJobObjectInfo, cbJobObjectInfoLength);
+    }
+'@ 'SetInformationJobObject'
+    }
+
+    # Wrapping in a namespace keeps the ORIGINAL class name (so the copy really is
+    # the shipped code) while guaranteeing no Add-Type collision with a production
+    # class - the "using" lines end up inside the namespace, which is legal C#.
+    Add-Type -TypeDefinition ("namespace $Namespace`n{`n" + $src + "`n}`n") -Language CSharp
+    return ([System.Management.Automation.PSTypeName]"$Namespace.$ClassName").Type
+}
+
+# One probe per template shape. The 8 non-Job launchers share a byte-identical
+# Run() body (verified), and so do the 3 Job-Object ones, so two compiled probes
+# cover every failure branch; the source-shape test below is what guarantees the
+# other 9 files still match the template these two stand in for.
+$script:probePriority = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'idle.ps1') `
+    -Namespace 'WinNiceFaultProbePriority' -ClassName 'IdleLauncher'
+$script:probeJob = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'cap.ps1') `
+    -Namespace 'WinNiceFaultProbeJob' -ClassName 'CapLauncher' -JobObject
+
+# Kills a probe child that survived a failed assertion (a successful test's
+# injected TerminateProcess has already killed it).
+function Remove-ProbeChild {
+    param([int]$ProcessId)
+    if ($ProcessId -gt 0) {
+        $p = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+        if ($p) { Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+Describe 'native failure branches (fault-injected copy of the embedded C#)' {
+    It 'kills the child, reports the wait error, and closes every handle exactly once when WaitForSingleObject fails (Job Object template)' {
+        $t = $script:probeJob
+        $t::ResetProbe()
+        $t::FailWait = $true
+        $message = $null
+        try {
+            $t::Run(50, [string[]]@('ping', '-n', '30', '127.0.0.1'), 'ping -n 30 127.0.0.1') | Out-Null
+        } catch {
+            $message = $_.Exception.InnerException.Message
+        }
+        # "failed: 6" (not 0) proves the Win32 error is captured BEFORE the
+        # TerminateProcess call, which would otherwise overwrite it.
+        $message | Should Be 'WaitForSingleObject failed: 6'
+        $t::TerminateCalls | Should Be 1
+        # hThread, hProcess, hJob - each closed once, each close succeeded
+        # (a double close would return false and bump CloseHandleFailures).
+        $t::ClosedHandles.Count | Should Be 3
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 3
+        $t::CloseHandleFailures | Should Be 0
+        # Fail-closed: the wrapper reported failure, so the child must not still
+        # be running in the background.
+        Get-Process -Id $t::LastProcessId -ErrorAction SilentlyContinue | Should Be $null
+        Remove-ProbeChild -ProcessId $t::LastProcessId
+        $t::ResetProbe()
+    }
+
+    It 'kills the still-suspended child and reports the resume error when ResumeThread fails (Job Object template)' {
+        $t = $script:probeJob
+        $t::ResetProbe()
+        $t::FailResume = $true
+        $message = $null
+        try {
+            $t::Run(50, [string[]]@('ping', '-n', '30', '127.0.0.1'), 'ping -n 30 127.0.0.1') | Out-Null
+        } catch {
+            $message = $_.Exception.InnerException.Message
+        }
+        # ERROR_ACCESS_DENIED (5) - deterministic, injected by the probe.
+        $message | Should Be 'ResumeThread failed: 5'
+        # Without this kill the child stays suspended forever: CREATE_SUSPENDED
+        # was never undone and nobody else holds a handle to it.
+        $t::TerminateCalls | Should Be 1
+        $t::ClosedHandles.Count | Should Be 3
+        $t::CloseHandleFailures | Should Be 0
+        Get-Process -Id $t::LastProcessId -ErrorAction SilentlyContinue | Should Be $null
+        Remove-ProbeChild -ProcessId $t::LastProcessId
+        $t::ResetProbe()
+    }
+
+    It 'closes the job handle - and only it, exactly once - on the "%" fail-closed branch (Job Object template)' {
+        $t = $script:probeJob
+        $t::ResetProbe()
+        $targetBat = (New-TempScript).Replace('.ps1', '.bat')
+        Set-Content -Path $targetBat -Value "@echo off`r`nexit /b 0`r`n"
+        $message = $null
+        try {
+            $t::Run(50, [string[]]@($targetBat, '100%OFF'), 'x') | Out-Null
+        } catch {
+            $message = $_.Exception.InnerException.Message
+        }
+        ($message -replace '\s+', ' ') | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
+        # No process was ever created on this branch, so hJob is the only handle
+        # in flight - and it must still be released. Part 1's single-owner finally
+        # closes it here (see docs/plans/2026-09-02-safehandle-fault-injection-plan.md 4.2).
+        $t::ClosedHandles.Count | Should Be 1
+        $t::CloseHandleFailures | Should Be 0
+        $t::LastProcessId | Should Be 0
+        Remove-Item $targetBat -ErrorAction SilentlyContinue
+        $t::ResetProbe()
+    }
+
+    It 'kills the still-suspended child and reports the assign error when AssignProcessToJobObject fails (Job Object template)' {
+        $t = $script:probeJob
+        $t::ResetProbe()
+        $t::FailAssign = $true
+        $message = $null
+        try {
+            $t::Run(50, [string[]]@('ping', '-n', '30', '127.0.0.1'), 'ping -n 30 127.0.0.1') | Out-Null
+        } catch {
+            $message = $_.Exception.InnerException.Message
+        }
+        # ERROR_ACCESS_DENIED (5) - deterministic, injected by the probe.
+        $message | Should Be 'AssignProcessToJobObject failed: 5'
+        $t::TerminateCalls | Should Be 1
+        $t::ClosedHandles.Count | Should Be 3
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 3
+        $t::CloseHandleFailures | Should Be 0
+        Get-Process -Id $t::LastProcessId -ErrorAction SilentlyContinue | Should Be $null
+        Remove-ProbeChild -ProcessId $t::LastProcessId
+        $t::ResetProbe()
+    }
+
+    It 'closes only the job handle and never launches the child when SetInformationJobObject fails (Job Object template)' {
+        $t = $script:probeJob
+        $t::ResetProbe()
+        $t::FailSetInfo = $true
+        $message = $null
+        try {
+            $t::Run(50, [string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"') | Out-Null
+        } catch {
+            $message = $_.Exception.InnerException.Message
+        }
+        # ERROR_INVALID_PARAMETER (87) - deterministic, injected by the probe.
+        $message | Should Be 'SetInformationJobObject failed: 87'
+        $t::TerminateCalls | Should Be 0
+        # No process was ever created on this branch - hJob is the only handle in flight.
+        $t::ClosedHandles.Count | Should Be 1
+        $t::CloseHandleFailures | Should Be 0
+        $t::LastProcessId | Should Be 0
+        Remove-ProbeChild -ProcessId $t::LastProcessId
+        $t::ResetProbe()
+    }
+
+    It 'reports the exit-code error and still closes every handle when GetExitCodeProcess fails (Job Object template)' {
+        $t = $script:probeJob
+        $t::ResetProbe()
+        $t::FailGetExitCode = $true
+        $message = $null
+        try {
+            $t::Run(50, [string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"') | Out-Null
+        } catch {
+            $message = $_.Exception.InnerException.Message
+        }
+        $message | Should Be 'GetExitCodeProcess failed: 6'
+        # The real wait already succeeded (the child ran to completion) - only
+        # the exit-code fetch was faked, so nothing needed killing.
+        $t::TerminateCalls | Should Be 0
+        $t::ClosedHandles.Count | Should Be 3
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 3
+        $t::CloseHandleFailures | Should Be 0
+        Remove-ProbeChild -ProcessId $t::LastProcessId
+        $t::ResetProbe()
+    }
+
+    It 'kills the child, reports the wait error, and closes both handles exactly once when WaitForSingleObject fails (priority template)' {
+        $t = $script:probePriority
+        $t::ResetProbe()
+        $t::FailWait = $true
+        $message = $null
+        try {
+            $script:probePriority::Run(64, [string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"') | Out-Null
+        } catch {
+            $message = $_.Exception.InnerException.Message
+        }
+        $message | Should Be 'WaitForSingleObject failed: 6'
+        $t::TerminateCalls | Should Be 1
+        $t::ClosedHandles.Count | Should Be 2
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 2
+        $t::CloseHandleFailures | Should Be 0
+        Get-Process -Id $t::LastProcessId -ErrorAction SilentlyContinue | Should Be $null
+        Remove-ProbeChild -ProcessId $t::LastProcessId
+        $t::ResetProbe()
+    }
+
+    It 'reports the exit-code error and still closes both handles when GetExitCodeProcess fails (priority template)' {
+        $t = $script:probePriority
+        $t::ResetProbe()
+        $t::FailGetExitCode = $true
+        $message = $null
+        try {
+            $script:probePriority::Run(64, [string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"') | Out-Null
+        } catch {
+            $message = $_.Exception.InnerException.Message
+        }
+        $message | Should Be 'GetExitCodeProcess failed: 6'
+        $t::TerminateCalls | Should Be 0
+        $t::ClosedHandles.Count | Should Be 2
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 2
+        $t::CloseHandleFailures | Should Be 0
+        Remove-ProbeChild -ProcessId $t::LastProcessId
+        $t::ResetProbe()
+    }
+
+    It 'still returns the real exit code and closes every handle exactly once on the success path (Job Object template)' {
+        $t = $script:probeJob
+        $t::ResetProbe()
+        $result = $t::Run(50, [string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"')
+        $result | Should Be 7
+        $t::TerminateCalls | Should Be 0
+        $t::ClosedHandles.Count | Should Be 3
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 3
+        $t::CloseHandleFailures | Should Be 0
+        Remove-ProbeChild -ProcessId $t::LastProcessId
+        $t::ResetProbe()
+    }
+
+    It 'still returns the real exit code and closes both handles exactly once on the success path (priority template)' {
+        $t = $script:probePriority
+        $t::ResetProbe()
+        $result = $script:probePriority::Run(64, [string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"')
+        $result | Should Be 7
+        $t::TerminateCalls | Should Be 0
+        $t::ClosedHandles.Count | Should Be 2
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 2
+        $t::CloseHandleFailures | Should Be 0
+        Remove-ProbeChild -ProcessId $t::LastProcessId
+        $t::ResetProbe()
+    }
+}
+
+$launcherSourceFiles = @(
+    @{ Name = 'idle';        Shape = 'Priority' }
+    @{ Name = 'belownormal'; Shape = 'Priority' }
+    @{ Name = 'abovenormal'; Shape = 'Priority' }
+    @{ Name = 'high';        Shape = 'Priority' }
+    @{ Name = 'realtime';    Shape = 'Priority' }
+    @{ Name = 'cy';          Shape = 'Priority' }
+    @{ Name = 'cx';          Shape = 'Priority' }
+    @{ Name = 'admin';       Shape = 'Priority' }
+    @{ Name = 'cap';         Shape = 'Job' }
+    @{ Name = 'pint';        Shape = 'Job' }
+    @{ Name = 'capm';        Shape = 'Job' }
+)
+
+Describe 'embedded launcher C# keeps the single-owner cleanup shape (<Name>)' {
+    It 'closes each handle exactly once, only from the ownership finally (<Name>)' -TestCases $launcherSourceFiles {
+        param($Name, $Shape)
+        $src = Get-LauncherCSharp -Ps1Path (Join-Path $bin "$Name.ps1")
+        # 1 [DllImport] declaration + one close per owned handle, all inside the
+        # single finally. Any per-branch CloseHandle coming back bumps this count.
+        $expected = if ($Shape -eq 'Job') { 4 } else { 3 }
+        ([regex]::Matches($src, 'CloseHandle\(')).Count | Should Be $expected
+        # The probe transform in this file anchors on these exact declarations.
+        $src | Should Match ([regex]::Escape('static extern bool CloseHandle(IntPtr hObject);'))
+        $src | Should Match ([regex]::Escape('static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);'))
+        $src | Should Match ([regex]::Escape('static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);'))
+    }
+}
+
 Describe 'sequential invocation in one PowerShell session' {
     It 'runs idle/belownormal/abovenormal/high/realtime/cap/pint/capm/cy/cx/admin one after another without an Add-Type type-collision error' {
         # Regression test: bare-name resolution (idle args..., not idle.bat) runs the
@@ -1407,6 +1877,22 @@ Describe 'uiup.ps1' {
 
     It 'accepts the -SelfElevated switch without error (syntax/param check only - does not elevate)' {
         { Get-Command (Join-Path $bin 'uiup.ps1') -ErrorAction Stop } | Should Not Throw
+    }
+}
+
+# test/run-elevated.ps1 is the single-UAC entry point for the 3 admin.ps1
+# already-elevated cases above. It calls Start-Process -Verb RunAs the same way
+# bin/uiup.ps1 does when not already elevated - a real interactive UAC prompt -
+# so only its syntax/parameter shape is checked here, never its elevation path.
+Describe 'test/run-elevated.ps1' {
+    It 'parses without syntax errors' {
+        $parseErrors = $null
+        [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'run-elevated.ps1'), [ref]$null, [ref]$parseErrors) | Out-Null
+        $parseErrors.Count | Should Be 0
+    }
+
+    It 'accepts the -SelfElevated and -LogPath parameters without error (syntax/param check only - does not elevate)' {
+        { Get-Command (Join-Path $PSScriptRoot 'run-elevated.ps1') -ErrorAction Stop } | Should Not Throw
     }
 }
 

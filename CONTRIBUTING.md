@@ -14,6 +14,13 @@ npm test       # Node test suite - installer/skill-installer logic, fast
 powershell -Command "Invoke-Pester -Path test\win-nice.Tests.ps1"   # real tool behavior, ~1-2 min
 ```
 
+3 cases in the Pester suite only exercise `admin.ps1`'s already-elevated branch,
+which needs the whole test-runner process (not just `admin.ps1` itself) to
+already be running elevated - an unelevated run reports them `Skipped`, not
+failed. `npm run test:elevated` (`test/run-elevated.ps1`) asks for elevation
+once via the standard UAC prompt, then runs the full suite - including those 3
+- inside that one elevated session and relays the result back to this console.
+
 The Pester suite spawns real processes and checks actual priority class, Job
 Object CPU throttling, and affinity - it needs Windows and only uses the
 Pester 3.4.0 that ships with Windows PowerShell 5.1 (no install needed; if a

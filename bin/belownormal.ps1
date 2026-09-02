@@ -148,6 +148,7 @@ public static class BelowNormalLauncher
             // across the whole command line, even across separate arguments) and
             // change what actually runs. Fail loudly here instead of silently risking
             // that - there's no reliable per-character escape for "%" at this level.
+            // No handle is held at this point, so this throw has nothing to clean up.
             foreach (var a in argv)
             {
                 if (a.IndexOf('%') >= 0)
@@ -171,31 +172,36 @@ public static class BelowNormalLauncher
                 throw new InvalidOperationException("CreateProcess failed: " + Marshal.GetLastWin32Error());
         }
 
-        if (WaitForSingleObject(pi.hProcess, 0xFFFFFFFF) == 0xFFFFFFFF)
+        // Ownership of the child's handles starts here - CreateProcess has succeeded, so
+        // both are valid, and the finally below closes each of them exactly once on every
+        // way out: normal return, a thrown InvalidOperationException, or an unexpected
+        // managed exception.
+        IntPtr hProcess = pi.hProcess;
+        IntPtr hThread = pi.hThread;
+        try
         {
-            // The child's actual state is unknown here - don't just report
-            // failure and potentially leave it running unmanaged in the
-            // background. Best-effort kill before giving up.
-            int waitErr = Marshal.GetLastWin32Error();
-            TerminateProcess(pi.hProcess, 1);
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-            throw new InvalidOperationException("WaitForSingleObject failed: " + waitErr);
-        }
+            if (WaitForSingleObject(hProcess, 0xFFFFFFFF) == 0xFFFFFFFF)
+            {
+                // The child's actual state is unknown here - don't just report
+                // failure and potentially leave it running unmanaged in the
+                // background. Best-effort kill before giving up.
+                int waitErr = Marshal.GetLastWin32Error();
+                TerminateProcess(hProcess, 1);
+                throw new InvalidOperationException("WaitForSingleObject failed: " + waitErr);
+            }
 
-        uint exitCode;
-        if (!GetExitCodeProcess(pi.hProcess, out exitCode))
+            uint exitCode;
+            if (!GetExitCodeProcess(hProcess, out exitCode))
+                throw new InvalidOperationException("GetExitCodeProcess failed: " + Marshal.GetLastWin32Error());
+
+            return (int)exitCode;
+        }
+        finally
         {
-            int exitErr = Marshal.GetLastWin32Error();
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-            throw new InvalidOperationException("GetExitCodeProcess failed: " + exitErr);
+            // Same order as the code this replaces: thread handle, then process handle.
+            CloseHandle(hThread);
+            CloseHandle(hProcess);
         }
-
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-
-        return (int)exitCode;
     }
 }
 "@
