@@ -271,9 +271,16 @@ public static class CapmLauncher
         };
         int size = Marshal.SizeOf(extInfo);
         IntPtr ptr = Marshal.AllocHGlobal(size);
-        Marshal.StructureToPtr(extInfo, ptr, false);
-        bool ok = SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, ptr, (uint)size);
-        Marshal.FreeHGlobal(ptr);
+        bool ok;
+        try
+        {
+            Marshal.StructureToPtr(extInfo, ptr, false);
+            ok = SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, ptr, (uint)size);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(ptr);
+        }
         if (!ok)
         {
             CloseHandle(hJob);
@@ -346,11 +353,36 @@ public static class CapmLauncher
             throw new InvalidOperationException("AssignProcessToJobObject failed: " + err);
         }
 
-        ResumeThread(pi.hThread);
-        WaitForSingleObject(pi.hProcess, 0xFFFFFFFF);
+        if (ResumeThread(pi.hThread) == 0xFFFFFFFF)
+        {
+            // Still suspended - an unbounded wait below would hang forever. Kill
+            // it instead of leaving an orphaned, permanently-suspended process.
+            int resumeErr = Marshal.GetLastWin32Error();
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            CloseHandle(hJob);
+            throw new InvalidOperationException("ResumeThread failed: " + resumeErr);
+        }
+
+        if (WaitForSingleObject(pi.hProcess, 0xFFFFFFFF) == 0xFFFFFFFF)
+        {
+            int waitErr = Marshal.GetLastWin32Error();
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            CloseHandle(hJob);
+            throw new InvalidOperationException("WaitForSingleObject failed: " + waitErr);
+        }
 
         uint exitCode;
-        GetExitCodeProcess(pi.hProcess, out exitCode);
+        if (!GetExitCodeProcess(pi.hProcess, out exitCode))
+        {
+            int exitErr = Marshal.GetLastWin32Error();
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            CloseHandle(hJob);
+            throw new InvalidOperationException("GetExitCodeProcess failed: " + exitErr);
+        }
 
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);

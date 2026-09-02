@@ -39,6 +39,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   string - parsing now uses `[double]::TryParse` instead of a raw cast, so
   every invalid size hits the same clean usage error.
 
+### Changed
+
+- Every launcher's embedded native-process primitive now checks `ResumeThread`/
+  `WaitForSingleObject`/`GetExitCodeProcess` return values instead of assuming
+  success, and `AllocHGlobal`/`FreeHGlobal` around each Job Object limit
+  struct is wrapped in `try`/`finally` (`cap`, `pint`, `capm` also terminate a
+  still-suspended child instead of waiting on it forever if `ResumeThread`
+  itself fails). Hardening for a class of rare Win32 failures - not a fix for
+  an observed regression.
+
 ## [0.1.0] - 2026-09-02
 
 ### Added

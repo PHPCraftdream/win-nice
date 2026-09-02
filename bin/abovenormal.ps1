@@ -169,10 +169,22 @@ public static class AboveNormalLauncher
                 throw new InvalidOperationException("CreateProcess failed: " + Marshal.GetLastWin32Error());
         }
 
-        WaitForSingleObject(pi.hProcess, 0xFFFFFFFF);
+        if (WaitForSingleObject(pi.hProcess, 0xFFFFFFFF) == 0xFFFFFFFF)
+        {
+            int waitErr = Marshal.GetLastWin32Error();
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            throw new InvalidOperationException("WaitForSingleObject failed: " + waitErr);
+        }
 
         uint exitCode;
-        GetExitCodeProcess(pi.hProcess, out exitCode);
+        if (!GetExitCodeProcess(pi.hProcess, out exitCode))
+        {
+            int exitErr = Marshal.GetLastWin32Error();
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            throw new InvalidOperationException("GetExitCodeProcess failed: " + exitErr);
+        }
 
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
