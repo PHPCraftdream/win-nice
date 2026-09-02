@@ -55,19 +55,13 @@ jobs:
           if ($result.FailedCount -gt 0) { exit 1 }
 
       - name: Publish
-        # --access public: required for provenance on a package's first publish -
-        # npm refuses to generate a provenance attestation for a new/private-looking
-        # package without it, even though "win-nice" is unscoped and public by
-        # default (confirmed: EUSAGE "Can't generate provenance for new or private
-        # package, you must set `access` to public" on the first real publish attempt).
+        # win-nice@0.1.0's first publish used a classic NPM_TOKEN (Trusted Publisher
+        # can't be configured for a package that doesn't exist yet). The package now
+        # exists and Trusted Publisher is configured on its npmjs.com settings page
+        # (org PHPCraftdream, repo win-nice, workflow publish.yml, "Allow npm
+        # publish") - npm's OIDC token exchange authenticates the publish with no
+        # token at all now; id-token: write (already granted above) covers both that
+        # exchange and the --provenance attestation signature.
+        # --access public: still required even with a package that already exists -
+        # npm's provenance check wants it explicit, not just implied by being unscoped.
         run: npm publish --provenance --access public
-        env:
-          # First-ever publish: npm's OIDC "Trusted Publisher" can only be configured
-          # on a package that already exists on the registry (there's no settings page
-          # for a name that's never been published), so this uses a classic token for
-          # auth. --provenance still works with token auth - it only needs id-token:
-          # write (already granted above) for the attestation signature, independent
-          # of how the publish itself authenticates. Once this first publish creates
-          # the package, npm's Trusted Publisher can be configured on its settings
-          # page for future releases, and this can switch to token-free OIDC auth.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
