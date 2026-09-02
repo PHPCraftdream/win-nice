@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please report security issues privately via [GitHub Security Advisories](https://github.com/phpcraftdream/win-nice/security/advisories/new)
+Please report security issues privately via [GitHub Security Advisories](https://github.com/PHPCraftdream/win-nice/security/advisories/new)
 rather than a public issue. If that's not available, open a regular issue asking
 for a private contact channel - don't post exploit details publicly.
 

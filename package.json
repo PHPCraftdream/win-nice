@@ -5,18 +5,18 @@
   "license": "MIT OR Apache-2.0",
   "author": {
     "name": "Marat K",
-    "url": "https://github.com/phpcraftdream"
+    "url": "https://github.com/PHPCraftdream"
   },
   "os": [
     "win32"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/phpcraftdream/win-nice.git"
+    "url": "git+https://github.com/PHPCraftdream/win-nice.git"
   },
-  "homepage": "https://github.com/phpcraftdream/win-nice#readme",
+  "homepage": "https://github.com/PHPCraftdream/win-nice#readme",
   "bugs": {
-    "url": "https://github.com/phpcraftdream/win-nice/issues"
+    "url": "https://github.com/PHPCraftdream/win-nice/issues"
   },
   "bin": {
     "win-nice": "install/cli.js"

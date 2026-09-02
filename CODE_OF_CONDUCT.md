@@ -41,7 +41,7 @@ project in public spaces.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the maintainers by opening a GitHub issue or contacting
-[@phpcraftdream](https://github.com/phpcraftdream) directly. All complaints
+[@PHPCraftdream](https://github.com/PHPCraftdream) directly. All complaints
 will be reviewed and investigated promptly and fairly.
 
 ## Attribution
