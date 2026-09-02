@@ -8,7 +8,8 @@ utility - keep changes proportionate to that scope.
 No build step. Clone, then:
 
 ```
-npm install    # no dependencies to install, just runs the test suite setup
+npm install    # no dependencies - triggers postinstall, which detects a
+                 source checkout and no-ops (nothing to set up)
 npm test       # Node test suite - installer/skill-installer logic, fast
 powershell -Command "Invoke-Pester -Path test\win-nice.Tests.ps1"   # real tool behavior, ~1-2 min
 ```

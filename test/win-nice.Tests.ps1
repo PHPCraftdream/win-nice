@@ -498,6 +498,7 @@ $fallbackPercentTools = @(
     @{ Name = 'realtime'; Prefix = @() }
     @{ Name = 'cap'; Prefix = @('50') }
     @{ Name = 'pint'; Prefix = @('1') }
+    @{ Name = 'capm'; Prefix = @('100m') }
 )
 
 Describe '%-fail-closed on the cmd.exe fallback path' {
@@ -558,6 +559,7 @@ $spacedFallbackTools = @(
     @{ Name = 'realtime'; Prefix = @() }
     @{ Name = 'cap'; Prefix = @('50') }
     @{ Name = 'pint'; Prefix = @('1') }
+    @{ Name = 'capm'; Prefix = @('100m') }
 )
 
 Describe 'cmd.exe fallback quoting survives a target path containing a space (<Name>)' {
@@ -660,6 +662,359 @@ try {{
         & (Join-Path $bin 'pint.bat') 3 powershell -NoProfile -File $scriptFile
         (Get-Content $out).Trim() | Should Be '0x7'
         Remove-Item $out, $scriptFile -ErrorAction SilentlyContinue
+    }
+}
+
+Describe 'capm.ps1 argument validation' {
+    It 'rejects a non-numeric size' {
+        & (Join-Path $bin 'capm.bat') abc cmd /c "echo hi" 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'rejects a zero size' {
+        & (Join-Path $bin 'capm.bat') 0 cmd /c "echo hi" 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'rejects a bare percent above 100' {
+        & (Join-Path $bin 'capm.bat') 101 cmd /c "echo hi" 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'rejects a bare non-integer percent' {
+        & (Join-Path $bin 'capm.bat') 50.5 cmd /c "echo hi" 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'rejects a "%"-suffixed size (no longer supported - use a bare integer instead, see README)' {
+        & (Join-Path $bin 'capm.bat') 50% cmd /c "echo hi" 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'rejects a missing command' {
+        & (Join-Path $bin 'capm.bat') 100m 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'accepts each supported size suffix (<Size>)' -TestCases @(
+        @{ Size = '1' }
+        @{ Size = '50' }
+        @{ Size = '100' }
+        @{ Size = '100m' }
+        @{ Size = '100M' }
+        @{ Size = '1g' }
+        @{ Size = '1G' }
+        @{ Size = '0.5g' }
+    ) {
+        param($Size)
+        & (Join-Path $bin 'capm.bat') $Size cmd /c "exit 0"
+        $LASTEXITCODE | Should Be 0
+    }
+}
+
+Describe 'capm.ps1 behavior' {
+    It 'propagates the exit code of the wrapped command' {
+        & (Join-Path $bin 'capm.bat') 100m cmd /c "exit 3"
+        $LASTEXITCODE | Should Be 3
+    }
+
+    It 'forwards a flag that would ambiguously prefix-match a declared -Size-shaped parameter name (e.g. -s)' {
+        $r = Get-ForwardedArgs -Exe (Join-Path $bin 'capm.bat') -Prefix @('100m') -ProbeArgs @('-s', '0')
+        $r.ExitCode | Should Be 0
+        $r.Output | Should Be '-s|SEP|0'
+    }
+
+    It 'preserves cmd.exe metacharacters and a literal "%" on the direct-launch path' {
+        # Must invoke capm.ps1 directly (not through capm.bat, which has its own
+        # separate, documented "%" corruption at the %* forwarding step for
+        # arguments *after* the size token). This "%" belongs to a wrapped-command
+        # argument, not the size - capm's own <size> never accepts "%" (see the
+        # "rejects a %-suffixed size" test above).
+        $r = Get-DirectForwardedArgs -Ps1 (Join-Path $bin 'capm.ps1') -Prefix @('100m') -ProbeArgs @('A&B', 'A|B', '100%OFF')
+        $r.ExitCode | Should Be 0
+        $r.Output | Should Be 'A&B|SEP|A|B|SEP|100%OFF'
+    }
+
+    It 'does not falsely reject a large legitimate size (regression: [UIntPtr]::MaxValue is unavailable on .NET Framework)' {
+        # Windows PowerShell 5.1 runs on .NET Framework, where [UIntPtr] has no
+        # MaxValue member - "[UIntPtr]::MaxValue" silently evaluates to $null there
+        # instead of throwing, which previously made the addressable-limit guard
+        # compare every non-zero byte count against 0 and reject all of them. 90
+        # (percent) reproduces the exact input class that first caught this (a real
+        # npm-test run failed capm's 90%-cap shim test - now bare 90 - with a bogus
+        # "exceeds the addressable limit ... = bytes here" error, the blank value
+        # was the giveaway).
+        $out = & (Join-Path $bin 'capm.bat') 90 cmd /c "exit 0" 2>&1
+        $LASTEXITCODE | Should Be 0
+        ($out -join "`n") | Should Not Match 'exceeds the addressable limit'
+    }
+
+    # Allocation probe: tries to commit a big-ish byte array and reports pass/fail
+    # instead of throwing all the way out, so the test can tell "ran and refused
+    # to allocate" apart from "crashed before even getting there" (see below).
+    # __SIZE_MB__ substituted via -replace, not the "-f" format operator - the
+    # probe's own try/catch braces are literal text that "-f" would misparse as
+    # unescaped format-string braces ("Input string was not in a correct format").
+    $allocProbeTemplate = @'
+try {
+    $arr = New-Object byte[] (__SIZE_MB__*1MB)
+    [System.GC]::KeepAlive($arr)
+    Write-Output 'ALLOCATED'
+} catch {
+    Write-Output ('FAILED: ' + $_.Exception.GetType().Name)
+}
+'@
+
+    It 'enforces a hard ceiling: a generous cap allows a 200MB allocation, a tight one refuses it' {
+        # Same 200MB allocation on both branches - only the cap value differs, so
+        # a pass/fail flip is attributable to the cap, not to allocation size (an
+        # earlier version of this test asked for 2000MB on the tight branch and
+        # 200MB on the roomy one, which could pass on a units bug or an unrelated
+        # near-2GB .NET allocation failure instead of proving the cap enforced).
+        # 100m is comfortably above Windows PowerShell 5.1's own startup footprint
+        # (confirmed empirically: 30MB crashes PowerShell itself with
+        # StackOverflowException before the probe script even runs; 100-150MB lets
+        # PowerShell start normally and the allocation attempt fail cleanly and
+        # catchably instead) but far short of 200MB, so this doesn't depend on
+        # exactly where that footprint sits on a given machine.
+        $probeFile = New-TempScript
+        Set-Content -Path $probeFile -Value ($allocProbeTemplate -replace '__SIZE_MB__', '200')
+
+        $tight = & powershell -NoProfile -File (Join-Path $bin 'capm.ps1') 100m powershell -NoProfile -File $probeFile
+        $tightExit = $LASTEXITCODE
+        $tightExit | Should Be 0
+        ($tight | Select-Object -Last 1) | Should Match '^FAILED:'
+
+        # 100 (percent): effectively "whole machine's RAM", generous by
+        # construction - exercises the percent-of-total-physical-RAM code path
+        # (GlobalMemoryStatusEx) for the "should succeed" side of the same probe.
+        # Also catches a wrong conversion factor: if percent conversion divided
+        # by the wrong constant, 200MB would exceed the (miscalculated) cap on
+        # any real machine and the allocation would fail instead.
+        $probeFile2 = New-TempScript
+        Set-Content -Path $probeFile2 -Value ($allocProbeTemplate -replace '__SIZE_MB__', '200')
+        $roomy = & powershell -NoProfile -File (Join-Path $bin 'capm.ps1') 100 powershell -NoProfile -File $probeFile2
+        $roomyExit = $LASTEXITCODE
+        $roomyExit | Should Be 0
+        ($roomy | Select-Object -Last 1) | Should Be 'ALLOCATED'
+
+        Remove-Item $probeFile, $probeFile2 -ErrorAction SilentlyContinue
+    }
+
+    It 'caps the whole spawned process tree, not just the immediate child' {
+        # A grandchild (spawned by the immediate child, not by capm.ps1 itself)
+        # must still be subject to the same Job Object memory ceiling - Windows
+        # auto-joins new child processes to the parent's job by default, same
+        # inheritance cap/pint already rely on for their own "whole tree" tests.
+        # Both the outer (child) and inner (grandchild) scripts are separate temp
+        # FILES, not inline -Command strings - nested inline quoting across three
+        # process hops (Pester -> child -> grandchild) is exactly the kind of thing
+        # that silently mis-quotes; every other test in this file that needs a
+        # nested script uses a file for the same reason.
+        #
+        # 400m, not 100m: the cap here is the JOB's aggregate, shared by BOTH the
+        # outer wrapper AND the grandchild - two separate PowerShell/CLR runtime
+        # instances, each needing their own startup footprint, drawing from the
+        # SAME budget (confirmed empirically: at 100m here, the grandchild crashed
+        # with StackOverflowException before it could even run the probe, because
+        # the outer wrapper's own startup had already used up most of the shared
+        # 100m). 400m leaves comfortable room for two runtimes to start while
+        # staying far short of the grandchild's 2000MB allocation attempt.
+        $out = New-TempFile
+        $grandchildProbe = $allocProbeTemplate -replace '__SIZE_MB__', '2000'
+        $grandchildFile = New-TempScript
+        Set-Content -Path $grandchildFile -Value $grandchildProbe
+
+        $outerScript = @"
+`$c = Start-Process powershell -ArgumentList @('-NoProfile', '-File', '$grandchildFile') -WindowStyle Hidden -PassThru -RedirectStandardOutput '$out'
+if (-not `$c.WaitForExit(15000)) { `$c.Kill() }
+"@
+        $outerFile = New-TempScript
+        Set-Content -Path $outerFile -Value $outerScript
+
+        & (Join-Path $bin 'capm.bat') 400m powershell -NoProfile -File $outerFile
+        (Get-Content $out -ErrorAction SilentlyContinue | Select-Object -Last 1) | Should Match '^FAILED:'
+        Remove-Item $out, $grandchildFile, $outerFile -ErrorAction SilentlyContinue
+    }
+}
+
+# Real usage stacks these tools, e.g. "capm 10g cap 50 idle <command>" - each
+# wrapper's own direct-launch attempt fails for a bare tool name (no cap.exe/
+# idle.exe exists, only .bat/.ps1/extensionless shims), so it falls back to
+# cmd.exe, which resolves the bare name via PATHEXT (.BAT is in the default
+# PATHEXT list). That only works when the tools' directory is actually on
+# PATH, so every test below runs under a PATH temporarily REPLACED (not
+# prepended, so nothing on the real developer PATH can leak in) to contain
+# only $bin plus the minimum Windows needs to run cmd.exe/powershell.exe.
+$chainPath = "$bin;$env:SystemRoot\System32;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+
+Describe 'chained tool invocation (bare tool names resolved via PATH, cmd.exe PATHEXT fallback)' {
+    It 'propagates the exit code through a 2-level chain (cap wrapping idle wrapping a probe)' {
+        $prevPath = $env:PATH
+        $env:PATH = $chainPath
+        try {
+            & powershell -NoProfile -File (Join-Path $bin 'cap.ps1') 50 idle cmd.exe /c exit 8
+            $LASTEXITCODE | Should Be 8
+        } finally {
+            $env:PATH = $prevPath
+        }
+    }
+
+    It 'propagates the exit code through a 3-level chain (capm wrapping cap wrapping idle wrapping a probe) and applies Idle priority to the innermost process' {
+        # capm's own cap is deliberately roomy (100, i.e. 100%) here - this test is
+        # about the chain mechanics (bare-name resolution through two extra cmd.exe
+        # hops) and the priority class reaching the innermost process, not about
+        # capm's own enforcement (covered separately, and separately again below
+        # with a tight cap in a 2-level chain, where extra nested-CLR startup cost
+        # is smaller).
+        $prevPath = $env:PATH
+        $env:PATH = $chainPath
+        try {
+            $out = New-TempFile
+            $probe = "(Get-Process -Id `$PID).PriorityClass | Out-File -FilePath '$out'; exit 8"
+            $probeFile = New-TempScript
+            Set-Content -Path $probeFile -Value $probe
+            & powershell -NoProfile -File (Join-Path $bin 'capm.ps1') 100 cap 50 idle powershell -NoProfile -File $probeFile
+            $LASTEXITCODE | Should Be 8
+            (Get-Content $out).Trim() | Should Be 'Idle'
+            Remove-Item $out, $probeFile -ErrorAction SilentlyContinue
+        } finally {
+            $env:PATH = $prevPath
+        }
+    }
+
+    It 'propagates the exit code through a 2-level chain with cap OUTSIDE capm (regression: capm used to reject a "%"-style percent here)' {
+        # The exact broken repro from the 1500-1e191bc release review: "cap 50
+        # capm 25% ..." failed the fail-closed "%" check (capm's own size, "25%",
+        # is an argument in CAP's cmd.exe fallback command line - any "%" there
+        # trips the same guard that protects the wrapped command's own arguments),
+        # while the reverse order or a non-percent size worked fine - an
+        # order-dependent foot-gun. Removing "%" from capm's size grammar (bare
+        # integer = percent now, same as cap) fixes this for every order, since a
+        # bare integer never contains "%" in the first place.
+        $prevPath = $env:PATH
+        $env:PATH = $chainPath
+        try {
+            & powershell -NoProfile -File (Join-Path $bin 'cap.ps1') 50 capm 50 cmd.exe /c exit 8
+            $LASTEXITCODE | Should Be 8
+        } finally {
+            $env:PATH = $prevPath
+        }
+    }
+
+    It 'enforces the outer capm memory cap on a process launched through an extra bare-name/cmd.exe hop, nested inside cap''s own Job Object' {
+        # Reuses the already-validated 400m/2000MB pairing from the "whole spawned
+        # process tree" test above (two nested PowerShell/CLR instances sharing one
+        # job-wide memory budget - an earlier version of this test asked for only
+        # 200MB, which left enough headroom after both instances started that the
+        # allocation actually succeeded instead of proving anything). Here the
+        # second instance is cap.ps1's own host, reached via capm's cmd.exe/PATHEXT
+        # fallback (bare "cap" has no direct .exe), and cap assigns the final probe
+        # to its OWN separate Job Object (CPU 50%) nested inside capm's (Windows 8+
+        # nested jobs) - proving the outer memory ceiling still binds through both
+        # the extra hop and the nested job, not just on a direct, single-level child.
+        #
+        # Roomy-cap control branch (release review 1500-1e191bc P2): without it, a
+        # 2000MB allocation failing under a tight cap doesn't prove the cap did
+        # anything - it could fail on unrelated address-space/CLR limits regardless
+        # of capm, and this test would stay green either way. Same oracle as the
+        # main capm enforcement test above: the SAME allocation must succeed under
+        # a generous cap through the identical chain shape.
+        $localAllocProbe = @'
+try {
+    $arr = New-Object byte[] (2000*1MB)
+    [System.GC]::KeepAlive($arr)
+    Write-Output 'ALLOCATED'
+} catch {
+    Write-Output ('FAILED: ' + $_.Exception.GetType().Name)
+}
+'@
+        $prevPath = $env:PATH
+        $env:PATH = $chainPath
+        try {
+            $probeFile = New-TempScript
+            Set-Content -Path $probeFile -Value $localAllocProbe
+            $tight = & powershell -NoProfile -File (Join-Path $bin 'capm.ps1') 400m cap 50 powershell -NoProfile -File $probeFile
+            $LASTEXITCODE | Should Be 0
+            ($tight | Select-Object -Last 1) | Should Match '^FAILED:'
+            Remove-Item $probeFile -ErrorAction SilentlyContinue
+
+            $probeFile2 = New-TempScript
+            Set-Content -Path $probeFile2 -Value $localAllocProbe
+            $roomy = & powershell -NoProfile -File (Join-Path $bin 'capm.ps1') 100 cap 50 powershell -NoProfile -File $probeFile2
+            $LASTEXITCODE | Should Be 0
+            ($roomy | Select-Object -Last 1) | Should Be 'ALLOCATED'
+            Remove-Item $probeFile2 -ErrorAction SilentlyContinue
+        } finally {
+            $env:PATH = $prevPath
+        }
+    }
+
+    It 'holds CPU usage of a nested "cap 50 cap 50" measurably below a single "cap 50" (CPU rate multiplies when nested, not "smaller wins")' {
+        # Documents/locks in the release review's P1 finding: nested Job Object
+        # CPU rate is relative to the parent's, so equal caps multiply rather than
+        # take the minimum - "cap 50 cap 50" should land near 25%, clearly below a
+        # single "cap 50" (~50%), not equal to it (which "smaller wins" predicts).
+        $burn = @'
+param([int]$Threads, [int]$Seconds)
+$proc = [Diagnostics.Process]::GetCurrentProcess()
+$cpuStart = $proc.TotalProcessorTime
+$wallStart = Get-Date
+$pool = [runspacefactory]::CreateRunspacePool(1, $Threads)
+$pool.Open()
+$tasks = 0..($Threads - 1) | ForEach-Object {
+    $ps = [powershell]::Create()
+    $ps.RunspacePool = $pool
+    [void]$ps.AddScript({ param($sec) $sw = [Diagnostics.Stopwatch]::StartNew(); $x = 0; while ($sw.Elapsed.TotalSeconds -lt $sec) { $x = $x + 1 } }).AddArgument($Seconds)
+    [PSCustomObject]@{ Pipe = $ps; Handle = $ps.BeginInvoke() }
+}
+foreach ($t in $tasks) { $t.Pipe.EndInvoke($t.Handle) | Out-Null; $t.Pipe.Dispose() }
+$pool.Close()
+$proc.Refresh()
+$cpuSeconds = ($proc.TotalProcessorTime - $cpuStart).TotalSeconds
+$wallSeconds = ((Get-Date) - $wallStart).TotalSeconds
+$pct = ($cpuSeconds / ($wallSeconds * [Environment]::ProcessorCount)) * 100
+Write-Output ("{0:N1}" -f $pct)
+'@
+        $burnFile = New-TempScript
+        Set-Content -Path $burnFile -Value $burn
+        $threads = [Environment]::ProcessorCount
+        $seconds = 4
+        $cap = 50
+
+        $prevPath = $env:PATH
+        $env:PATH = $chainPath
+        try {
+            # Same noisy-machine retry strategy as the single-cap CPU test above:
+            # relative thresholds (nested vs. single, not an absolute number).
+            $passed = $false
+            $lastSingle = $null
+            $lastNested = $null
+            for ($attempt = 1; $attempt -le 3 -and -not $passed; $attempt++) {
+                $singleOut = & (Join-Path $bin 'cap.bat') $cap powershell -NoProfile -File $burnFile $threads $seconds
+                $single = [double]($singleOut | Select-Object -Last 1)
+                $nestedOut = & powershell -NoProfile -File (Join-Path $bin 'cap.ps1') $cap cap $cap powershell -NoProfile -File $burnFile $threads $seconds
+                $nested = [double]($nestedOut | Select-Object -Last 1)
+                $lastSingle = $single
+                $lastNested = $nested
+
+                # No "single must be near cap" gate here (unlike the uncapped-vs-cap
+                # test above): the comparison below is relative (nested vs. single),
+                # not absolute, so single landing anywhere comfortably above a
+                # near-zero floor is fine - a real observed pair (single=34.5,
+                # nested=23.3, cap=50) already satisfies the pass check below and
+                # was wrongly discarded by an earlier "single >= cap*1.15" gate that
+                # didn't apply to this comparison at all.
+                if ($single -lt 5) { continue }
+                if ($nested -lt ($single * 0.75) -and $nested -lt ($cap * 0.75)) { $passed = $true }
+            }
+
+            if (-not $passed) { Write-Host "last attempt: single=$lastSingle nested=$lastNested cap=$cap" }
+            $passed | Should Be $true
+        } finally {
+            $env:PATH = $prevPath
+        }
+        Remove-Item $burnFile -ErrorAction SilentlyContinue
     }
 }
 
@@ -919,14 +1274,14 @@ Describe 'cy.ps1 / cx.ps1 PATH isolation' {
 }
 
 Describe 'sequential invocation in one PowerShell session' {
-    It 'runs idle/belownormal/abovenormal/high/realtime/cap/pint/cy/cx/admin one after another without an Add-Type type-collision error' {
+    It 'runs idle/belownormal/abovenormal/high/realtime/cap/pint/capm/cy/cx/admin one after another without an Add-Type type-collision error' {
         # Regression test: bare-name resolution (idle args..., not idle.bat) runs the
         # .ps1 in the CURRENT process/AppDomain, not a new one - each of these used to
         # Add-Type an identically-named "Launcher" class, so calling a second one in the
         # same session threw "Cannot add type. The type name 'Launcher' already exists."
         # (and, for cy/cx's different Run() signature, could fail outright). Confirmed
         # empirically before the fix; each now has its own unique class name
-        # (IdleLauncher, BelowNormalLauncher, ..., CapLauncher, PintLauncher,
+        # (IdleLauncher, BelowNormalLauncher, ..., CapLauncher, PintLauncher, CapmLauncher,
         # CyLauncher, CxLauncher, AdminLauncher).
         $out = New-TempFile
         $probe = 'Set-Content -Path $env:WIN_NICE_TEST_OUT -Value "ok"'
@@ -949,6 +1304,8 @@ foreach (`$name in @('idle', 'belownormal', 'abovenormal', 'high', 'realtime')) 
 if (`$LASTEXITCODE -ne 0) { throw "cap failed with exit `$LASTEXITCODE" }
 & (Join-Path '$bin' 'pint.ps1') 1 powershell -NoProfile -File '$probeFile'
 if (`$LASTEXITCODE -ne 0) { throw "pint failed with exit `$LASTEXITCODE" }
+& (Join-Path '$bin' 'capm.ps1') 90 powershell -NoProfile -File '$probeFile'
+if (`$LASTEXITCODE -ne 0) { throw "capm failed with exit `$LASTEXITCODE" }
 & (Join-Path '$bin' 'cy.ps1')
 if (`$LASTEXITCODE -ne 0) { throw "cy failed with exit `$LASTEXITCODE" }
 & (Join-Path '$bin' 'cx.ps1')

@@ -16,8 +16,15 @@ const BIN = path.join(REPO, 'bin');
 const TIMEOUT_MS = 30000;
 
 const bashProbe = spawnSync('bash', ['-c', 'echo ok'], { encoding: 'utf8' });
-const HAS_BASH = bashProbe.status === 0 && bashProbe.stdout.trim() === 'ok';
-const SKIP = HAS_BASH ? false : 'bash not on PATH';
+// `bash` on PATH isn't necessarily Git Bash/MSYS - WSL also ships a bash.exe
+// that resolves the same way, but can't run these Windows-path-based shims
+// (no powershell.exe on PATH, no cygpath-style path translation). uname -s
+// reports MINGW*/MSYS* under Git Bash and Linux under WSL, so use that to
+// skip cleanly instead of failing with confusing "not found" errors.
+const unameProbe = spawnSync('bash', ['-c', 'uname -s'], { encoding: 'utf8' });
+const HAS_BASH = bashProbe.status === 0 && bashProbe.stdout.trim() === 'ok' &&
+  unameProbe.status === 0 && /^(MINGW|MSYS)/.test(unameProbe.stdout.trim());
+const SKIP = HAS_BASH ? false : 'Git Bash/MSYS not on PATH (found a non-MSYS bash, e.g. WSL)';
 
 function shimPath(name) {
   // Forward slashes: Git Bash handles both, but $0/dirname stay predictable.
@@ -59,6 +66,11 @@ test('cap receives its numeric first argument and propagates the exit code', { s
 test('pint receives its numeric first argument and propagates the exit code', { skip: SKIP }, () => {
   const res = runShim('pint', ['1', 'cmd.exe', '/c', 'exit', '4']);
   assert.equal(res.status, 4, `stderr: ${res.stderr}`);
+});
+
+test('capm receives its bare-percent size argument and propagates the exit code', { skip: SKIP }, () => {
+  const res = runShim('capm', ['90', 'cmd.exe', '/c', 'exit', '6']);
+  assert.equal(res.status, 6, `stderr: ${res.stderr}`);
 });
 
 test('shim resolves its .ps1 sibling when invoked as ./<tool> from bin/', { skip: SKIP }, () => {

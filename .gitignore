@@ -1,2 +1,5 @@
 # /wrush task worktrees — always created here, in-tree
 /worktrees/
+
+# Scratch/generated content not meant for the repo (e.g. draft articles)
+/docs/temp/

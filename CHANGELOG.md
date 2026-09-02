@@ -4,6 +4,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-02
+
+### Added
+
+- `capm` - hard memory ceiling via Job Objects; `<size>` accepts a bare
+  integer `1`-`100` (percent of total physical RAM, same convention as
+  `cap`'s own `<percent 1-100>`), or `m`/`M` (MB), or `g`/`G` (GB).
+- These tools can be chained by name (e.g. `capm 50 cap 50 idle <command>`)
+  - each wrapper's Job Object nests inside the outer one (Windows 8+). Nested
+  limits do *not* uniformly take the smaller value: CPU rate (`cap`)
+  multiplies relative to its parent (`cap 50 cap 50` ≈ 25%, not 50%), while
+  memory (`capm`) ceilings apply independently and the smaller one binds. See
+  README's "Chaining these tools together" section for the full picture.
+
+### Fixed
+
+- `capm`'s addressable-size guard used to reject every non-zero size on
+  Windows PowerShell 5.1: `[UIntPtr]::MaxValue` doesn't exist on .NET
+  Framework and silently read as `$null`, so the guard compared against 0.
+  Fixed via `[UIntPtr]::Size` instead.
+- `capm`'s size argument no longer accepts a `%` suffix or a bare-decimal
+  fraction (both existed only pre-release, never published): a `%` in an
+  argument trips every tool's fail-closed check the moment a chain hop needs
+  the `cmd.exe` fallback, so `cap 50 capm 25% ...` failed while `capm 25% cap
+  50 ...` worked - an order-dependent bug. A bare integer percent (matching
+  `cap`'s own convention) never contains `%`, so it sidesteps this for every
+  chain order.
+
+## [0.1.0] - 2026-09-02
+
 ### Added
 
 - `idle`, `belownormal`, `abovenormal`, `high`, `realtime` - Windows priority
@@ -15,9 +45,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `cy` / `cx` - `claude`/`codex` launchers with permission/approval bypass
   flags, for use in already-sandboxed/disposable environments.
 - Each tool ships a `.bat`, `.ps1`, and extensionless (Git Bash) entry point.
-- npm-based installer (`postinstall`/`preuninstall`, `win-nice status
-  |reinstall|uninstall`), PATH management via the Windows registry.
+- npm-based installer (`postinstall`, `win-nice status|reinstall|uninstall`),
+  PATH management via the Windows registry. Uninstall is an explicit `win-nice
+  uninstall` command, not an npm `preuninstall` lifecycle hook - npm >= 7
+  doesn't invoke `preuninstall` on a global `npm uninstall -g`.
 - Optional `win-nice skill install|uninstall` - installs a reference skill
   for Claude Code and Codex CLI.
 - Node test suite (installer logic) and Pester integration suite (real
   Windows process/priority/Job-Object behavior).
+
+[Unreleased]: https://github.com/PHPCraftdream/win-nice/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/PHPCraftdream/win-nice/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/PHPCraftdream/win-nice/releases/tag/v0.1.0

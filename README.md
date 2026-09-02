@@ -112,20 +112,29 @@ priority — it holds even when nothing else on the machine is contending for CP
 
 The cap covers the whole subtree from its very first instruction: the wrapped
 command is created suspended, assigned to the Job Object, and only then resumed
-— there's no window where it runs uncapped. Every process it spawns (and their
-children, recursively) automatically joins the same job; this is standard Job
-Object behavior on any supported Windows version, not something specific to
-newer ones. The only way out is a descendant explicitly requesting
-`CREATE_BREAKAWAY_FROM_JOB`, and since the job here never sets a
-breakaway-allowed flag, that fails closed — the child just fails to launch
-rather than silently escaping the cap.
+— there's no window where it runs uncapped. Every ordinary descendant created
+via `CreateProcess` (and their children, recursively) automatically joins the
+same job; this is standard Job Object behavior on any supported Windows
+version, not something specific to newer ones. The known ways out: a
+descendant explicitly requesting `CREATE_BREAKAWAY_FROM_JOB` (and since the job
+here never sets a breakaway-allowed flag, that fails closed — the child just
+fails to launch rather than silently escaping the cap), or a process brought
+up through an external broker/service that never goes through the wrapped
+tree's own `CreateProcess` calls (Microsoft documents, for example, that a
+process started via WMI's `Win32_Process.Create` doesn't join the caller's
+job).
 
 Windows 8+ specifically matters if something inside the wrapped command creates
-*its own* Job Object (some tools do, e.g. Chromium-based ones): before Windows 8
-a process could belong to only one job at a time, so that inner
-`AssignProcessToJobObject` call would fail. Windows 8+ allows nested jobs, so it
-succeeds instead, and both jobs' limits apply (whichever is more restrictive
-wins).
+*its own* Job Object (some tools do, e.g. Chromium-based ones — or these tools
+themselves, when chained together, see "Chaining these tools together" below):
+before Windows 8 a process could belong to only one job at a time, so that
+inner `AssignProcessToJobObject` call would fail. Windows 8+ allows nested
+jobs, so it succeeds instead, and both jobs' limits apply — but *how* they
+combine depends on the limit type, not one universal "smaller wins" rule. For
+CPU rate control specifically, a nested job's rate is relative to what its
+parent already lets through, so equal caps **multiply**: `cap 50 cap 50 ...`
+yields roughly 25% of total system CPU, not 50% (see "Chaining these tools
+together" below for the full picture across limit types).
 
 Blocks until the command exits, propagates its exit code.
 
@@ -154,7 +163,42 @@ at 63 — a single affinity mask can't address more).
 pint 4 npm run build
 ```
 
-**A `cap`/`pint` limit sticks to any daemon the wrapped command leaves
+### `capm <size> <command> [args...]`
+Hard memory ceiling for the whole process tree, enforced by a Windows Job
+Object (`JOBOBJECT_EXTENDED_LIMIT_INFORMATION`, `JOB_OBJECT_LIMIT_JOB_MEMORY`)
+— same suspend-then-assign-then-resume mechanism as `cap`/`pint`, so the same
+"covers the whole subtree from the first instruction" and "breakaway fails
+closed" guarantees apply. Caps the whole job's *aggregate* committed memory,
+not any single process — like `cap`'s CPU% and `pint`'s affinity, it's one
+ceiling for the whole tree, not a per-process limit.
+
+`<size>` accepts three forms:
+
+| Form | Meaning |
+| --- | --- |
+| `50` (bare integer, `1`-`100`) | percent of total physical RAM (`GlobalMemoryStatusEx`), not of whatever's currently free — the cap means the same thing regardless of what else is running on the machine at invocation time. Same convention as `cap`'s own `<percent 1-100>` — deliberately no `%` character; see "Chaining these tools together" below for why |
+| `512m` / `512M` | megabytes |
+| `2g` / `2G` | gigabytes |
+
+```
+capm 50 npm run build
+capm 512m npm run build
+capm 2g npm run build
+```
+
+**Unlike `cap`, exceeding the limit doesn't throttle — it fails the
+allocation.** A CPU cap just makes things slower; a memory cap that's
+exceeded causes the *allocation call itself* to fail (`VirtualAlloc`-family
+APIs return an error, .NET throws `OutOfMemoryException`) rather than the OS
+gracefully degrading anything. Most programs don't handle allocation failure
+cleanly, so in practice this usually looks like a crash. Set it too low and
+even the wrapped program's own runtime can fail to start (confirmed: capping
+Windows PowerShell 5.1 itself at 30 MB crashes it with
+`StackOverflowException` before it can run anything) — leave headroom above
+whatever interpreter/runtime the wrapped command needs just to start, on top
+of what your actual workload needs.
+
+**A `cap`/`pint`/`capm` limit sticks to any daemon the wrapped command leaves
 running**, for that daemon's entire lifetime — not just for the wrapped
 command's own run. Job Object membership is permanent for a process once
 assigned (short of an explicit, disallowed breakaway); a background process
@@ -164,12 +208,58 @@ process across invocations to skip cold-start cost: `dotnet build`'s
 `VBCSCompiler`/MSBuild node reuse, a Gradle daemon, file-watcher processes
 left running by `npm run watch`-style scripts. A follow-up **uncapped**
 `dotnet build` (or `gradle`) can end up running inside the *previous* `cap`
-call's Job Object without a new `cap`/`pint` invocation of its own, capped
-because a stale daemon from an earlier call is doing the work. Either don't
-leave the daemon running across a `cap`/`pint` call whose limit shouldn't
-persist (`dotnet build -p:UseSharedCompilation=false`, `gradle --no-daemon`),
-or accept that the limit is now effectively attached to the daemon until it's
+call's Job Object without a new `cap`/`pint`/`capm` invocation of its own,
+capped because a stale daemon from an earlier call is doing the work. Either
+don't leave the daemon running across a call whose limit shouldn't persist
+(`dotnet build -p:UseSharedCompilation=false`, `gradle --no-daemon`), or
+accept that the limit is now effectively attached to the daemon until it's
 killed.
+
+## Chaining these tools together
+
+These tools can be stacked by passing one as another's `<command>`:
+
+```
+capm 50 cap 50 idle npm run build
+```
+
+Each wrapper wraps everything after its own arguments, so the outermost
+wrapper is whichever one you type first. A few things to know before relying
+on a combination:
+
+**Bare tool names resolve through the same `cmd.exe`/`PATHEXT` fallback
+documented above.** None of these ship a `.exe`, so e.g. `capm`'s attempt to
+launch `cap` directly always fails and falls back to `cmd.exe`, which finds
+`cap.bat` via `PATHEXT` — meaning chaining only works when the tools'
+install directory is actually on `PATH`, and any `%` elsewhere on that
+command line trips the same fail-closed check described above. `capm`'s own
+`<size>` deliberately has no `%` form for exactly this reason: an earlier
+version accepted `25%`, and `cap 50 capm 25% ...` failed the fail-closed
+check while `capm 25% cap 50 ...` worked fine — an order-dependent foot-gun.
+A bare percent (`capm 50 cap 50 ...`) sidesteps it entirely, in any order.
+
+**Nested Job Object limits do not follow one universal "smaller wins" rule —
+each limit type combines differently:**
+
+- **CPU (`cap`)**: a nested job's CPU rate is relative to what its parent
+  already lets through, so equal caps *multiply* rather than take the
+  minimum — `cap 50 cap 50 ...` yields roughly 25% of total system CPU, not
+  50%. This is documented Windows behavior for
+  [`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information),
+  not a bug here.
+- **Memory (`capm`)**: each nested job tracks and enforces its own memory
+  ceiling independently, so the process hits whichever ceiling is smaller
+  first — the *effective* limit is the minimum of the nested ceilings.
+- **Priority (`idle`/`belownormal`/`abovenormal`/`high`/`realtime`)**: not a
+  Job Object limit — the *last* one applied to a given process simply wins,
+  same as invoking any one of them alone.
+- **Affinity (`pint`)**: not independently verified for nested jobs in this
+  README (unlike the two above, which are either Microsoft-documented or a
+  straightforward consequence of two independent absolute ceilings) — test
+  your own combination before relying on a specific nested-affinity outcome.
+
+Test any combination you actually plan to depend on; don't assume "more
+wrappers, more restrictive" holds uniformly across limit types.
 
 ### `uiup`
 One-shot priority boost (`HIGH`) for the live shell/UI/audio processes so the
