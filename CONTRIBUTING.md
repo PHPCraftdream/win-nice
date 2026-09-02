@@ -17,9 +17,13 @@ powershell -Command "Invoke-Pester -Path test\win-nice.Tests.ps1"   # real tool 
 3 cases in the Pester suite only exercise `admin.ps1`'s already-elevated branch,
 which needs the whole test-runner process (not just `admin.ps1` itself) to
 already be running elevated - an unelevated run reports them `Skipped`, not
-failed. `npm run test:elevated` (`test/run-elevated.ps1`) asks for elevation
-once via the standard UAC prompt, then runs the full suite - including those 3
-- inside that one elevated session and relays the result back to this console.
+failed. A different, disjoint 3 cases only make sense when NOT elevated and
+`Skip` under elevation instead. `npm run test:elevated`
+(`test/run-elevated.ps1`) asks for elevation once via the standard UAC prompt,
+then runs the suite inside that elevated session, activating the first group
+(and skipping the second) - relaying the result back to this console. Run both
+a normal and an elevated pass for full coverage; neither alone exercises every
+case.
 
 The Pester suite spawns real processes and checks actual priority class, Job
 Object CPU throttling, and affinity - it needs Windows and only uses the

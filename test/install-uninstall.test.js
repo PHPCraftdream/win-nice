@@ -37,7 +37,7 @@ test('install copies every bin/*.bat and *.ps1 file and writes a manifest', () =
     const dir = paths.binDir();
     const files = fs.readdirSync(dir).sort();
     assert.deepEqual(files, result.files.slice().sort());
-    assert.ok(files.includes('cap.ps1'));
+    assert.ok(files.includes('capc.ps1'));
     assert.ok(files.includes('idle.bat'));
 
     const data = manifest.read(paths.manifestPath());
@@ -144,6 +144,39 @@ test('reinstall (uninstall + install) leaves a clean, fully populated bin dir', 
     const result = install({ updatePath: false });
     const dir = paths.binDir();
     assert.deepEqual(fs.readdirSync(dir).sort(), result.files.slice().sort());
+  });
+});
+
+test('install (upgrade path) removes a stale manifest-tracked file the current version no longer ships (e.g. a renamed tool)', () => {
+  withHome(freshHome(), () => {
+    const first = install({ updatePath: false });
+    const dir = paths.binDir();
+
+    // Simulate what a previous version would have left behind: a tool that
+    // doesn't exist in the current bin/ (e.g. before a rename/removal).
+    const staleNames = ['oldtool.bat', 'oldtool.ps1', 'oldtool'];
+    for (const name of staleNames) fs.writeFileSync(path.join(dir, name), 'stale');
+    const manifestFile = paths.manifestPath();
+    const data = manifest.read(manifestFile);
+    data.files = data.files.concat(staleNames);
+    manifest.write(manifestFile, data);
+
+    // `npm install -g win-nice@newer` only runs install() (postinstall) - it
+    // never calls uninstall() first, unlike `win-nice reinstall`. This has to
+    // be caught by cleanupStaleFiles() inside install() itself.
+    const result = install({ updatePath: false });
+
+    for (const name of staleNames) {
+      assert.equal(fs.existsSync(path.join(dir, name)), false, `${name} (stale, no longer shipped) must be removed on upgrade`);
+    }
+    for (const name of first.files) {
+      assert.equal(fs.existsSync(path.join(dir, name)), true, `${name} (still shipped) must survive`);
+    }
+    assert.deepEqual(
+      manifest.read(manifestFile).files.slice().sort(),
+      result.files.slice().sort(),
+      'manifest must not still list the stale names'
+    );
   });
 });
 

@@ -104,7 +104,7 @@ have it by default); without it, Windows doesn't error out, it silently downgrad
 the request to `HIGH_PRIORITY_CLASS` instead — confirmed empirically. Same
 single-process-only caveat as `abovenormal`/`high` applies on top of all that.
 
-### `cap <percent> <command> [args...]`
+### `capc <percent> <command> [args...]`
 Hard CPU quota (1-100) for the whole process tree, enforced by a Windows Job
 Object (`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`, hard cap). Unlike `idle`/
 `belownormal`, this is a real ceiling on total CPU%, not just a scheduling
@@ -132,27 +132,27 @@ inner `AssignProcessToJobObject` call would fail. Windows 8+ allows nested
 jobs, so it succeeds instead, and both jobs' limits apply — but *how* they
 combine depends on the limit type, not one universal "smaller wins" rule. For
 CPU rate control specifically, a nested job's rate is relative to what its
-parent already lets through, so equal caps **multiply**: `cap 50 cap 50 ...`
+parent already lets through, so equal caps **multiply**: `capc 50 capc 50 ...`
 yields roughly 25% of total system CPU, not 50% (see "Chaining these tools
 together" below for the full picture across limit types).
 
 Blocks until the command exits, propagates its exit code.
 
 ```
-cap 50 npm run build
+capc 50 npm run build
 ```
 
-### `pint <thread-count> <command> [args...]`
-Short for **pin threads**. Restricts the whole process tree to the first
+### `capt <thread-count> <command> [args...]`
+Short for **cap threads**. Restricts the whole process tree to the first
 `<thread-count>` logical processors via Windows process affinity
 (`JOBOBJECT_BASIC_LIMIT_INFORMATION`, `JOB_OBJECT_LIMIT_AFFINITY`) — same
-suspend-then-assign-then-resume Job Object mechanism as `cap`, so the same
+suspend-then-assign-then-resume Job Object mechanism as `capc`, so the same
 "covers the whole subtree from the first instruction" and "breakaway fails
 closed" guarantees apply.
 
 Deliberately *threads*, not *cores*, in both the name and the semantics:
 Windows affinity masks address logical processors (hardware threads), not
-physical cores. On a machine with Hyper-Threading/SMT, `pint 4` pins to 4
+physical cores. On a machine with Hyper-Threading/SMT, `capt 4` pins to 4
 *logical processors* — depending on which ones, that could be 2 fully-used
 physical cores or 4 half-used ones; the affinity API has no concept of "whole
 core" grouping on its own. `<thread-count>` must be between 1 and the number
@@ -160,23 +160,23 @@ of logical processors on the machine (`[Environment]::ProcessorCount`, capped
 at 63 — a single affinity mask can't address more).
 
 ```
-pint 4 npm run build
+capt 4 npm run build
 ```
 
 ### `capm <size> <command> [args...]`
 Hard memory ceiling for the whole process tree, enforced by a Windows Job
 Object (`JOBOBJECT_EXTENDED_LIMIT_INFORMATION`, `JOB_OBJECT_LIMIT_JOB_MEMORY`)
-— same suspend-then-assign-then-resume mechanism as `cap`/`pint`, so the same
+— same suspend-then-assign-then-resume mechanism as `capc`/`capt`, so the same
 "covers the whole subtree from the first instruction" and "breakaway fails
 closed" guarantees apply. Caps the whole job's *aggregate* committed memory,
-not any single process — like `cap`'s CPU% and `pint`'s affinity, it's one
+not any single process — like `capc`'s CPU% and `capt`'s affinity, it's one
 ceiling for the whole tree, not a per-process limit.
 
 `<size>` accepts three forms:
 
 | Form | Meaning |
 | --- | --- |
-| `50` (bare integer, `1`-`100`) | percent of total physical RAM (`GlobalMemoryStatusEx`), not of whatever's currently free — the cap means the same thing regardless of what else is running on the machine at invocation time. Same convention as `cap`'s own `<percent 1-100>` — deliberately no `%` character; see "Chaining these tools together" below for why |
+| `50` (bare integer, `1`-`100`) | percent of total physical RAM (`GlobalMemoryStatusEx`), not of whatever's currently free — the cap means the same thing regardless of what else is running on the machine at invocation time. Same convention as `capc`'s own `<percent 1-100>` — deliberately no `%` character; see "Chaining these tools together" below for why |
 | `512m` / `512M` | megabytes |
 | `2g` / `2G` | gigabytes |
 
@@ -186,7 +186,7 @@ capm 512m npm run build
 capm 2g npm run build
 ```
 
-**Unlike `cap`, exceeding the limit doesn't throttle — it fails the
+**Unlike `capc`, exceeding the limit doesn't throttle — it fails the
 allocation.** A CPU cap just makes things slower; a memory cap that's
 exceeded causes the *allocation call itself* to fail (`VirtualAlloc`-family
 APIs return an error, .NET throws `OutOfMemoryException`) rather than the OS
@@ -198,7 +198,7 @@ Windows PowerShell 5.1 itself at 30 MB crashes it with
 whatever interpreter/runtime the wrapped command needs just to start, on top
 of what your actual workload needs.
 
-**A `cap`/`pint`/`capm` limit sticks to any daemon the wrapped command leaves
+**A `capc`/`capt`/`capm` limit sticks to any daemon the wrapped command leaves
 running**, for that daemon's entire lifetime — not just for the wrapped
 command's own run. Job Object membership is permanent for a process once
 assigned (short of an explicit, disallowed breakaway); a background process
@@ -207,8 +207,8 @@ for as long as it stays alive. This bites build tools that reuse a persistent
 process across invocations to skip cold-start cost: `dotnet build`'s
 `VBCSCompiler`/MSBuild node reuse, a Gradle daemon, file-watcher processes
 left running by `npm run watch`-style scripts. A follow-up **uncapped**
-`dotnet build` (or `gradle`) can end up running inside the *previous* `cap`
-call's Job Object without a new `cap`/`pint`/`capm` invocation of its own,
+`dotnet build` (or `gradle`) can end up running inside the *previous* `capc`
+call's Job Object without a new `capc`/`capt`/`capm` invocation of its own,
 capped because a stale daemon from an earlier call is doing the work. Either
 don't leave the daemon running across a call whose limit shouldn't persist
 (`dotnet build -p:UseSharedCompilation=false`, `gradle --no-daemon`), or
@@ -220,7 +220,7 @@ killed.
 These tools can be stacked by passing one as another's `<command>`:
 
 ```
-capm 50 cap 50 idle npm run build
+capm 50 capc 50 idle npm run build
 ```
 
 Each wrapper wraps everything after its own arguments, so the outermost
@@ -229,21 +229,21 @@ on a combination:
 
 **Bare tool names resolve through the same `cmd.exe`/`PATHEXT` fallback
 documented above.** None of these ship a `.exe`, so e.g. `capm`'s attempt to
-launch `cap` directly always fails and falls back to `cmd.exe`, which finds
-`cap.bat` via `PATHEXT` — meaning chaining only works when the tools'
+launch `capc` directly always fails and falls back to `cmd.exe`, which finds
+`capc.bat` via `PATHEXT` — meaning chaining only works when the tools'
 install directory is actually on `PATH`, and any `%` elsewhere on that
 command line trips the same fail-closed check described above. `capm`'s own
 `<size>` deliberately has no `%` form for exactly this reason: an earlier
-version accepted `25%`, and `cap 50 capm 25% ...` failed the fail-closed
-check while `capm 25% cap 50 ...` worked fine — an order-dependent foot-gun.
-A bare percent (`capm 50 cap 50 ...`) sidesteps it entirely, in any order.
+version accepted `25%`, and `capc 50 capm 25% ...` failed the fail-closed
+check while `capm 25% capc 50 ...` worked fine — an order-dependent foot-gun.
+A bare percent (`capm 50 capc 50 ...`) sidesteps it entirely, in any order.
 
 **Nested Job Object limits do not follow one universal "smaller wins" rule —
 each limit type combines differently:**
 
-- **CPU (`cap`)**: a nested job's CPU rate is relative to what its parent
+- **CPU (`capc`)**: a nested job's CPU rate is relative to what its parent
   already lets through, so equal caps *multiply* rather than take the
-  minimum — `cap 50 cap 50 ...` yields roughly 25% of total system CPU, not
+  minimum — `capc 50 capc 50 ...` yields roughly 25% of total system CPU, not
   50%. This is documented Windows behavior for
   [`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information),
   not a bug here.
@@ -262,11 +262,11 @@ each limit type combines differently:**
 - **Priority (`idle`/`belownormal`/`abovenormal`/`high`/`realtime`)**: not a
   Job Object limit — the *last* one applied to a given process simply wins,
   same as invoking any one of them alone.
-- **Affinity (`pint`)**: nested affinity is an *effective-limits* chain — a
+- **Affinity (`capt`)**: nested affinity is an *effective-limits* chain — a
   child job's mask can be as tight as it wants but is clamped to whatever
   the parent already allows, never wider
   ([Nested Jobs — Job Limits](https://learn.microsoft.com/en-us/windows/win32/procthread/nested-jobs)).
-  Confirmed empirically: `pint 2 pint 3 ...` (inner asking for *more*
+  Confirmed empirically: `capt 2 capt 3 ...` (inner asking for *more*
   processors than the outer allows) still comes back pinned to the outer's
   2, not the inner's 3 — no error, just silently clamped to the tighter mask.
 
@@ -346,7 +346,7 @@ either order — `npx` re-fetches the package to run it, so it still works even
 after the global package itself is gone.
 
 The commands themselves are never registered through npm's own global `bin`
-shimming — `idle`/`cap`/etc. are too generic a name to risk colliding with
+shimming — `idle`/`capc`/etc. are too generic a name to risk colliding with
 someone else's global npm package. npm here is only the delivery mechanism for
 a dedicated, PATH-managed install directory.
 
@@ -431,6 +431,9 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
 ## Testing
 
+From a source checkout (`test/` isn't part of the published npm package - the
+`test`/`test:elevated` scripts below only work when run from a git clone):
+
 ```
 npm test                                       # installer logic (fast; isolated scratch registry key, cleaned up automatically)
 powershell -Command "Invoke-Pester -Path test\win-nice.Tests.ps1"   # real tool behavior
@@ -459,10 +462,13 @@ tests use `WIN_NICE_HOME` to redirect installs into a temp directory instead.
 3 of its cases only exercise `admin.ps1`'s already-elevated branch, which
 needs the whole test-runner process to already be elevated (not just
 `admin.ps1` itself) - a normal, unelevated run reports them `Skipped`, which
-is expected, not a failure. `npm run test:elevated` (`test/run-elevated.ps1`)
-is a single entry point for that: one UAC prompt elevates the runner once,
-then the full suite - all cases, not just those 3 - runs inside that one
-elevated session, with the result relayed back to the original console.
+is expected, not a failure. A separate, disjoint set of 3 cases only makes
+sense when NOT elevated, and `Skip`s under elevation instead. `npm run
+test:elevated` (`test/run-elevated.ps1`) is a single entry point for the
+first group: one UAC prompt elevates the runner once, then the suite runs
+inside that elevated session, activating those 3 cases (and skipping the
+other 3). Neither a normal run nor an elevated run alone exercises every
+case - run both for full coverage.
 
 ## License
 

@@ -120,7 +120,7 @@ try {{
     }
 
     It 'preserves cmd.exe metacharacters (&, |, <, >, ^) as literal argument text' {
-        # idle.bat forwards a raw %* straight to "start"; unlike cap.bat/cap.ps1 it
+        # idle.bat forwards a raw %* straight to "start"; unlike capc.bat/capc.ps1 it
         # doesn't rebuild the command line itself, so this only needs to lock in
         # today's correct behavior against a future regression.
         $out = New-TempFile
@@ -140,7 +140,7 @@ Set-Content -Path '{0}' -Value ($a -join '|SEP|')
     }
 
     It 'documents a known limitation: a literal "%" is corrupted by idle.bat itself' {
-        # Same cmd.exe batch-parameter quirk as cap.bat - see the cap.ps1 test of the
+        # Same cmd.exe batch-parameter quirk as capc.bat - see the capc.ps1 test of the
         # same name. Invoking "idle" bare from PowerShell (idle.ps1 preferred) does not
         # have this problem - see idle.ps1's own "%" test below.
         $r = Get-ForwardedArgs -Exe (Join-Path $bin 'idle.bat') -ProbeArgs @('100%OFF')
@@ -282,49 +282,49 @@ try {{
     }
 }
 
-Describe 'cap.ps1 argument validation' {
+Describe 'capc.ps1 argument validation' {
     It 'rejects a non-numeric percent' {
-        & (Join-Path $bin 'cap.bat') abc cmd /c "echo hi" 2>&1 | Out-Null
+        & (Join-Path $bin 'capc.bat') abc cmd /c "echo hi" 2>&1 | Out-Null
         $LASTEXITCODE | Should Be 1
     }
 
     It 'rejects percent below 1' {
-        & (Join-Path $bin 'cap.bat') 0 cmd /c "echo hi" 2>&1 | Out-Null
+        & (Join-Path $bin 'capc.bat') 0 cmd /c "echo hi" 2>&1 | Out-Null
         $LASTEXITCODE | Should Be 1
     }
 
     It 'rejects percent above 100' {
-        & (Join-Path $bin 'cap.bat') 101 cmd /c "echo hi" 2>&1 | Out-Null
+        & (Join-Path $bin 'capc.bat') 101 cmd /c "echo hi" 2>&1 | Out-Null
         $LASTEXITCODE | Should Be 1
     }
 
     It 'rejects a missing command' {
-        & (Join-Path $bin 'cap.bat') 50 2>&1 | Out-Null
+        & (Join-Path $bin 'capc.bat') 50 2>&1 | Out-Null
         $LASTEXITCODE | Should Be 1
     }
 
     It 'accepts the boundary values 1 and 100' {
-        & (Join-Path $bin 'cap.bat') 1 cmd /c "exit 0"
+        & (Join-Path $bin 'capc.bat') 1 cmd /c "exit 0"
         $LASTEXITCODE | Should Be 0
-        & (Join-Path $bin 'cap.bat') 100 cmd /c "exit 0"
+        & (Join-Path $bin 'capc.bat') 100 cmd /c "exit 0"
         $LASTEXITCODE | Should Be 0
     }
 }
 
-Describe 'cap.ps1 behavior' {
+Describe 'capc.ps1 behavior' {
     It 'propagates the exit code of the wrapped command' {
-        & (Join-Path $bin 'cap.bat') 50 cmd /c "exit 3"
+        & (Join-Path $bin 'capc.bat') 50 cmd /c "exit 3"
         $LASTEXITCODE | Should Be 3
     }
 
     It 'preserves an empty-string argument through to the wrapped command' {
         # The empty "" argument is baked into a static .bat file's text rather than
         # passed as a live PowerShell argument - Windows PowerShell 5.1's `&` drops
-        # literal "" arguments to native commands before they ever reach cap.bat,
-        # which would test a PowerShell quirk instead of cap.ps1's own quoting.
+        # literal "" arguments to native commands before they ever reach capc.bat,
+        # which would test a PowerShell quirk instead of capc.ps1's own quoting.
         # The probe itself must bind its args via ValueFromRemainingArguments - a
         # plain [string[]] positional parameter has its own PS 5.1 -File quirk that
-        # silently truncates the array at an empty element, independent of cap.ps1.
+        # silently truncates the array at an empty element, independent of capc.ps1.
         $out = New-TempFile
         $probe = @'
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$a)
@@ -332,16 +332,16 @@ Set-Content -Path '{0}' -Value ($a.Count.ToString() + "|" + ($a -join ","))
 '@ -f $out
         $probeFile = New-TempScript
         Set-Content -Path $probeFile -Value $probe
-        $capBat = Join-Path $bin 'cap.bat'
+        $capcBat = Join-Path $bin 'capc.bat'
         $driver = (New-TempScript).Replace('.ps1', '.bat')
-        Set-Content -Path $driver -Value "@echo off`r`n`"$capBat`" 50 powershell -NoProfile -File `"$probeFile`" AAA `"`" BBB`r`n"
+        Set-Content -Path $driver -Value "@echo off`r`n`"$capcBat`" 50 powershell -NoProfile -File `"$probeFile`" AAA `"`" BBB`r`n"
         & $driver
         (Get-Content $out).Trim() | Should Be '3|AAA,,BBB'
         Remove-Item $out, $probeFile, $driver -ErrorAction SilentlyContinue
     }
 
     It 'preserves cmd.exe metacharacters (&, |, <, >, ^) as literal argument text' {
-        # Unescaped, these would be re-parsed by the "cmd.exe /c" hop inside cap.ps1
+        # Unescaped, these would be re-parsed by the "cmd.exe /c" hop inside capc.ps1
         # and split the wrapped command into separate commands (or drop the caret).
         $out = New-TempFile
         $probe = @'
@@ -350,9 +350,9 @@ Set-Content -Path '{0}' -Value ($a -join '|SEP|')
 '@ -f $out
         $probeFile = New-TempScript
         Set-Content -Path $probeFile -Value $probe
-        $capBat = Join-Path $bin 'cap.bat'
+        $capcBat = Join-Path $bin 'capc.bat'
         $driver = (New-TempScript).Replace('.ps1', '.bat')
-        Set-Content -Path $driver -Value "@echo off`r`n`"$capBat`" 50 powershell -NoProfile -File `"$probeFile`" `"A&B`" `"A|B`" `"A<B>C`" `"A^B`"`r`n"
+        Set-Content -Path $driver -Value "@echo off`r`n`"$capcBat`" 50 powershell -NoProfile -File `"$probeFile`" `"A&B`" `"A|B`" `"A<B>C`" `"A^B`"`r`n"
         & $driver
         $LASTEXITCODE | Should Be 0
         (Get-Content $out).Trim() | Should Be 'A&B|SEP|A|B|SEP|A<B>C|SEP|A^B'
@@ -360,9 +360,9 @@ Set-Content -Path '{0}' -Value ($a -join '|SEP|')
     }
 
     It 'forwards flags that collide with PowerShell common parameters (e.g. -e, -Verbose) untouched' {
-        # cap.ps1 must not bind these as -ErrorAction/-Verbose itself; node -e is the
+        # capc.ps1 must not bind these as -ErrorAction/-Verbose itself; node -e is the
         # motivating real-world case. The probe below deliberately uses bare $args
-        # (no [Parameter()] attribute) for the same reason cap.ps1 does - a declared
+        # (no [Parameter()] attribute) for the same reason capc.ps1 does - a declared
         # ValueFromRemainingArguments parameter would make the *probe* itself subject
         # to the same common-parameter ambiguity being tested here.
         $out = New-TempFile
@@ -371,9 +371,9 @@ Set-Content -Path $env:WIN_NICE_TEST_OUT -Value ($args -join '|SEP|')
 '@
         $probeFile = New-TempScript
         Set-Content -Path $probeFile -Value $probe
-        $capBat = Join-Path $bin 'cap.bat'
+        $capcBat = Join-Path $bin 'capc.bat'
         $driver = (New-TempScript).Replace('.ps1', '.bat')
-        Set-Content -Path $driver -Value "@echo off`r`nset WIN_NICE_TEST_OUT=$out`r`n`"$capBat`" 50 powershell -NoProfile -File `"$probeFile`" -e 0 -Verbose`r`n"
+        Set-Content -Path $driver -Value "@echo off`r`nset WIN_NICE_TEST_OUT=$out`r`n`"$capcBat`" 50 powershell -NoProfile -File `"$probeFile`" -e 0 -Verbose`r`n"
         & $driver
         $LASTEXITCODE | Should Be 0
         (Get-Content $out).Trim() | Should Be '-e|SEP|0|SEP|-Verbose'
@@ -381,20 +381,20 @@ Set-Content -Path $env:WIN_NICE_TEST_OUT -Value ($args -join '|SEP|')
     }
 
     It 'forwards a flag that would ambiguously prefix-match the declared -Percent parameter name (e.g. -p)' {
-        # Regression test: cap.ps1 used to declare $Percent via param(), and even
+        # Regression test: capc.ps1 used to declare $Percent via param(), and even
         # without [Parameter()] attributes, PowerShell's binder still prefix-matches
         # "-p" against a declared parameter named "Percent" and rebinds it.
-        $r = Get-ForwardedArgs -Exe (Join-Path $bin 'cap.bat') -Prefix @('50') -ProbeArgs @('-p', '0')
+        $r = Get-ForwardedArgs -Exe (Join-Path $bin 'capc.bat') -Prefix @('50') -ProbeArgs @('-p', '0')
         $r.ExitCode | Should Be 0
         $r.Output | Should Be '-p|SEP|0'
     }
 
     It 'preserves a literal "%" when the target is a directly-launchable .exe' {
-        # No cmd.exe involved at all on this path (see cap.ps1's Capper.Run) - unlike
+        # No cmd.exe involved at all on this path (see capc.ps1's Capper.Run) - unlike
         # the cmd.exe /c fallback path, "%" isn't at risk of environment-variable
-        # expansion here. Must invoke cap.ps1 directly (not through cap.bat, which has
+        # expansion here. Must invoke capc.ps1 directly (not through capc.bat, which has
         # its own separate, documented "%" corruption at the %* forwarding step).
-        $r = Get-DirectForwardedArgs -Ps1 (Join-Path $bin 'cap.ps1') -Prefix @('50') -ProbeArgs @('100%OFF', '50%50')
+        $r = Get-DirectForwardedArgs -Ps1 (Join-Path $bin 'capc.ps1') -Prefix @('50') -ProbeArgs @('100%OFF', '50%50')
         $r.ExitCode | Should Be 0
         $r.Output | Should Be '100%OFF|SEP|50%50'
     }
@@ -404,20 +404,20 @@ Set-Content -Path $env:WIN_NICE_TEST_OUT -Value ($args -join '|SEP|')
         $targetBat = $targetBat.Replace('.ps1', '.bat')
         Set-Content -Path $targetBat -Value "@echo off`r`necho BATOUT=%*`r`n"
         $driver = (New-TempScript).Replace('.ps1', '.bat')
-        Set-Content -Path $driver -Value "@echo off`r`n`"$(Join-Path $bin 'cap.bat')`" 50 `"$targetBat`" `"A&B`" `"A|B`"`r`n"
+        Set-Content -Path $driver -Value "@echo off`r`n`"$(Join-Path $bin 'capc.bat')`" 50 `"$targetBat`" `"A&B`" `"A|B`"`r`n"
         $out = & $driver
         $LASTEXITCODE | Should Be 0
         ($out | Select-Object -Last 1) | Should Be 'BATOUT="A&B" "A|B"'
         Remove-Item $targetBat, $driver -ErrorAction SilentlyContinue
     }
 
-    It 'documents a known limitation: a literal "%" is corrupted by cap.bat itself, before cap.ps1 ever runs' {
+    It 'documents a known limitation: a literal "%" is corrupted by capc.bat itself, before capc.ps1 ever runs' {
         # Confirmed with nothing more than a bare "echo %1" in a plain .bat file - this
         # is cmd.exe's own batch-parameter substitution rescanning %1/%* for %...%
-        # patterns, unrelated to cap.ps1's escaping and not fixable from inside a .bat.
-        # Invoking "cap" bare from an actual PowerShell session (cap.ps1 preferred over
-        # cap.bat) does not have this problem - see the "%" test above.
-        $r = Get-ForwardedArgs -Exe (Join-Path $bin 'cap.bat') -Prefix @('50') -ProbeArgs @('100%OFF')
+        # patterns, unrelated to capc.ps1's escaping and not fixable from inside a .bat.
+        # Invoking "capc" bare from an actual PowerShell session (capc.ps1 preferred over
+        # capc.bat) does not have this problem - see the "%" test above.
+        $r = Get-ForwardedArgs -Exe (Join-Path $bin 'capc.bat') -Prefix @('50') -ProbeArgs @('100%OFF')
         $r.Output | Should Be '100OFF'
     }
 
@@ -457,17 +457,18 @@ Write-Output ("{0:N1}" -f $pct)
         # not absolute ones - an absolute "baseline must exceed cap+20" gate was
         # tried and rejected valid signal on a loaded machine (baseline=37.3,
         # capped=25.6 - a real, working cap - got skipped for "baseline too low").
-        # 5 attempts, not 3: a sustained contention spike (e.g. this test running
+        # 8 attempts, not 5: a sustained contention spike (e.g. this test running
         # right after a long, heavy back-to-back Pester run) can poison every
-        # attempt's baseline in a 3-attempt window - confirmed: isolated re-run
-        # passed cleanly in 9.4s immediately after a 3-attempt exhaustion inside
-        # a 180s full-suite run (baseline=20.5 < cap*1.15=34.5 on every attempt).
+        # attempt's baseline in a 5-attempt window too - confirmed again:
+        # isolated re-run passed cleanly in 9.8s immediately after a 5-attempt
+        # exhaustion inside a run with heavy concurrent background load
+        # (baseline=30.7 < cap*1.15=34.5 on every attempt, cap=30).
         $passed = $false
         $lastBaseline = $null
         $lastCapped = $null
-        for ($attempt = 1; $attempt -le 5 -and -not $passed; $attempt++) {
+        for ($attempt = 1; $attempt -le 8 -and -not $passed; $attempt++) {
             $baseline = [double](powershell -NoProfile -File $burnFile $threads $seconds)
-            $cappedOut = & (Join-Path $bin 'cap.bat') $cap powershell -NoProfile -File $burnFile $threads $seconds
+            $cappedOut = & (Join-Path $bin 'capc.bat') $cap powershell -NoProfile -File $burnFile $threads $seconds
             $capped = [double]($cappedOut | Select-Object -Last 1)
             $lastBaseline = $baseline
             $lastCapped = $capped
@@ -494,15 +495,15 @@ Write-Output ("{0:N1}" -f $pct)
 # invoke the .ps1 directly, not the .bat wrapper - the .bat wrapper corrupts a
 # literal "%" itself before .ps1 ever runs (see the "known limitation" tests above),
 # which would test the wrong layer. Marker-file-on-success (same technique as the
-# cap.ps1 "fallback path" test above) proves the target never actually launched.
+# capc.ps1 "fallback path" test above) proves the target never actually launched.
 $fallbackPercentTools = @(
     @{ Name = 'idle'; Prefix = @() }
     @{ Name = 'belownormal'; Prefix = @() }
     @{ Name = 'abovenormal'; Prefix = @() }
     @{ Name = 'high'; Prefix = @() }
     @{ Name = 'realtime'; Prefix = @() }
-    @{ Name = 'cap'; Prefix = @('50') }
-    @{ Name = 'pint'; Prefix = @('1') }
+    @{ Name = 'capc'; Prefix = @('50') }
+    @{ Name = 'capt'; Prefix = @('1') }
     @{ Name = 'capm'; Prefix = @('100m') }
 )
 
@@ -536,7 +537,7 @@ Describe '%-fail-closed on the cmd.exe fallback path' {
 # and reopening the "&" injection the whole quoting layer exists to prevent. Fixed
 # via "/d /s /v:off" plus wrapping cmdExeCommandLine in an extra outer quote pair
 # (see any launcher's Run() for the exact rationale). Reproduced pre-fix with:
-#   powershell -File bin\cap.ps1 50 "<TEMP>\wn review N\t.bat" "A&B" plain
+#   powershell -File bin\capc.ps1 50 "<TEMP>\wn review N\t.bat" "A&B" plain
 # -> "'...\wn' is not recognized ...", "'B' is not recognized ...", exit=1
 function Test-SpacedTargetFallback {
     param(
@@ -562,8 +563,8 @@ $spacedFallbackTools = @(
     @{ Name = 'abovenormal'; Prefix = @() }
     @{ Name = 'high'; Prefix = @() }
     @{ Name = 'realtime'; Prefix = @() }
-    @{ Name = 'cap'; Prefix = @('50') }
-    @{ Name = 'pint'; Prefix = @('1') }
+    @{ Name = 'capc'; Prefix = @('50') }
+    @{ Name = 'capt'; Prefix = @('1') }
     @{ Name = 'capm'; Prefix = @('100m') }
 )
 
@@ -589,57 +590,57 @@ Describe 'cmd.exe fallback quoting survives a target path containing a space (<N
 # the "A&B" case) already exercises the fix's compatibility with a spaced PATH
 # entry resolved by cmd.exe's own PATHEXT search.
 
-Describe 'pint.ps1 argument validation' {
+Describe 'capt.ps1 argument validation' {
     It 'rejects a non-numeric thread count' {
-        & (Join-Path $bin 'pint.bat') abc cmd /c "echo hi" 2>&1 | Out-Null
+        & (Join-Path $bin 'capt.bat') abc cmd /c "echo hi" 2>&1 | Out-Null
         $LASTEXITCODE | Should Be 1
     }
 
     It 'rejects a count below 1' {
-        & (Join-Path $bin 'pint.bat') 0 cmd /c "echo hi" 2>&1 | Out-Null
+        & (Join-Path $bin 'capt.bat') 0 cmd /c "echo hi" 2>&1 | Out-Null
         $LASTEXITCODE | Should Be 1
     }
 
     It 'rejects a count above the logical processor count' {
         $tooMany = [Environment]::ProcessorCount + 1
-        & (Join-Path $bin 'pint.bat') $tooMany cmd /c "echo hi" 2>&1 | Out-Null
+        & (Join-Path $bin 'capt.bat') $tooMany cmd /c "echo hi" 2>&1 | Out-Null
         $LASTEXITCODE | Should Be 1
     }
 
     It 'rejects a missing command' {
-        & (Join-Path $bin 'pint.bat') 1 2>&1 | Out-Null
+        & (Join-Path $bin 'capt.bat') 1 2>&1 | Out-Null
         $LASTEXITCODE | Should Be 1
     }
 
     It 'accepts the boundary value 1' {
-        & (Join-Path $bin 'pint.bat') 1 cmd /c "exit 0"
+        & (Join-Path $bin 'capt.bat') 1 cmd /c "exit 0"
         $LASTEXITCODE | Should Be 0
     }
 }
 
-Describe 'pint.ps1 behavior' {
+Describe 'capt.ps1 behavior' {
     # 1, not a higher count: these tests only care about exit-code propagation,
     # argument forwarding, and metacharacter preservation - none of that needs
-    # more than one logical processor, and pint itself supports thread-count 1
+    # more than one logical processor, and capt itself supports thread-count 1
     # with no minimum-processor-count requirement documented anywhere. A
     # hardcoded higher count here would fail argument validation before ever
     # reaching the behavior under test on a genuinely 1-processor machine
     # (release review 1745-708cb53 P2).
     It 'propagates the exit code of the wrapped command' {
-        & (Join-Path $bin 'pint.bat') 1 cmd /c "exit 3"
+        & (Join-Path $bin 'capt.bat') 1 cmd /c "exit 3"
         $LASTEXITCODE | Should Be 3
     }
 
     It 'forwards a flag that would ambiguously prefix-match the declared -Count parameter name (e.g. -c)' {
-        $r = Get-ForwardedArgs -Exe (Join-Path $bin 'pint.bat') -Prefix @('1') -ProbeArgs @('-c', '0')
+        $r = Get-ForwardedArgs -Exe (Join-Path $bin 'capt.bat') -Prefix @('1') -ProbeArgs @('-c', '0')
         $r.ExitCode | Should Be 0
         $r.Output | Should Be '-c|SEP|0'
     }
 
     It 'preserves cmd.exe metacharacters and a literal "%" on the direct-launch path' {
-        # Must invoke pint.ps1 directly (not through pint.bat, which has its own
+        # Must invoke capt.ps1 directly (not through capt.bat, which has its own
         # separate, documented "%" corruption at the %* forwarding step).
-        $r = Get-DirectForwardedArgs -Ps1 (Join-Path $bin 'pint.ps1') -Prefix @('1') -ProbeArgs @('A&B', 'A|B', '100%OFF')
+        $r = Get-DirectForwardedArgs -Ps1 (Join-Path $bin 'capt.ps1') -Prefix @('1') -ProbeArgs @('A&B', 'A|B', '100%OFF')
         $r.ExitCode | Should Be 0
         $r.Output | Should Be 'A&B|SEP|A|B|SEP|100%OFF'
     }
@@ -654,7 +655,7 @@ Describe 'pint.ps1 behavior' {
         $probe = "Set-Content -Path '$out' -Value ('0x' + (Get-Process -Id `$PID).ProcessorAffinity.ToString('X'))"
         $probeFile = New-TempScript
         Set-Content -Path $probeFile -Value $probe
-        & (Join-Path $bin 'pint.bat') $n powershell -NoProfile -File $probeFile
+        & (Join-Path $bin 'capt.bat') $n powershell -NoProfile -File $probeFile
         (Get-Content $out).Trim() | Should Be $expectedMask
         Remove-Item $out, $probeFile -ErrorAction SilentlyContinue
     }
@@ -678,7 +679,7 @@ try {{
 '@ -f $out
         $scriptFile = New-TempScript
         Set-Content -Path $scriptFile -Value $script
-        & (Join-Path $bin 'pint.bat') $n powershell -NoProfile -File $scriptFile
+        & (Join-Path $bin 'capt.bat') $n powershell -NoProfile -File $scriptFile
         (Get-Content $out).Trim() | Should Be $expectedMask
         Remove-Item $out, $scriptFile -ErrorAction SilentlyContinue
     }
@@ -843,7 +844,7 @@ try {
         # A grandchild (spawned by the immediate child, not by capm.ps1 itself)
         # must still be subject to the same Job Object memory ceiling - Windows
         # auto-joins new child processes to the parent's job by default, same
-        # inheritance cap/pint already rely on for their own "whole tree" tests.
+        # inheritance capc/capt already rely on for their own "whole tree" tests.
         # Both the outer (child) and inner (grandchild) scripts are separate temp
         # FILES, not inline -Command strings - nested inline quoting across three
         # process hops (Pester -> child -> grandchild) is exactly the kind of thing
@@ -876,8 +877,8 @@ if (-not `$c.WaitForExit(15000)) { `$c.Kill() }
     }
 }
 
-# Real usage stacks these tools, e.g. "capm 10g cap 50 idle <command>" - each
-# wrapper's own direct-launch attempt fails for a bare tool name (no cap.exe/
+# Real usage stacks these tools, e.g. "capm 10g capc 50 idle <command>" - each
+# wrapper's own direct-launch attempt fails for a bare tool name (no capc.exe/
 # idle.exe exists, only .bat/.ps1/extensionless shims), so it falls back to
 # cmd.exe, which resolves the bare name via PATHEXT (.BAT is in the default
 # PATHEXT list). That only works when the tools' directory is actually on
@@ -887,18 +888,18 @@ if (-not `$c.WaitForExit(15000)) { `$c.Kill() }
 $chainPath = "$bin;$env:SystemRoot\System32;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
 
 Describe 'chained tool invocation (bare tool names resolved via PATH, cmd.exe PATHEXT fallback)' {
-    It 'propagates the exit code through a 2-level chain (cap wrapping idle wrapping a probe)' {
+    It 'propagates the exit code through a 2-level chain (capc wrapping idle wrapping a probe)' {
         $prevPath = $env:PATH
         $env:PATH = $chainPath
         try {
-            & powershell -NoProfile -File (Join-Path $bin 'cap.ps1') 50 idle cmd.exe /c exit 8
+            & powershell -NoProfile -File (Join-Path $bin 'capc.ps1') 50 idle cmd.exe /c exit 8
             $LASTEXITCODE | Should Be 8
         } finally {
             $env:PATH = $prevPath
         }
     }
 
-    It 'propagates the exit code through a 3-level chain (capm wrapping cap wrapping idle wrapping a probe) and applies Idle priority to the innermost process' {
+    It 'propagates the exit code through a 3-level chain (capm wrapping capc wrapping idle wrapping a probe) and applies Idle priority to the innermost process' {
         # capm's own cap is deliberately roomy (100, i.e. 100%) here - this test is
         # about the chain mechanics (bare-name resolution through two extra cmd.exe
         # hops) and the priority class reaching the innermost process, not about
@@ -912,7 +913,7 @@ Describe 'chained tool invocation (bare tool names resolved via PATH, cmd.exe PA
             $probe = "(Get-Process -Id `$PID).PriorityClass | Out-File -FilePath '$out'; exit 8"
             $probeFile = New-TempScript
             Set-Content -Path $probeFile -Value $probe
-            & powershell -NoProfile -File (Join-Path $bin 'capm.ps1') 100 cap 50 idle powershell -NoProfile -File $probeFile
+            & powershell -NoProfile -File (Join-Path $bin 'capm.ps1') 100 capc 50 idle powershell -NoProfile -File $probeFile
             $LASTEXITCODE | Should Be 8
             (Get-Content $out).Trim() | Should Be 'Idle'
             Remove-Item $out, $probeFile -ErrorAction SilentlyContinue
@@ -921,33 +922,33 @@ Describe 'chained tool invocation (bare tool names resolved via PATH, cmd.exe PA
         }
     }
 
-    It 'propagates the exit code through a 2-level chain with cap OUTSIDE capm (regression: capm used to reject a "%"-style percent here)' {
-        # The exact broken repro from the 1500-1e191bc release review: "cap 50
+    It 'propagates the exit code through a 2-level chain with capc OUTSIDE capm (regression: capm used to reject a "%"-style percent here)' {
+        # The exact broken repro from the 1500-1e191bc release review: "capc 50
         # capm 25% ..." failed the fail-closed "%" check (capm's own size, "25%",
-        # is an argument in CAP's cmd.exe fallback command line - any "%" there
+        # is an argument in CAPC's cmd.exe fallback command line - any "%" there
         # trips the same guard that protects the wrapped command's own arguments),
         # while the reverse order or a non-percent size worked fine - an
         # order-dependent foot-gun. Removing "%" from capm's size grammar (bare
-        # integer = percent now, same as cap) fixes this for every order, since a
+        # integer = percent now, same as capc) fixes this for every order, since a
         # bare integer never contains "%" in the first place.
         $prevPath = $env:PATH
         $env:PATH = $chainPath
         try {
-            & powershell -NoProfile -File (Join-Path $bin 'cap.ps1') 50 capm 50 cmd.exe /c exit 8
+            & powershell -NoProfile -File (Join-Path $bin 'capc.ps1') 50 capm 50 cmd.exe /c exit 8
             $LASTEXITCODE | Should Be 8
         } finally {
             $env:PATH = $prevPath
         }
     }
 
-    It 'enforces the outer capm memory cap on a process launched through an extra bare-name/cmd.exe hop, nested inside cap''s own Job Object' {
+    It 'enforces the outer capm memory cap on a process launched through an extra bare-name/cmd.exe hop, nested inside capc''s own Job Object' {
         # Reuses the already-validated 400m/2000MB pairing from the "whole spawned
         # process tree" test above (two nested PowerShell/CLR instances sharing one
         # job-wide memory budget - an earlier version of this test asked for only
         # 200MB, which left enough headroom after both instances started that the
         # allocation actually succeeded instead of proving anything). Here the
-        # second instance is cap.ps1's own host, reached via capm's cmd.exe/PATHEXT
-        # fallback (bare "cap" has no direct .exe), and cap assigns the final probe
+        # second instance is capc.ps1's own host, reached via capm's cmd.exe/PATHEXT
+        # fallback (bare "capc" has no direct .exe), and capc assigns the final probe
         # to its OWN separate Job Object (CPU 50%) nested inside capm's (Windows 8+
         # nested jobs) - proving the outer memory ceiling still binds through both
         # the extra hop and the nested job, not just on a direct, single-level child.
@@ -972,14 +973,14 @@ try {
         try {
             $probeFile = New-TempScript
             Set-Content -Path $probeFile -Value $localAllocProbe
-            $tight = & powershell -NoProfile -File (Join-Path $bin 'capm.ps1') 400m cap 50 powershell -NoProfile -File $probeFile
+            $tight = & powershell -NoProfile -File (Join-Path $bin 'capm.ps1') 400m capc 50 powershell -NoProfile -File $probeFile
             $LASTEXITCODE | Should Be 0
             ($tight | Select-Object -Last 1) | Should Match '^FAILED:'
             Remove-Item $probeFile -ErrorAction SilentlyContinue
 
             $probeFile2 = New-TempScript
             Set-Content -Path $probeFile2 -Value $localAllocProbe
-            $roomy = & powershell -NoProfile -File (Join-Path $bin 'capm.ps1') 100 cap 50 powershell -NoProfile -File $probeFile2
+            $roomy = & powershell -NoProfile -File (Join-Path $bin 'capm.ps1') 100 capc 50 powershell -NoProfile -File $probeFile2
             $LASTEXITCODE | Should Be 0
             ($roomy | Select-Object -Last 1) | Should Be 'ALLOCATED'
             Remove-Item $probeFile2 -ErrorAction SilentlyContinue
@@ -988,11 +989,11 @@ try {
         }
     }
 
-    It 'holds CPU usage of a nested "cap 50 cap 50" measurably below a single "cap 50" (CPU rate multiplies when nested, not "smaller wins")' {
+    It 'holds CPU usage of a nested "capc 50 capc 50" measurably below a single "capc 50" (CPU rate multiplies when nested, not "smaller wins")' {
         # Documents/locks in the release review's P1 finding: nested Job Object
         # CPU rate is relative to the parent's, so equal caps multiply rather than
-        # take the minimum - "cap 50 cap 50" should land near 25%, clearly below a
-        # single "cap 50" (~50%), not equal to it (which "smaller wins" predicts).
+        # take the minimum - "capc 50 capc 50" should land near 25%, clearly below a
+        # single "capc 50" (~50%), not equal to it (which "smaller wins" predicts).
         $burn = @'
 param([int]$Threads, [int]$Seconds)
 $proc = [Diagnostics.Process]::GetCurrentProcess()
@@ -1029,9 +1030,9 @@ Write-Output ("{0:N1}" -f $pct)
             $lastSingle = $null
             $lastNested = $null
             for ($attempt = 1; $attempt -le 3 -and -not $passed; $attempt++) {
-                $singleOut = & (Join-Path $bin 'cap.bat') $cap powershell -NoProfile -File $burnFile $threads $seconds
+                $singleOut = & (Join-Path $bin 'capc.bat') $cap powershell -NoProfile -File $burnFile $threads $seconds
                 $single = [double]($singleOut | Select-Object -Last 1)
-                $nestedOut = & powershell -NoProfile -File (Join-Path $bin 'cap.ps1') $cap cap $cap powershell -NoProfile -File $burnFile $threads $seconds
+                $nestedOut = & powershell -NoProfile -File (Join-Path $bin 'capc.ps1') $cap capc $cap powershell -NoProfile -File $burnFile $threads $seconds
                 $nested = [double]($nestedOut | Select-Object -Last 1)
                 $lastSingle = $single
                 $lastNested = $nested
@@ -1055,23 +1056,23 @@ Write-Output ("{0:N1}" -f $pct)
         Remove-Item $burnFile -ErrorAction SilentlyContinue
     }
 
-    It 'clamps a nested "pint 1 pint 2" to the OUTER (tighter) mask, not the inner (wider) request' -Skip:([Environment]::ProcessorCount -lt 2) {
-        # 1/2, not 2/3: pint itself rejects a thread-count above the machine's
+    It 'clamps a nested "capt 1 capt 2" to the OUTER (tighter) mask, not the inner (wider) request' -Skip:([Environment]::ProcessorCount -lt 2) {
+        # 1/2, not 2/3: capt itself rejects a thread-count above the machine's
         # own logical processor count, and the product doesn't document a
-        # minimum-processor-count requirement - a hardcoded "pint 2 pint 3"
+        # minimum-processor-count requirement - a hardcoded "capt 2 capt 3"
         # here would fail argument validation on a 1-2 processor machine
         # before ever reaching the nested-affinity behavior under test
         # (release review 1745-708cb53 P2). Skipped outright (not run with a
         # smaller/meaningless count) on a genuinely 1-processor machine, since
         # there's no way to express "wider than 1" below thread-count 2 there.
         #
-        # Empirically verified (release review 1609-8824cf7 P3): a nested pint
+        # Empirically verified (release review 1609-8824cf7 P3): a nested capt
         # requesting a WIDER mask than its parent job allows does not error out
         # and does not get the wider mask either - the effective affinity comes
         # back clamped to the outer, tighter mask. Matches Microsoft's "child can
         # be stricter, not less strict, than parent" model for nested Job Object
-        # affinity (Nested Jobs - Job Limits). Manually confirmed with pint 2
-        # pint 4 -> 0x3 (not 0xF) before writing this test.
+        # affinity (Nested Jobs - Job Limits). Manually confirmed with capt 2
+        # capt 4 -> 0x3 (not 0xF) before writing this test.
         $prevPath = $env:PATH
         $env:PATH = $chainPath
         try {
@@ -1079,7 +1080,7 @@ Write-Output ("{0:N1}" -f $pct)
             $probe = "(Get-Process -Id `$PID).ProcessorAffinity.ToString('X') | Out-File -FilePath '$out'; exit 8"
             $probeFile = New-TempScript
             Set-Content -Path $probeFile -Value $probe
-            & powershell -NoProfile -File (Join-Path $bin 'pint.ps1') 1 pint 2 powershell -NoProfile -File $probeFile
+            & powershell -NoProfile -File (Join-Path $bin 'capt.ps1') 1 capt 2 powershell -NoProfile -File $probeFile
             $LASTEXITCODE | Should Be 8
             ('0x' + (Get-Content $out).Trim()) | Should Be '0x1'
             Remove-Item $out, $probeFile -ErrorAction SilentlyContinue
@@ -1420,6 +1421,7 @@ function New-LauncherFaultProbe {
     public static bool FailAssign;
     public static bool FailSetInfo;
     public static bool FailGetExitCode;
+    public static bool FailTerminate;
     public static int TerminateCalls;
     public static int CloseHandleFailures;
     public static int LastProcessId;
@@ -1428,7 +1430,7 @@ function New-LauncherFaultProbe {
     public static void ResetProbe()
     {
         FailWait = false; FailResume = false; FailAssign = false;
-        FailSetInfo = false; FailGetExitCode = false;
+        FailSetInfo = false; FailGetExitCode = false; FailTerminate = false;
         TerminateCalls = 0; CloseHandleFailures = 0; LastProcessId = 0;
         ClosedHandles.Clear();
     }
@@ -1452,6 +1454,7 @@ function New-LauncherFaultProbe {
     static bool TerminateProcess(IntPtr hProcess, uint uExitCode)
     {
         TerminateCalls++;
+        if (FailTerminate) { SetLastError(5); return false; }
         return TerminateProcessReal(hProcess, uExitCode);
     }
 '@ 'TerminateProcess'
@@ -1566,14 +1569,33 @@ function New-LauncherFaultProbe {
     return ([System.Management.Automation.PSTypeName]"$Namespace.$ClassName").Type
 }
 
-# One probe per template shape. The 8 non-Job launchers share a byte-identical
-# Run() body (verified), and so do the 3 Job-Object ones, so two compiled probes
-# cover every failure branch; the source-shape test below is what guarantees the
-# other 9 files still match the template these two stand in for.
+# The 8 non-Job launchers share a byte-identical Run() body (verified), and so
+# do the 3 Job-Object ones, so these two compiled probes are enough to cover
+# every FAILURE branch in detail. But a byte-identical body is only a claim
+# about SOURCE TEXT - the source-shape guard below checks it textually, and
+# neither that nor these two probes ever actually RUNS admin/cy/cx/capt/capm's
+# own compiled Run(). $script:allLauncherProbes (below) compiles and executes
+# all 11, closing that gap with a success-path smoke test per file.
 $script:probePriority = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'idle.ps1') `
     -Namespace 'WinNiceFaultProbePriority' -ClassName 'IdleLauncher'
-$script:probeJob = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'cap.ps1') `
-    -Namespace 'WinNiceFaultProbeJob' -ClassName 'CapLauncher' -JobObject
+$script:probeJob = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'capc.ps1') `
+    -Namespace 'WinNiceFaultProbeJob' -ClassName 'CapcLauncher' -JobObject
+
+# One compiled probe per launcher file - reuses the two above for idle/capc
+# rather than recompiling them under a different namespace.
+$script:allLauncherProbes = [ordered]@{
+    idle        = $script:probePriority
+    belownormal = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'belownormal.ps1') -Namespace 'WinNiceFaultProbeBelowNormal' -ClassName 'BelowNormalLauncher'
+    abovenormal = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'abovenormal.ps1') -Namespace 'WinNiceFaultProbeAboveNormal' -ClassName 'AboveNormalLauncher'
+    high        = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'high.ps1') -Namespace 'WinNiceFaultProbeHigh' -ClassName 'HighLauncher'
+    realtime    = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'realtime.ps1') -Namespace 'WinNiceFaultProbeRealtime' -ClassName 'RealtimeLauncher'
+    cy          = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'cy.ps1') -Namespace 'WinNiceFaultProbeCy' -ClassName 'CyLauncher'
+    cx          = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'cx.ps1') -Namespace 'WinNiceFaultProbeCx' -ClassName 'CxLauncher'
+    admin       = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'admin.ps1') -Namespace 'WinNiceFaultProbeAdmin' -ClassName 'AdminLauncher'
+    capc        = $script:probeJob
+    capt        = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'capt.ps1') -Namespace 'WinNiceFaultProbePint' -ClassName 'CaptLauncher' -JobObject
+    capm        = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'capm.ps1') -Namespace 'WinNiceFaultProbeCapm' -ClassName 'CapmLauncher' -JobObject
+}
 
 # Kills a probe child that survived a failed assertion (a successful test's
 # injected TerminateProcess has already killed it).
@@ -1583,6 +1605,19 @@ function Remove-ProbeChild {
         $p = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
         if ($p) { Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue }
     }
+}
+
+# TerminateProcess only INITIATES termination and returns asynchronously - an
+# immediate Get-Process check right after a successful call can flake under
+# load. Poll with a bounded deadline instead of asserting instantly.
+function Wait-ProbeChildGone {
+    param([int]$ProcessId, [int]$TimeoutMs = 5000)
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    do {
+        if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { return $true }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return -not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
 }
 
 Describe 'native failure branches (fault-injected copy of the embedded C#)' {
@@ -1607,7 +1642,31 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
         $t::CloseHandleFailures | Should Be 0
         # Fail-closed: the wrapper reported failure, so the child must not still
         # be running in the background.
-        Get-Process -Id $t::LastProcessId -ErrorAction SilentlyContinue | Should Be $null
+        Wait-ProbeChildGone -ProcessId $t::LastProcessId | Should Be $true
+        Remove-ProbeChild -ProcessId $t::LastProcessId
+        $t::ResetProbe()
+    }
+
+    It 'reports the TerminateProcess failure alongside the original error, and leaves the child running, when the best-effort kill itself fails (Job Object template)' {
+        $t = $script:probeJob
+        $t::ResetProbe()
+        $t::FailWait = $true
+        $t::FailTerminate = $true
+        $message = $null
+        try {
+            $t::Run(50, [string[]]@('ping', '-n', '30', '127.0.0.1'), 'ping -n 30 127.0.0.1') | Out-Null
+        } catch {
+            $message = $_.Exception.InnerException.Message
+        }
+        $message | Should Be 'WaitForSingleObject failed: 6; TerminateProcess also failed: 5'
+        $t::TerminateCalls | Should Be 1
+        $t::ClosedHandles.Count | Should Be 3
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 3
+        $t::CloseHandleFailures | Should Be 0
+        # The probe's TerminateProcess never called through to the real one, so
+        # the child genuinely must still be alive - proving the message above
+        # isn't silently overclaiming a kill that didn't actually happen.
+        (Get-Process -Id $t::LastProcessId -ErrorAction SilentlyContinue) | Should Not Be $null
         Remove-ProbeChild -ProcessId $t::LastProcessId
         $t::ResetProbe()
     }
@@ -1629,7 +1688,7 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
         $t::TerminateCalls | Should Be 1
         $t::ClosedHandles.Count | Should Be 3
         $t::CloseHandleFailures | Should Be 0
-        Get-Process -Id $t::LastProcessId -ErrorAction SilentlyContinue | Should Be $null
+        Wait-ProbeChildGone -ProcessId $t::LastProcessId | Should Be $true
         Remove-ProbeChild -ProcessId $t::LastProcessId
         $t::ResetProbe()
     }
@@ -1672,7 +1731,7 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
         $t::ClosedHandles.Count | Should Be 3
         (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 3
         $t::CloseHandleFailures | Should Be 0
-        Get-Process -Id $t::LastProcessId -ErrorAction SilentlyContinue | Should Be $null
+        Wait-ProbeChildGone -ProcessId $t::LastProcessId | Should Be $true
         Remove-ProbeChild -ProcessId $t::LastProcessId
         $t::ResetProbe()
     }
@@ -1734,7 +1793,7 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
         $t::ClosedHandles.Count | Should Be 2
         (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 2
         $t::CloseHandleFailures | Should Be 0
-        Get-Process -Id $t::LastProcessId -ErrorAction SilentlyContinue | Should Be $null
+        Wait-ProbeChildGone -ProcessId $t::LastProcessId | Should Be $true
         Remove-ProbeChild -ProcessId $t::LastProcessId
         $t::ResetProbe()
     }
@@ -1785,6 +1844,49 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
     }
 }
 
+# The two probes above give idle/capc deep FAILURE-branch coverage, and the
+# source-shape guard below checks the other 9 files' SOURCE TEXT matches the
+# same template - but neither one ever actually executes admin/cy/cx/capt/
+# capm's own compiled Run(). This closes that gap: every one of the 11 gets a
+# real success-path execution (not just idle/capc), proving each file's unique
+# body (comment wording, per-tool struct/flag differences) still compiles,
+# links, and runs correctly - not just that a line count matches.
+$launcherExecCases = @(
+    @{ Name = 'idle';        HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
+    @{ Name = 'belownormal'; HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
+    @{ Name = 'abovenormal'; HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
+    @{ Name = 'high';        HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
+    @{ Name = 'realtime';    HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
+    @{ Name = 'cy';          HasPriorityFlag = $false; JobArg = $null;      ExpectedHandles = 2 }
+    @{ Name = 'cx';          HasPriorityFlag = $false; JobArg = $null;      ExpectedHandles = 2 }
+    @{ Name = 'admin';       HasPriorityFlag = $false; JobArg = $null;      ExpectedHandles = 2 }
+    @{ Name = 'capc';        HasPriorityFlag = $null;  JobArg = 50;         ExpectedHandles = 3 }
+    @{ Name = 'capt';        HasPriorityFlag = $null;  JobArg = 1;          ExpectedHandles = 3 }
+    @{ Name = 'capm';        HasPriorityFlag = $null;  JobArg = 209715200;  ExpectedHandles = 3 }
+)
+
+Describe 'fault-injection probes actually execute all 11 launcher files (not just idle/capc)' {
+    It 'runs Run() for real, propagates the exit code, and closes the expected handle count (<Name>)' -TestCases $launcherExecCases {
+        param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles)
+        $t = $script:allLauncherProbes[$Name]
+        $t::ResetProbe()
+        if ($null -ne $JobArg) {
+            $result = $t::Run($JobArg, [string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"')
+        } elseif ($HasPriorityFlag) {
+            $result = $t::Run(64, [string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"')
+        } else {
+            $result = $t::Run([string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"')
+        }
+        $result | Should Be 7
+        $t::TerminateCalls | Should Be 0
+        $t::ClosedHandles.Count | Should Be $ExpectedHandles
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be $ExpectedHandles
+        $t::CloseHandleFailures | Should Be 0
+        Remove-ProbeChild -ProcessId $t::LastProcessId
+        $t::ResetProbe()
+    }
+}
+
 $launcherSourceFiles = @(
     @{ Name = 'idle';        Shape = 'Priority' }
     @{ Name = 'belownormal'; Shape = 'Priority' }
@@ -1794,8 +1896,8 @@ $launcherSourceFiles = @(
     @{ Name = 'cy';          Shape = 'Priority' }
     @{ Name = 'cx';          Shape = 'Priority' }
     @{ Name = 'admin';       Shape = 'Priority' }
-    @{ Name = 'cap';         Shape = 'Job' }
-    @{ Name = 'pint';        Shape = 'Job' }
+    @{ Name = 'capc';        Shape = 'Job' }
+    @{ Name = 'capt';        Shape = 'Job' }
     @{ Name = 'capm';        Shape = 'Job' }
 )
 
@@ -1815,14 +1917,14 @@ Describe 'embedded launcher C# keeps the single-owner cleanup shape (<Name>)' {
 }
 
 Describe 'sequential invocation in one PowerShell session' {
-    It 'runs idle/belownormal/abovenormal/high/realtime/cap/pint/capm/cy/cx/admin one after another without an Add-Type type-collision error' {
+    It 'runs idle/belownormal/abovenormal/high/realtime/capc/capt/capm/cy/cx/admin one after another without an Add-Type type-collision error' {
         # Regression test: bare-name resolution (idle args..., not idle.bat) runs the
         # .ps1 in the CURRENT process/AppDomain, not a new one - each of these used to
         # Add-Type an identically-named "Launcher" class, so calling a second one in the
         # same session threw "Cannot add type. The type name 'Launcher' already exists."
         # (and, for cy/cx's different Run() signature, could fail outright). Confirmed
         # empirically before the fix; each now has its own unique class name
-        # (IdleLauncher, BelowNormalLauncher, ..., CapLauncher, PintLauncher, CapmLauncher,
+        # (IdleLauncher, BelowNormalLauncher, ..., CapcLauncher, CaptLauncher, CapmLauncher,
         # CyLauncher, CxLauncher, AdminLauncher).
         $out = New-TempFile
         $probe = 'Set-Content -Path $env:WIN_NICE_TEST_OUT -Value "ok"'
@@ -1841,10 +1943,10 @@ foreach (`$name in @('idle', 'belownormal', 'abovenormal', 'high', 'realtime')) 
     & (Join-Path '$bin' "`$name.ps1") powershell -NoProfile -File '$probeFile'
     if (`$LASTEXITCODE -ne 0) { throw "`$name failed with exit `$LASTEXITCODE" }
 }
-& (Join-Path '$bin' 'cap.ps1') 50 powershell -NoProfile -File '$probeFile'
-if (`$LASTEXITCODE -ne 0) { throw "cap failed with exit `$LASTEXITCODE" }
-& (Join-Path '$bin' 'pint.ps1') 1 powershell -NoProfile -File '$probeFile'
-if (`$LASTEXITCODE -ne 0) { throw "pint failed with exit `$LASTEXITCODE" }
+& (Join-Path '$bin' 'capc.ps1') 50 powershell -NoProfile -File '$probeFile'
+if (`$LASTEXITCODE -ne 0) { throw "capc failed with exit `$LASTEXITCODE" }
+& (Join-Path '$bin' 'capt.ps1') 1 powershell -NoProfile -File '$probeFile'
+if (`$LASTEXITCODE -ne 0) { throw "capt failed with exit `$LASTEXITCODE" }
 & (Join-Path '$bin' 'capm.ps1') 90 powershell -NoProfile -File '$probeFile'
 if (`$LASTEXITCODE -ne 0) { throw "capm failed with exit `$LASTEXITCODE" }
 & (Join-Path '$bin' 'cy.ps1')
@@ -1893,6 +1995,33 @@ Describe 'test/run-elevated.ps1' {
 
     It 'accepts the -SelfElevated and -LogPath parameters without error (syntax/param check only - does not elevate)' {
         { Get-Command (Join-Path $PSScriptRoot 'run-elevated.ps1') -ErrorAction Stop } | Should Not Throw
+    }
+
+    It 'refuses -SelfElevated without -LogPath (internal flag - not meant to be passed by hand)' {
+        $errOut = & powershell -NoProfile -File (Join-Path $PSScriptRoot 'run-elevated.ps1') -SelfElevated 2>&1
+        $LASTEXITCODE | Should Be 1
+        ($errOut -join "`n") | Should Match 'requires -LogPath'
+    }
+
+    # The regression this guards: -SelfElevated used to be trusted at face value,
+    # so calling this script directly with -SelfElevated -LogPath <file> from a
+    # plain non-admin console ran the NORMAL (non-elevated) suite and exited 0 -
+    # a false "elevated coverage" result that silently skipped the 3 admin.ps1
+    # already-elevated cases. Only meaningful to check from a non-elevated
+    # runner - under an already-elevated runner, -SelfElevated is legitimately
+    # honored and this would instead recurse into a real (nested) Pester run.
+    It 'refuses to run the suite when -SelfElevated is passed but the process is not actually elevated (guards a false elevated-coverage result)' -Skip:$script:isAdminRunner {
+        $log = New-TempFile
+        $errOut = & powershell -NoProfile -File (Join-Path $PSScriptRoot 'run-elevated.ps1') -SelfElevated -LogPath $log 2>&1
+        $LASTEXITCODE | Should Be 1
+        # PowerShell's default error-view word-wraps Write-Error text to the
+        # console width, which can split "not actually elevated" across a
+        # line break - collapse whitespace before matching (same pattern as
+        # the "%" fail-closed assertion above).
+        (($errOut -join ' ') -replace '\s+', ' ') | Should Match 'not actually elevated'
+        # The suite must never have actually run - no transcript was started.
+        (Test-Path $log) | Should Be $false
+        Remove-Item $log -ErrorAction SilentlyContinue
     }
 }
 

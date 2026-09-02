@@ -7,19 +7,19 @@
 $processorCount = [Environment]::ProcessorCount
 $maxCount = [Math]::Min($processorCount, 63)
 if ($args.Count -lt 2) {
-    Write-Error "usage: pint <thread-count 1-$maxCount> <command> [args...]"
+    Write-Error "usage: capt <thread-count 1-$maxCount> <command> [args...]"
     exit 1
 }
 $countValue = 0
 if (-not [int]::TryParse($args[0], [ref]$countValue) -or $countValue -lt 1 -or $countValue -gt $maxCount) {
-    Write-Error "usage: pint <thread-count 1-$maxCount> <command> [args...]"
+    Write-Error "usage: capt <thread-count 1-$maxCount> <command> [args...]"
     exit 1
 }
 $Command = @($args[1..($args.Count - 1)])
 
 # Fallback command line for when the target isn't a directly-launchable .exe (see
-# PintLauncher.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
-# neutralize its operators (&|<>^) and not just whitespace - see cap.ps1 for the
+# CaptLauncher.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
+# neutralize its operators (&|<>^) and not just whitespace - see capc.ps1 for the
 # same logic and its documented "%" limitation.
 $commandLine = ($Command | ForEach-Object {
     $escaped = $_ -replace '"', '\"'
@@ -31,7 +31,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class PintLauncher
+public static class CaptLauncher
 {
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct STARTUPINFO
@@ -194,7 +194,7 @@ public static class PintLauncher
             si.cb = Marshal.SizeOf(si);
             PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
 
-            // See cap.ps1 for why .bat/.cmd targets skip the direct attempt entirely:
+            // See capc.ps1 for why .bat/.cmd targets skip the direct attempt entirely:
             // CreateProcess silently re-invokes them through cmd.exe on its own, using
             // unescaped text, instead of failing the way a genuinely missing exe would.
             bool isBatOrCmd = argv.Length > 0 && (
@@ -248,8 +248,11 @@ public static class PintLauncher
             {
                 // Can't guarantee the pin - kill instead of letting it run unpinned and orphaned.
                 int err = Marshal.GetLastWin32Error();
-                TerminateProcess(hProcess, 1);
-                throw new InvalidOperationException("AssignProcessToJobObject failed: " + err);
+                string message = "AssignProcessToJobObject failed: " + err;
+                // Report if the best-effort kill itself also failed.
+                if (!TerminateProcess(hProcess, 1))
+                    message += "; TerminateProcess also failed: " + Marshal.GetLastWin32Error();
+                throw new InvalidOperationException(message);
             }
 
             if (ResumeThread(hThread) == 0xFFFFFFFF)
@@ -257,8 +260,11 @@ public static class PintLauncher
                 // Still suspended - an unbounded wait below would hang forever. Kill
                 // it instead of leaving an orphaned, permanently-suspended process.
                 int resumeErr = Marshal.GetLastWin32Error();
-                TerminateProcess(hProcess, 1);
-                throw new InvalidOperationException("ResumeThread failed: " + resumeErr);
+                string message = "ResumeThread failed: " + resumeErr;
+                // Report if the best-effort kill itself also failed.
+                if (!TerminateProcess(hProcess, 1))
+                    message += "; TerminateProcess also failed: " + Marshal.GetLastWin32Error();
+                throw new InvalidOperationException(message);
             }
 
             if (WaitForSingleObject(hProcess, 0xFFFFFFFF) == 0xFFFFFFFF)
@@ -267,8 +273,11 @@ public static class PintLauncher
                 // failure and potentially leave it running unmanaged in the
                 // background. Best-effort kill before giving up.
                 int waitErr = Marshal.GetLastWin32Error();
-                TerminateProcess(hProcess, 1);
-                throw new InvalidOperationException("WaitForSingleObject failed: " + waitErr);
+                string message = "WaitForSingleObject failed: " + waitErr;
+                // Report if the best-effort kill itself also failed.
+                if (!TerminateProcess(hProcess, 1))
+                    message += "; TerminateProcess also failed: " + Marshal.GetLastWin32Error();
+                throw new InvalidOperationException(message);
             }
 
             uint exitCode;
@@ -294,7 +303,7 @@ Add-Type -TypeDefinition $source -Language CSharp
 # README. Bit-shift, not [Math]::Pow: doubles can't exactly represent 2^63.
 $affinityMask = ([uint64]1 -shl $countValue) - [uint64]1
 try {
-    exit ([PintLauncher]::Run($affinityMask, [string[]]$Command, $commandLine))
+    exit ([CaptLauncher]::Run($affinityMask, [string[]]$Command, $commandLine))
 } catch {
     Write-Error $_.Exception.InnerException.Message
     exit 1

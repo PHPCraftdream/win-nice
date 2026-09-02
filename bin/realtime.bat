@@ -6,7 +6,7 @@ if "%~1"=="" (
     echo usage: realtime ^<command^> [args...] 1>&2
     exit /b 1
 )
-:: A literal "%" in any argument gets corrupted here - see cap.bat for why (a
+:: A literal "%" in any argument gets corrupted here - see capc.bat for why (a
 :: cmd.exe batch-parameter quirk, not fixable from inside a .bat). Every other
 :: cmd.exe metacharacter (&|<>^) survives this hop untouched. Invoking "realtime"
 :: bare from an actual PowerShell session skips this file (realtime.ps1 preferred).

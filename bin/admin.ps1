@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 # win-nice: managed-file
 $Command = $args
-# Deliberately no [Parameter()]/[CmdletBinding()] attributes: see cap.ps1 for why -
+# Deliberately no [Parameter()]/[CmdletBinding()] attributes: see capc.ps1 for why -
 # it would expose PowerShell's common parameters and make them ambiguously
 # prefix-match flags meant for the wrapped command.
 
@@ -13,7 +13,7 @@ if (-not $Command -or $Command.Count -eq 0) {
 # Fallback command line for the UAC (-Verb RunAs) branch, and for the inline branch
 # when the target isn't a directly-launchable .exe (see AdminLauncher.Run below) -
 # re-parsed by cmd.exe, so quoting must neutralize its operators (&|<>^) and not
-# just whitespace - see cap.ps1 for the same logic and its documented "%" limitation.
+# just whitespace - see capc.ps1 for the same logic and its documented "%" limitation.
 $commandLine = ($Command | ForEach-Object {
     $escaped = $_ -replace '"', '\"'
     if ($escaped -eq '' -or $escaped -match '[\s"&|<>^]') { '"' + $escaped + '"' } else { $escaped }
@@ -22,7 +22,7 @@ $commandLine = ($Command | ForEach-Object {
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 # AdminLauncher (embedded C#): direct-CreateProcess-first, cmd.exe-fallback launcher,
-# same strategy as cap.ps1's Capper - a direct .exe target never touches cmd.exe, so
+# same strategy as capc.ps1's Capper - a direct .exe target never touches cmd.exe, so
 # it isn't exposed to "%" expansion at all. Defined unconditionally (not only inside
 # the already-elevated branch below) because the not-yet-elevated branch also calls
 # AdminLauncher.BuildArgvCommandLine for its own direct (non-cmd.exe) -Verb RunAs launch.
@@ -192,8 +192,11 @@ public static class AdminLauncher
                 // failure and potentially leave it running unmanaged in the
                 // background. Best-effort kill before giving up.
                 int waitErr = Marshal.GetLastWin32Error();
-                TerminateProcess(hProcess, 1);
-                throw new InvalidOperationException("WaitForSingleObject failed: " + waitErr);
+                string message = "WaitForSingleObject failed: " + waitErr;
+                // Report if the best-effort kill itself also failed.
+                if (!TerminateProcess(hProcess, 1))
+                    message += "; TerminateProcess also failed: " + Marshal.GetLastWin32Error();
+                throw new InvalidOperationException(message);
             }
 
             uint exitCode;

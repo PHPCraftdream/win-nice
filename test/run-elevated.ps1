@@ -2,13 +2,14 @@
 #
 # Single entry point for the "already elevated" portion of the Pester suite.
 # win-nice.Tests.ps1 has 3 admin.ps1 cases gated by
-# -Skip:(-not $script:isAdminRunner) - they only exercise admin.ps1's
-# already-elevated branch, which requires the WHOLE test-runner process (not
-# just admin.ps1 itself) to already be elevated. Running this script asks for
-# elevation exactly once (same self-elevation pattern as bin/uiup.ps1's
-# -SelfElevated), then runs the FULL suite inside that one elevated session -
-# every test, not just the 3 admin ones, since Invoke-Pester itself has no
-# per-test elevation concept.
+# -Skip:(-not $script:isAdminRunner) (only pass when the WHOLE test-runner
+# process, not just admin.ps1 itself, is already elevated) and 3 different
+# cases gated by -Skip:$script:isAdminRunner (only meaningful when it is NOT
+# elevated). Running this script asks for elevation exactly once (same
+# self-elevation pattern as bin/uiup.ps1's -SelfElevated), then runs the suite
+# inside that one elevated session - which activates the first group and
+# Skips the second. Combine the result with a normal (non-elevated) run for
+# full coverage; neither run alone exercises every case.
 #
 # -Verb RunAs is ShellExecute-based, not CreateProcess (see bin/admin.ps1's own
 # comment on the same fact), so it always opens a separate console window and
@@ -21,9 +22,24 @@ param(
 )
 
 $testPath = Join-Path $PSScriptRoot 'win-nice.Tests.ps1'
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if ($SelfElevated) {
-    # Running inside the elevated child window.
+    # -SelfElevated is an internal flag this script passes to its OWN elevated
+    # relaunch below - it is not itself proof of elevation. Without this check,
+    # anyone could run "run-elevated.ps1 -SelfElevated -LogPath <file>" from a
+    # plain console and get a normal (non-elevated) Pester run reported back as
+    # if it were the elevated one: the 3 admin-already-elevated cases would
+    # silently Skip and the script would still exit 0 - a false elevated-
+    # coverage result.
+    if (-not $LogPath) {
+        Write-Error "run-elevated.ps1: -SelfElevated requires -LogPath (internal flag - not meant to be passed by hand; run without -SelfElevated to trigger real elevation)."
+        exit 1
+    }
+    if (-not $isAdmin) {
+        Write-Error "run-elevated.ps1: -SelfElevated was passed but this process is not actually elevated - refusing (this flag is internal; run without -SelfElevated to trigger real elevation)."
+        exit 1
+    }
     try {
         Start-Transcript -Path $LogPath -Force | Out-Null
         # Same reasoning as ci.yml's Pester step: reset from GitHub Actions'
@@ -43,7 +59,6 @@ if ($SelfElevated) {
     }
 }
 
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if ($isAdmin) {
     # Already running elevated (e.g. launched from an admin shell) - no second
     # UAC round-trip needed, run inline so output goes straight to this console.
@@ -53,7 +68,7 @@ if ($isAdmin) {
     exit ([int]($result.FailedCount -gt 0))
 }
 
-Write-Host "Not elevated - one UAC prompt will run the full Pester suite (including the 3 admin.ps1 cases that only exercise its already-elevated branch) in a separate elevated window. Output is relayed back here once it finishes."
+Write-Host "Not elevated - one UAC prompt will run the suite (activating the 3 admin.ps1 already-elevated cases, and Skipping 3 different non-elevated-only cases) in a separate elevated window. Output is relayed back here once it finishes. Run this suite normally (without elevation) too for full coverage."
 $logFile = [System.IO.Path]::GetTempFileName()
 try {
     $p = Start-Process powershell -Verb RunAs -ArgumentList @(

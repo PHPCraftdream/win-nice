@@ -5,7 +5,7 @@ title: ''
 labels: bug
 ---
 
-**Command run** (exact, including the tool name - `idle`, `cap`, `admin`, etc.)
+**Command run** (exact, including the tool name - `idle`, `capc`, `admin`, etc.)
 
 **Expected behavior**
 

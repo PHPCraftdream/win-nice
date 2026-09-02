@@ -5,7 +5,7 @@
 # flags meant for the wrapped command (e.g. "-s" matching "-Size"). Reading
 # everything from $args sidesteps PowerShell's parameter binder entirely.
 $usage = "usage: capm <size> <command> [args...]  (size: plain integer 1-100 " +
-    "= percent of total physical RAM, e.g. 50 - same convention as cap's " +
+    "= percent of total physical RAM, e.g. 50 - same convention as capc's " +
     "<percent 1-100>; number+m/M = MB, e.g. 512m; number+g/G = GB, e.g. 2g)"
 
 if ($args.Count -lt 2) {
@@ -14,14 +14,14 @@ if ($args.Count -lt 2) {
 }
 
 $sizeArg = $args[0]
-# No "%" suffix on purpose, unlike cap/pint's own numeric-only args this one
+# No "%" suffix on purpose, unlike capc/capt's own numeric-only args this one
 # could otherwise carry a unit character - but capm is meant to be chainable
-# with the other tools by bare name (e.g. "cap 50 capm 50 <command>"), and a
+# with the other tools by bare name (e.g. "capc 50 capm 50 <command>"), and a
 # "%" in an argument trips every tool's fail-closed check the moment a chain
 # hop needs the cmd.exe fallback (which bare-name resolution always does,
-# since none of these ship a .exe) - so "cap 50 capm 25% ..." used to fail
-# while "capm 25% cap 50 ..." worked, an order-dependent foot-gun. A bare
-# integer (cap's own convention) sidesteps that entirely.
+# since none of these ship a .exe) - so "capc 50 capm 25% ..." used to fail
+# while "capm 25% capc 50 ..." worked, an order-dependent foot-gun. A bare
+# integer (capc's own convention) sidesteps that entirely.
 if ($sizeArg -notmatch '^(?<num>\d+(\.\d+)?)(?<unit>[mMgG]?)$') {
     Write-Error $usage
     exit 1
@@ -40,7 +40,7 @@ if (-not $numOk -or [double]::IsNaN($sizeNum) -or [double]::IsInfinity($sizeNum)
 }
 $sizeUnit = $Matches['unit']
 if ($sizeUnit -eq '') {
-    # No suffix: percent of total RAM, matching cap's own <percent 1-100>
+    # No suffix: percent of total RAM, matching capc's own <percent 1-100>
     # exactly - a plain integer only (TryParse rejects "50.5"), folded into
     # the internal "%" conversion path below ("%" is never a valid *input*
     # character here - see above - only an internal marker for that path).
@@ -59,7 +59,7 @@ $Command = @($args[1..($args.Count - 1)])
 
 # Fallback command line for when the target isn't a directly-launchable .exe (see
 # CapmLauncher.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
-# neutralize its operators (&|<>^) and not just whitespace - see cap.ps1 for the
+# neutralize its operators (&|<>^) and not just whitespace - see capc.ps1 for the
 # same logic and its documented "%" limitation.
 $commandLine = ($Command | ForEach-Object {
     $escaped = $_ -replace '"', '\"'
@@ -265,7 +265,7 @@ public static class CapmLauncher
         {
             // JOB_OBJECT_LIMIT_JOB_MEMORY caps the whole job's aggregate committed memory,
             // not any single process - same "whole subtree, one ceiling" semantics as
-            // cap's CPU% and pint's affinity, not a per-process limit. Exceeding it fails
+            // capc's CPU% and capt's affinity, not a per-process limit. Exceeding it fails
             // the allocation call that would have breached it (VirtualAlloc-family APIs
             // return an error / .NET throws OutOfMemoryException) - Windows doesn't kill
             // the process outright, it just refuses to hand out more committed memory;
@@ -298,7 +298,7 @@ public static class CapmLauncher
             si.cb = Marshal.SizeOf(si);
             PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
 
-            // See cap.ps1 for why .bat/.cmd targets skip the direct attempt entirely:
+            // See capc.ps1 for why .bat/.cmd targets skip the direct attempt entirely:
             // CreateProcess silently re-invokes them through cmd.exe on its own, using
             // unescaped text, instead of failing the way a genuinely missing exe would.
             bool isBatOrCmd = argv.Length > 0 && (
@@ -352,8 +352,11 @@ public static class CapmLauncher
             {
                 // Can't guarantee the cap - kill instead of letting it run uncapped and orphaned.
                 int err = Marshal.GetLastWin32Error();
-                TerminateProcess(hProcess, 1);
-                throw new InvalidOperationException("AssignProcessToJobObject failed: " + err);
+                string message = "AssignProcessToJobObject failed: " + err;
+                // Report if the best-effort kill itself also failed.
+                if (!TerminateProcess(hProcess, 1))
+                    message += "; TerminateProcess also failed: " + Marshal.GetLastWin32Error();
+                throw new InvalidOperationException(message);
             }
 
             if (ResumeThread(hThread) == 0xFFFFFFFF)
@@ -361,8 +364,11 @@ public static class CapmLauncher
                 // Still suspended - an unbounded wait below would hang forever. Kill
                 // it instead of leaving an orphaned, permanently-suspended process.
                 int resumeErr = Marshal.GetLastWin32Error();
-                TerminateProcess(hProcess, 1);
-                throw new InvalidOperationException("ResumeThread failed: " + resumeErr);
+                string message = "ResumeThread failed: " + resumeErr;
+                // Report if the best-effort kill itself also failed.
+                if (!TerminateProcess(hProcess, 1))
+                    message += "; TerminateProcess also failed: " + Marshal.GetLastWin32Error();
+                throw new InvalidOperationException(message);
             }
 
             if (WaitForSingleObject(hProcess, 0xFFFFFFFF) == 0xFFFFFFFF)
@@ -371,8 +377,11 @@ public static class CapmLauncher
                 // failure and potentially leave it running unmanaged in the
                 // background. Best-effort kill before giving up.
                 int waitErr = Marshal.GetLastWin32Error();
-                TerminateProcess(hProcess, 1);
-                throw new InvalidOperationException("WaitForSingleObject failed: " + waitErr);
+                string message = "WaitForSingleObject failed: " + waitErr;
+                // Report if the best-effort kill itself also failed.
+                if (!TerminateProcess(hProcess, 1))
+                    message += "; TerminateProcess also failed: " + Marshal.GetLastWin32Error();
+                throw new InvalidOperationException(message);
             }
 
             uint exitCode;

@@ -11,7 +11,7 @@ const path = require('node:path');
 //
 // The check is scoped to each doc's argument-safety section, not the whole
 // file: the phrase "fails closed" independently appears in README's Job
-// Object breakaway discussion (### cap), so a whole-document substring
+// Object breakaway discussion (### capc), so a whole-document substring
 // search would still pass if only the argument-safety section reverted to
 // stale wording.
 const DOCS = [

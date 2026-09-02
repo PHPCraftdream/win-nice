@@ -5,7 +5,7 @@
 # stop responding - the exact failure mode this whole project exists to prevent. See
 # README before using this.
 # No param(): nothing here needs a named parameter, and $args sidesteps
-# PowerShell's parameter binder entirely - see cap.ps1 for why that matters.
+# PowerShell's parameter binder entirely - see capc.ps1 for why that matters.
 $Command = $args
 
 if (-not $Command -or $Command.Count -eq 0) {
@@ -15,7 +15,7 @@ if (-not $Command -or $Command.Count -eq 0) {
 
 # Fallback command line for when the target isn't a directly-launchable .exe (see
 # RealtimeLauncher.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
-# neutralize its operators (&|<>^) and not just whitespace - see cap.ps1 for the
+# neutralize its operators (&|<>^) and not just whitespace - see capc.ps1 for the
 # same logic and its documented "%" limitation. realtime.bat has its own, more
 # severe "%" caveat (see there) that applies before this script ever runs.
 $commandLine = ($Command | ForEach-Object {
@@ -131,7 +131,7 @@ public static class RealtimeLauncher
         si.cb = Marshal.SizeOf(si);
         PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
 
-        // See cap.ps1 for why .bat/.cmd targets skip the direct attempt entirely:
+        // See capc.ps1 for why .bat/.cmd targets skip the direct attempt entirely:
         // CreateProcess silently re-invokes them through cmd.exe on its own, using
         // unescaped text, instead of failing the way a genuinely missing exe would.
         bool isBatOrCmd = argv.Length > 0 && (
@@ -191,8 +191,11 @@ public static class RealtimeLauncher
                 // failure and potentially leave it running unmanaged in the
                 // background. Best-effort kill before giving up.
                 int waitErr = Marshal.GetLastWin32Error();
-                TerminateProcess(hProcess, 1);
-                throw new InvalidOperationException("WaitForSingleObject failed: " + waitErr);
+                string message = "WaitForSingleObject failed: " + waitErr;
+                // Report if the best-effort kill itself also failed.
+                if (!TerminateProcess(hProcess, 1))
+                    message += "; TerminateProcess also failed: " + Marshal.GetLastWin32Error();
+                throw new InvalidOperationException(message);
             }
 
             uint exitCode;

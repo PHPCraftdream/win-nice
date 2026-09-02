@@ -5,6 +5,6 @@
 :: %...% patterns the moment a batch file reads them - confirmed with nothing more
 :: than a bare "echo %1", no forwarding involved; there's no per-character escape
 :: for this from inside a .bat). Every other cmd.exe metacharacter (&|<>^) survives
-:: this hop untouched. Invoking "cap" bare from an actual PowerShell session skips
-:: this file entirely (PowerShell prefers cap.ps1) and has no "%" problem at all.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cap.ps1" %*
+:: this hop untouched. Invoking "capc" bare from an actual PowerShell session skips
+:: this file entirely (PowerShell prefers capc.ps1) and has no "%" problem at all.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0capc.ps1" %*

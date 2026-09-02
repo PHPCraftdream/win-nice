@@ -1,6 +1,6 @@
 {
   "name": "win-nice",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Windows nice/renice/cpulimit for parallel AI coding agents - process priority (idle/belownormal/abovenormal/high/realtime), hard CPU quotas, thread affinity, and memory limits via Job Objects, elevation (admin), a UI responsiveness boost, and an optional Claude Code/Codex reference skill, with no dependencies.",
   "license": "MIT OR Apache-2.0",
   "author": {

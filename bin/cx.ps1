@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 # win-nice: managed-file
 # No param(): $args sidesteps PowerShell's parameter binder entirely - see
-# cap.ps1 for why that matters (codex's own flags shouldn't get bound here).
+# capc.ps1 for why that matters (codex's own flags shouldn't get bound here).
 $Command = @('codex', '--dangerously-bypass-approvals-and-sandbox') + @($args)
 
 # Fallback command line for when codex isn't a directly-launchable .exe (it's
 # typically an npm-installed .cmd shim on Windows) - see CxLauncher.Run below and
-# cap.ps1 for the same logic and its documented "%" limitation. cx.bat has its own,
+# capc.ps1 for the same logic and its documented "%" limitation. cx.bat has its own,
 # more severe "%" caveat (see there) that applies before this script ever runs.
 $commandLine = ($Command | ForEach-Object {
     $escaped = $_ -replace '"', '\"'
@@ -117,7 +117,7 @@ public static class CxLauncher
         si.cb = Marshal.SizeOf(si);
         PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
 
-        // See cap.ps1 for why .bat/.cmd targets skip the direct attempt entirely:
+        // See capc.ps1 for why .bat/.cmd targets skip the direct attempt entirely:
         // CreateProcess silently re-invokes them through cmd.exe on its own, using
         // unescaped text, instead of failing the way a genuinely missing exe would.
         // A bare name like "codex" (typically an npm .cmd shim on Windows) isn't
@@ -180,8 +180,11 @@ public static class CxLauncher
                 // failure and potentially leave it running unmanaged in the
                 // background. Best-effort kill before giving up.
                 int waitErr = Marshal.GetLastWin32Error();
-                TerminateProcess(hProcess, 1);
-                throw new InvalidOperationException("WaitForSingleObject failed: " + waitErr);
+                string message = "WaitForSingleObject failed: " + waitErr;
+                // Report if the best-effort kill itself also failed.
+                if (!TerminateProcess(hProcess, 1))
+                    message += "; TerminateProcess also failed: " + Marshal.GetLastWin32Error();
+                throw new InvalidOperationException(message);
             }
 
             uint exitCode;

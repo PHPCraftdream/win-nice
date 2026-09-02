@@ -7,5 +7,5 @@
 # .ps1 path is converted explicitly with cygpath -w so -File gets a Windows path.
 MSYS2_ARG_CONV_EXCL='*'
 export MSYS2_ARG_CONV_EXCL
-script=$(cygpath -w "$(dirname "$0")/cap.ps1" 2>/dev/null) || script="$(dirname "$0")/cap.ps1"
+script=$(cygpath -w "$(dirname "$0")/capc.ps1" 2>/dev/null) || script="$(dirname "$0")/capc.ps1"
 exec powershell -NoProfile -ExecutionPolicy Bypass -File "$script" "$@"

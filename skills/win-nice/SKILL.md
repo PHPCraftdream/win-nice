@@ -1,6 +1,6 @@
 ---
 name: win-nice
-description: Reference for win-nice's Windows CLI tools for process priority, hard CPU quotas, CPU affinity, and memory limits (idle, belownormal, abovenormal, high, realtime, cap, pint, capm, uiup, admin). Use when the user asks how to limit CPU usage, priority, thread/core affinity, or memory for a command on Windows, wants to avoid a build/test freezing the desktop, or mentions any of these tool names.
+description: Reference for win-nice's Windows CLI tools for process priority, hard CPU quotas, CPU affinity, and memory limits (idle, belownormal, abovenormal, high, realtime, capc, capt, capm, uiup, admin). Use when the user asks how to limit CPU usage, priority, thread/core affinity, or memory for a command on Windows, wants to avoid a build/test freezing the desktop, or mentions any of these tool names.
 ---
 
 <!-- win-nice: managed-skill -->
@@ -46,46 +46,46 @@ no race window), including anything it spawns, recursively via ordinary
 processes brought up through an external broker/service (e.g. WMI's
 `Win32_Process.Create`) that never goes through the tree's own `CreateProcess`.
 
-- `cap <percent 1-100> <command> [args...]` — hard CPU quota
+- `capc <percent 1-100> <command> [args...]` — hard CPU quota
   (`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`, hard cap). A real ceiling on total
   CPU%, not just scheduling priority — holds even when nothing else is
-  contending for CPU. Example: `cap 50 npm run build`.
-- `pint <thread-count> <command> [args...]` — short for "pin threads": restricts
+  contending for CPU. Example: `capc 50 npm run build`.
+- `capt <thread-count> <command> [args...]` — short for "cap threads": restricts
   the whole tree to the first N *logical processors* via process affinity
   (`JOB_OBJECT_LIMIT_AFFINITY`). Threads, not physical cores — on
   Hyper-Threading/SMT hardware, N logical processors can be fewer physical
   cores. `<thread-count>` must be between 1 and
-  `min([Environment]::ProcessorCount, 63)`. Example: `pint 4 npm run build`.
+  `min([Environment]::ProcessorCount, 63)`. Example: `capt 4 npm run build`.
 - `capm <size> <command> [args...]` — hard memory ceiling
   (`JOB_OBJECT_LIMIT_JOB_MEMORY`), aggregate across the whole tree, not
   per-process. `<size>`: bare integer `1`-`100` = percent of total physical RAM
-  (same convention as `cap`'s own `<percent 1-100>`, deliberately no `%`
+  (same convention as `capc`'s own `<percent 1-100>`, deliberately no `%`
   character - see Chaining below), or `m`/`M` = megabytes (`512m`), or `g`/`G`
-  = gigabytes (`2g`). Unlike `cap`, exceeding it doesn't throttle - it fails
+  = gigabytes (`2g`). Unlike `capc`, exceeding it doesn't throttle - it fails
   the allocation (`OutOfMemoryException`/`VirtualAlloc` failure), which
   usually crashes the wrapped program since most don't handle that
   gracefully; set it too low and even the wrapped runtime can fail to start.
   Example: `capm 512m npm run build`.
 
 **A limit sticks to any daemon the wrapped command leaves running**, for that
-daemon's whole lifetime, not just the one `cap`/`pint`/`capm` call — Job
+daemon's whole lifetime, not just the one `capc`/`capt`/`capm` call — Job
 Object membership is permanent once assigned. Build tools that reuse a background
 process to skip cold-start cost (`dotnet build`'s VBCSCompiler/MSBuild node
 reuse, a Gradle daemon, `npm run watch`-style file watchers) can leave a
 *later, uncapped-looking* invocation actually running inside an earlier
-`cap`/`pint` call's job. Escape hatches: `dotnet build
+`capc`/`capt` call's job. Escape hatches: `dotnet build
 -p:UseSharedCompilation=false`, `gradle --no-daemon` — or accept the daemon
 stays limited until it's killed.
 
 ## Chaining
 
-These tools can be stacked, e.g. `capm 50 cap 50 idle npm run build`. Bare
+These tools can be stacked, e.g. `capm 50 capc 50 idle npm run build`. Bare
 tool names resolve through the same `cmd.exe`/`PATHEXT` fallback as any other
 target, so chaining needs the tools' install directory on `PATH`, and any `%`
 in the command line still trips the fail-closed check. Nested Job Object
 limits do **not** follow one universal "smaller wins" rule: CPU rate
-(`cap`) is relative to its parent job and *multiplies* when nested (`cap 50
-cap 50 ...` ≈ 25% of system CPU, not 50% - see
+(`capc`) is relative to its parent job and *multiplies* when nested (`capc 50
+capc 50 ...` ≈ 25% of system CPU, not 50% - see
 [`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information)),
 while memory (`capm`) ceilings apply independently to accounting scopes of
 different sizes - a job's committed-memory accounting includes every child

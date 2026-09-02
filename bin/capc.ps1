@@ -5,18 +5,18 @@
 # flags meant for the wrapped command (e.g. "-p" matching "-Percent"). Reading
 # everything from $args sidesteps PowerShell's parameter binder entirely.
 if ($args.Count -lt 2) {
-    Write-Error "usage: cap <percent 1-100> <command> [args...]"
+    Write-Error "usage: capc <percent 1-100> <command> [args...]"
     exit 1
 }
 $percentValue = 0
 if (-not [int]::TryParse($args[0], [ref]$percentValue) -or $percentValue -lt 1 -or $percentValue -gt 100) {
-    Write-Error "usage: cap <percent 1-100> <command> [args...]"
+    Write-Error "usage: capc <percent 1-100> <command> [args...]"
     exit 1
 }
 $Command = @($args[1..($args.Count - 1)])
 
 # Fallback command line for when the target isn't a directly-launchable .exe (see
-# CapLauncher.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
+# CapcLauncher.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
 # neutralize its operators (&|<>^) and not just whitespace, or e.g. "A&B" gets split
 # into two commands. NOTE: a literal "%" in an argument can still trigger cmd.exe
 # environment-variable expansion (e.g. "%PATH%") even when quoted, and cmd.exe pairs
@@ -36,7 +36,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class CapLauncher
+public static class CapcLauncher
 {
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct STARTUPINFO
@@ -253,8 +253,11 @@ public static class CapLauncher
             {
                 // Can't guarantee the cap - kill instead of letting it run uncapped and orphaned.
                 int err = Marshal.GetLastWin32Error();
-                TerminateProcess(hProcess, 1);
-                throw new InvalidOperationException("AssignProcessToJobObject failed: " + err);
+                string message = "AssignProcessToJobObject failed: " + err;
+                // Report if the best-effort kill itself also failed.
+                if (!TerminateProcess(hProcess, 1))
+                    message += "; TerminateProcess also failed: " + Marshal.GetLastWin32Error();
+                throw new InvalidOperationException(message);
             }
 
             if (ResumeThread(hThread) == 0xFFFFFFFF)
@@ -262,8 +265,11 @@ public static class CapLauncher
                 // Still suspended - an unbounded wait below would hang forever. Kill
                 // it instead of leaving an orphaned, permanently-suspended process.
                 int resumeErr = Marshal.GetLastWin32Error();
-                TerminateProcess(hProcess, 1);
-                throw new InvalidOperationException("ResumeThread failed: " + resumeErr);
+                string message = "ResumeThread failed: " + resumeErr;
+                // Report if the best-effort kill itself also failed.
+                if (!TerminateProcess(hProcess, 1))
+                    message += "; TerminateProcess also failed: " + Marshal.GetLastWin32Error();
+                throw new InvalidOperationException(message);
             }
 
             if (WaitForSingleObject(hProcess, 0xFFFFFFFF) == 0xFFFFFFFF)
@@ -272,8 +278,11 @@ public static class CapLauncher
                 // failure and potentially leave it running unmanaged in the
                 // background. Best-effort kill before giving up.
                 int waitErr = Marshal.GetLastWin32Error();
-                TerminateProcess(hProcess, 1);
-                throw new InvalidOperationException("WaitForSingleObject failed: " + waitErr);
+                string message = "WaitForSingleObject failed: " + waitErr;
+                // Report if the best-effort kill itself also failed.
+                if (!TerminateProcess(hProcess, 1))
+                    message += "; TerminateProcess also failed: " + Marshal.GetLastWin32Error();
+                throw new InvalidOperationException(message);
             }
 
             uint exitCode;
@@ -296,7 +305,7 @@ public static class CapLauncher
 Add-Type -TypeDefinition $source -Language CSharp
 
 try {
-    exit ([CapLauncher]::Run($percentValue, [string[]]$Command, $commandLine))
+    exit ([CapcLauncher]::Run($percentValue, [string[]]$Command, $commandLine))
 } catch {
     Write-Error $_.Exception.InnerException.Message
     exit 1

@@ -58,13 +58,13 @@ test('idle forwards /c, /d, a Windows path, %, &, spaces and an empty string byt
   assert.deepEqual(lines.map((line) => JSON.parse(line)), args);
 });
 
-test('cap receives its numeric first argument and propagates the exit code', { skip: SKIP }, () => {
-  const res = runShim('cap', ['90', 'cmd.exe', '/c', 'exit', '3']);
+test('capc receives its numeric first argument and propagates the exit code', { skip: SKIP }, () => {
+  const res = runShim('capc', ['90', 'cmd.exe', '/c', 'exit', '3']);
   assert.equal(res.status, 3, `stderr: ${res.stderr}`);
 });
 
-test('pint receives its numeric first argument and propagates the exit code', { skip: SKIP }, () => {
-  const res = runShim('pint', ['1', 'cmd.exe', '/c', 'exit', '4']);
+test('capt receives its numeric first argument and propagates the exit code', { skip: SKIP }, () => {
+  const res = runShim('capt', ['1', 'cmd.exe', '/c', 'exit', '4']);
   assert.equal(res.status, 4, `stderr: ${res.stderr}`);
 });
 
