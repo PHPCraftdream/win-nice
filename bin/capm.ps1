@@ -26,7 +26,18 @@ if ($sizeArg -notmatch '^(?<num>\d+(\.\d+)?)(?<unit>[mMgG]?)$') {
     Write-Error $usage
     exit 1
 }
-$sizeNum = [double]$Matches['num']
+# TryParse, not a raw [double] cast: an arbitrarily long digit string (the
+# regex above has no length limit) overflows a plain [double] cast with a
+# raw, unhandled PowerShell conversion error (path/line number and all) -
+# TryParse fails cleanly instead, so every invalid <size> hits the same
+# single usage message regardless of why it's invalid.
+$sizeNum = 0.0
+$numOk = [double]::TryParse($Matches['num'], [System.Globalization.NumberStyles]::Float,
+    [System.Globalization.CultureInfo]::InvariantCulture, [ref]$sizeNum)
+if (-not $numOk -or [double]::IsNaN($sizeNum) -or [double]::IsInfinity($sizeNum)) {
+    Write-Error "capm: <size> is out of range. $usage"
+    exit 1
+}
 $sizeUnit = $Matches['unit']
 if ($sizeUnit -eq '') {
     # No suffix: percent of total RAM, matching cap's own <percent 1-100>

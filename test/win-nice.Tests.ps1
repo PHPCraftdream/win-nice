@@ -691,6 +691,25 @@ Describe 'capm.ps1 argument validation' {
         $LASTEXITCODE | Should Be 1
     }
 
+    It 'rejects a huge 400-digit <size> (unit "<Unit>") cleanly - no raw PowerShell conversion error leaked (regression: release review 1609-8824cf7)' -TestCases @(
+        @{ Unit = 'm' }
+        @{ Unit = 'g' }
+        @{ Unit = '' }
+    ) {
+        param($Unit)
+        # A raw [double] cast on a digit string this long throws PowerShell's own
+        # "Cannot convert value ... InvalidCastFromStringToDoubleOrSingle" error,
+        # including the script's own path/line number, before the usage message -
+        # TryParse must fail cleanly instead, with only the controlled usage error.
+        $digits = '9' * 400
+        $out = & (Join-Path $bin 'capm.bat') "$digits$Unit" cmd /c "echo hi" 2>&1
+        $LASTEXITCODE | Should Be 1
+        $joined = $out -join "`n"
+        $joined | Should Not Match 'Cannot convert value'
+        $joined | Should Not Match 'InvalidCastFromStringToDoubleOrSingle'
+        $joined | Should Match 'usage: capm'
+    }
+
     It 'rejects a missing command' {
         & (Join-Path $bin 'capm.bat') 100m 2>&1 | Out-Null
         $LASTEXITCODE | Should Be 1
@@ -1015,6 +1034,30 @@ Write-Output ("{0:N1}" -f $pct)
             $env:PATH = $prevPath
         }
         Remove-Item $burnFile -ErrorAction SilentlyContinue
+    }
+
+    It 'clamps a nested "pint 2 pint 3" to the OUTER (tighter) mask, not the inner (wider) request' {
+        # Empirically verified (release review 1609-8824cf7 P3): a nested pint
+        # requesting a WIDER mask than its parent job allows does not error out
+        # and does not get the wider mask either - the effective affinity comes
+        # back clamped to the outer, tighter mask. Matches Microsoft's "child can
+        # be stricter, not less strict, than parent" model for nested Job Object
+        # affinity (Nested Jobs - Job Limits). Manually confirmed with pint 2
+        # pint 4 -> 0x3 (not 0xF) before writing this test.
+        $prevPath = $env:PATH
+        $env:PATH = $chainPath
+        try {
+            $out = New-TempFile
+            $probe = "(Get-Process -Id `$PID).ProcessorAffinity.ToString('X') | Out-File -FilePath '$out'; exit 8"
+            $probeFile = New-TempScript
+            Set-Content -Path $probeFile -Value $probe
+            & powershell -NoProfile -File (Join-Path $bin 'pint.ps1') 2 pint 3 powershell -NoProfile -File $probeFile
+            $LASTEXITCODE | Should Be 8
+            ('0x' + (Get-Content $out).Trim()) | Should Be '0x3'
+            Remove-Item $out, $probeFile -ErrorAction SilentlyContinue
+        } finally {
+            $env:PATH = $prevPath
+        }
     }
 }
 

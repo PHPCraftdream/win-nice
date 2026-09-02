@@ -9,13 +9,24 @@ permissions:
   contents: read
   id-token: write
 
+# A re-pushed/re-tagged release must not run concurrently with an already-
+# running publish - both would try to publish the same name@version.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: windows-latest
+    # Upper bound for the whole job: the native launchers this suite exercises
+    # use an infinite WaitForSingleObject, so a hung launcher/Pester probe
+    # could otherwise occupy the runner up to GitHub's own default cap instead
+    # of failing fast during a release.
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
@@ -55,6 +66,7 @@ jobs:
           if ($result.FailedCount -gt 0) { exit 1 }
 
       - name: Publish
+        timeout-minutes: 5
         # win-nice@0.1.0's first publish used a classic NPM_TOKEN (Trusted Publisher
         # can't be configured for a package that doesn't exist yet). The package now
         # exists and Trusted Publisher is configured on its npmjs.com settings page

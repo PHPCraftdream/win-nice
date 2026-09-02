@@ -87,21 +87,29 @@ limits do **not** follow one universal "smaller wins" rule: CPU rate
 (`cap`) is relative to its parent job and *multiplies* when nested (`cap 50
 cap 50 ...` ≈ 25% of system CPU, not 50% - see
 [`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information)),
-while memory (`capm`) ceilings apply independently and the *smaller* one
-binds. Priority (`idle`/etc.) isn't a Job Object limit at all - the last one
-applied wins. See README.md's "Chaining these tools together" for the full
-explanation.
+while memory (`capm`) ceilings apply independently to accounting scopes of
+different sizes - a job's committed-memory accounting includes every child
+job's committed memory plus its own process, a child job's accounting
+doesn't see the outer wrapper's process at all - so nested `capm` ceilings
+don't reduce to a simple `min(limit1, limit2)`. Priority (`idle`/etc.) isn't
+a Job Object limit at all - the last one applied wins. See README.md's
+"Chaining these tools together" for the full explanation.
 
 ## Elevation / desktop responsiveness
 
 - `admin <command> [args...]` — runs elevated (as Administrator); triggers the
   standard UAC consent prompt if the calling shell isn't already elevated, runs
-  inline with no extra prompt if it is. The elevated equivalent of `idle`.
+  inline with no extra prompt if it is. Blocking elevation wrapper with the same
+  wait-and-propagate-exit-code semantics as the other wrappers - it does not set
+  a priority class like `idle` does.
 - `uiup` (no arguments) — one-shot `HIGH` priority boost for the live
   shell/UI/audio processes (`explorer`, `dwm`, `sihost`,
   `ShellExperienceHost`, `StartMenuExperienceHost`, `StartMenu`, `SearchApp`,
-  `audiodg`) so the desktop stays responsive while heavy background work runs
-  underneath. Self-elevates via UAC. Does **not** affect apps launched from
+  `audiodg`), intended to improve desktop responsiveness while heavy
+  background work runs underneath - a best-effort one-shot tweak, not a
+  guarantee (memory pressure, I/O saturation, driver/GPU stalls, or a
+  realtime workload elsewhere can still make the desktop stutter). Self-
+  elevates via UAC. Does **not** affect apps launched from
   Explorer afterward (`HIGH` isn't inherited by default).
 
 ## Argument safety

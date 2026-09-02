@@ -247,25 +247,40 @@ each limit type combines differently:**
   50%. This is documented Windows behavior for
   [`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information),
   not a bug here.
-- **Memory (`capm`)**: each nested job tracks and enforces its own memory
-  ceiling independently, so the process hits whichever ceiling is smaller
-  first — the *effective* limit is the minimum of the nested ceilings.
+- **Memory (`capm`)**: each ceiling applies independently to its own
+  accounting scope, and those scopes are *not* the same size — a job's
+  committed-memory accounting includes its own processes **plus every child
+  job's committed memory**, while a child job's own accounting doesn't see
+  the outer wrapper's process at all
+  ([Nested Jobs — Resource Accounting](https://learn.microsoft.com/en-us/windows/win32/procthread/nested-jobs)).
+  So `capm 500m capm 400m ...` is *not* guaranteed to behave like a plain
+  `min(500m, 400m) = 400m` ceiling on the innermost workload — the outer
+  500m job can run out of budget first purely from its own wrapper
+  process's memory use, on top of whatever the inner 400m job is using.
+  Don't rely on nested `capm` ceilings combining to an exact number; treat
+  the outer value as an upper bound that can bind earlier than expected.
 - **Priority (`idle`/`belownormal`/`abovenormal`/`high`/`realtime`)**: not a
   Job Object limit — the *last* one applied to a given process simply wins,
   same as invoking any one of them alone.
-- **Affinity (`pint`)**: not independently verified for nested jobs in this
-  README (unlike the two above, which are either Microsoft-documented or a
-  straightforward consequence of two independent absolute ceilings) — test
-  your own combination before relying on a specific nested-affinity outcome.
+- **Affinity (`pint`)**: nested affinity is an *effective-limits* chain — a
+  child job's mask can be as tight as it wants but is clamped to whatever
+  the parent already allows, never wider
+  ([Nested Jobs — Job Limits](https://learn.microsoft.com/en-us/windows/win32/procthread/nested-jobs)).
+  Confirmed empirically: `pint 2 pint 3 ...` (inner asking for *more*
+  processors than the outer allows) still comes back pinned to the outer's
+  2, not the inner's 3 — no error, just silently clamped to the tighter mask.
 
 Test any combination you actually plan to depend on; don't assume "more
 wrappers, more restrictive" holds uniformly across limit types.
 
 ### `uiup`
-One-shot priority boost (`HIGH`) for the live shell/UI/audio processes so the
-desktop stays responsive while heavy background work runs underneath:
-`explorer`, `dwm`, `sihost`, `ShellExperienceHost`, `StartMenuExperienceHost`,
-`StartMenu`, `SearchApp`, `audiodg`.
+One-shot priority boost (`HIGH`) for the live shell/UI/audio processes,
+intended to improve desktop responsiveness while heavy background work runs
+underneath: `explorer`, `dwm`, `sihost`, `ShellExperienceHost`,
+`StartMenuExperienceHost`, `StartMenu`, `SearchApp`, `audiodg`. This is a
+best-effort one-shot tweak, not a guarantee — memory pressure, I/O
+saturation, driver/GPU stalls, or a realtime-priority workload elsewhere can
+still make the desktop stutter regardless.
 
 Self-elevates via UAC — `dwm`/`sihost` run under a separate account
 (`Window Manager\DWM-1`), so raising their priority needs admin rights.
@@ -276,10 +291,11 @@ The boost does **not** propagate to apps you launch from Explorer afterwards:
 see the project history for the test.
 
 ### `admin <command> [args...]`
-Runs `command` elevated (as Administrator), waits for it to exit, propagates its
-exit code — the elevated equivalent of `idle`. If it's already elevated, runs
-inline sharing the current console, with the full direct-launch argument safety
-described above.
+Runs `command` elevated (as Administrator), waits for it to exit, propagates
+its exit code — a blocking elevation wrapper with the same wait-and-propagate
+semantics as the other wrappers here, but it does not set a priority class
+(unlike `idle`). If it's already elevated, runs inline sharing the current
+console, with the full direct-launch argument safety described above.
 
 If the calling shell isn't already elevated, triggers the standard UAC consent
 prompt (via `ShellExecute`, always opening its own console window, incompatible

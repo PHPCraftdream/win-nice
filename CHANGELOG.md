@@ -14,9 +14,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - These tools can be chained by name (e.g. `capm 50 cap 50 idle <command>`)
   - each wrapper's Job Object nests inside the outer one (Windows 8+). Nested
   limits do *not* uniformly take the smaller value: CPU rate (`cap`)
-  multiplies relative to its parent (`cap 50 cap 50` ≈ 25%, not 50%), while
-  memory (`capm`) ceilings apply independently and the smaller one binds. See
-  README's "Chaining these tools together" section for the full picture.
+  multiplies relative to its parent (`cap 50 cap 50` ≈ 25%, not 50%); memory
+  (`capm`) ceilings apply independently to accounting scopes that aren't the
+  same size (a parent job's accounting includes every child job's committed
+  memory plus its own process, so nested `capm` ceilings don't reduce to a
+  simple minimum). See README's "Chaining these tools together" section for
+  the full picture.
 
 ### Fixed
 
@@ -31,6 +34,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   50 ...` worked - an order-dependent bug. A bare integer percent (matching
   `cap`'s own convention) never contains `%`, so it sidesteps this for every
   chain order.
+- `capm` no longer leaks a raw PowerShell type-conversion error (with file
+  path and line number) to stderr for an arbitrarily long `<size>` digit
+  string - parsing now uses `[double]::TryParse` instead of a raw cast, so
+  every invalid size hits the same clean usage error.
 
 ## [0.1.0] - 2026-09-02
 
