@@ -44,90 +44,110 @@ function fail(msg) {
   process.exitCode = 1;
 }
 
-console.log('release-check: npm pack...');
-const packOut = npmExec(['pack', '--json'], { cwd: repoRoot, encoding: 'utf8' });
-const [packInfo] = JSON.parse(packOut);
-const tarballPath = path.join(repoRoot, packInfo.filename);
-if (!fs.existsSync(tarballPath)) {
-  fail(`npm pack did not produce ${packInfo.filename}`);
-  process.exit(1);
-}
-ok(`packed ${packInfo.filename} (${packInfo.entryCount} files, ${packInfo.size} bytes)`);
-
-const home = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-release-check-home-'));
-const installPrefix = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-release-check-npm-'));
-// The tarball's postinstall calls install(), which also calls
-// updateInstalledSkill() - that resolves its targets via the SEPARATE
-// WIN_NICE_SKILL_HOME env var, not WIN_NICE_HOME. Without this, the tarball
-// install below is free to rewrite the real ~/.claude/skills and
-// ~/.agents/skills (confirmed: it did, before this temp dir was added).
-const skillHome = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-release-check-skillhome-'));
+// Resources are declared before the try so a failure during npm pack itself
+// (bad JSON, npm error, mkdtempSync failure) still lets the finally clean up
+// whatever was actually created, instead of leaking temp dirs/tarball.
+let tarballPath = null;
+let home = null;
+let installPrefix = null;
+let skillHome = null;
 
 try {
-  npmExec(['install', tarballPath, '--no-save', '--prefix', installPrefix], {
-    cwd: repoRoot,
-    env: { ...process.env, WIN_NICE_HOME: home, WIN_NICE_SKILL_HOME: skillHome, WIN_NICE_NO_PATH: '1' },
-    stdio: 'inherit',
-  });
-
-  const manifestPath = path.join(home, 'install-manifest.json');
-  if (!fs.existsSync(manifestPath)) {
-    fail('install-manifest.json missing after install - postinstall may not have run against the packed tarball');
+  console.log('release-check: npm pack...');
+  const packOut = npmExec(['pack', '--json'], { cwd: repoRoot, encoding: 'utf8' });
+  const [packInfo] = JSON.parse(packOut);
+  tarballPath = path.join(repoRoot, packInfo.filename);
+  if (!fs.existsSync(tarballPath)) {
+    fail(`npm pack did not produce ${packInfo.filename}`);
   } else {
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    if (manifest.version !== pkg.version) {
-      fail(`installed manifest version ${manifest.version} does not match package.json ${pkg.version}`);
+    ok(`packed ${packInfo.filename} (${packInfo.entryCount} files, ${packInfo.size} bytes)`);
+
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-release-check-home-'));
+    installPrefix = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-release-check-npm-'));
+    // The tarball's postinstall calls install(), which also calls
+    // updateInstalledSkill() - that resolves its targets via the SEPARATE
+    // WIN_NICE_SKILL_HOME env var, not WIN_NICE_HOME. Without this, the
+    // tarball install below is free to rewrite the real ~/.claude/skills and
+    // ~/.agents/skills (confirmed: it did, before this temp dir was added).
+    skillHome = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-release-check-skillhome-'));
+
+    npmExec(['install', tarballPath, '--no-save', '--prefix', installPrefix], {
+      cwd: repoRoot,
+      env: { ...process.env, WIN_NICE_HOME: home, WIN_NICE_SKILL_HOME: skillHome, WIN_NICE_NO_PATH: '1' },
+      stdio: 'inherit',
+    });
+
+    const manifestPath = path.join(home, 'install-manifest.json');
+    if (!fs.existsSync(manifestPath)) {
+      fail('install-manifest.json missing after install - postinstall may not have run against the packed tarball');
     } else {
-      ok(`installed manifest version matches package.json (${pkg.version})`);
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      if (manifest.version !== pkg.version) {
+        fail(`installed manifest version ${manifest.version} does not match package.json ${pkg.version}`);
+      } else {
+        ok(`installed manifest version matches package.json (${pkg.version})`);
+      }
+
+      // Full contract: each of the 12 tools ships exactly 3 entry points
+      // (extensionless Git Bash shim, .bat, .ps1) - 36 files total - and the 6
+      // pre-rename legacy names (cap/pint, renamed to capc/capt) must never
+      // reappear in a real install.
+      const expectedTools = [
+        'idle', 'belownormal', 'abovenormal', 'high', 'realtime',
+        'capc', 'capt', 'capm', 'admin', 'uiup', 'cy', 'cx',
+      ];
+      const expectedFiles = expectedTools.flatMap((t) => [t, `${t}.bat`, `${t}.ps1`]);
+      const legacyNames = ['cap', 'cap.bat', 'cap.ps1', 'pint', 'pint.bat', 'pint.ps1'];
+      const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
+      const missing = expectedFiles.filter((f) => !manifestFiles.includes(f));
+      const extra = manifestFiles.filter((f) => !expectedFiles.includes(f) && !legacyNames.includes(f));
+      const forbidden = legacyNames.filter((f) => manifestFiles.includes(f));
+      if (missing.length || extra.length || forbidden.length) {
+        const parts = [];
+        if (missing.length) parts.push(`missing: ${missing.join(', ')}`);
+        if (extra.length) parts.push(`extra: ${extra.join(', ')}`);
+        if (forbidden.length) parts.push(`forbidden legacy name(s) present: ${forbidden.join(', ')}`);
+        fail(`installed manifest does not match the exact 36-file launcher contract (${parts.join('; ')})`);
+      } else {
+        ok(`all ${expectedFiles.length} expected launcher files present (12 tools x 3 variants), no legacy names`);
+      }
     }
 
-    // Full contract: each of the 12 tools ships exactly 3 entry points
-    // (extensionless Git Bash shim, .bat, .ps1) - 36 files total - and the 6
-    // pre-rename legacy names (cap/pint, renamed to capc/capt) must never
-    // reappear in a real install.
-    const expectedTools = [
-      'idle', 'belownormal', 'abovenormal', 'high', 'realtime',
-      'capc', 'capt', 'capm', 'admin', 'uiup', 'cy', 'cx',
+    // The manifest/exact-file-set check above only proves the files exist,
+    // not that each one actually runs - exercise one .ps1 per Job-Object
+    // launcher family (capc/capt/capm each wrap process creation
+    // differently), not just capc, so a capt/capm-only regression can't slip
+    // through a gate that only ever smoke-tested capc.
+    const smokeCases = [
+      { tool: 'capc', arg: '50' },
+      { tool: 'capt', arg: '1' },
+      { tool: 'capm', arg: '50' },
     ];
-    const expectedFiles = expectedTools.flatMap((t) => [t, `${t}.bat`, `${t}.ps1`]);
-    const legacyNames = ['cap', 'cap.bat', 'cap.ps1', 'pint', 'pint.bat', 'pint.ps1'];
-    const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
-    const missing = expectedFiles.filter((f) => !manifestFiles.includes(f));
-    const extra = manifestFiles.filter((f) => !expectedFiles.includes(f) && !legacyNames.includes(f));
-    const forbidden = legacyNames.filter((f) => manifestFiles.includes(f));
-    if (missing.length || extra.length || forbidden.length) {
-      const parts = [];
-      if (missing.length) parts.push(`missing: ${missing.join(', ')}`);
-      if (extra.length) parts.push(`extra: ${extra.join(', ')}`);
-      if (forbidden.length) parts.push(`forbidden legacy name(s) present: ${forbidden.join(', ')}`);
-      fail(`installed manifest does not match the exact 36-file launcher contract (${parts.join('; ')})`);
-    } else {
-      ok(`all ${expectedFiles.length} expected launcher files present (12 tools x 3 variants), no legacy names`);
-    }
-  }
-
-  const capcPs1 = path.join(home, 'bin', 'capc.ps1');
-  if (!fs.existsSync(capcPs1)) {
-    fail('bin/capc.ps1 missing from the installed tarball');
-  } else {
-    let status = null;
-    try {
-      execFileSync('powershell', ['-NoProfile', '-File', capcPs1, '50', 'cmd.exe', '/c', 'exit', '7'], { stdio: 'ignore' });
-      status = 0;
-    } catch (err) {
-      status = err.status;
-    }
-    if (status !== 7) {
-      fail(`smoke test: "capc 50 cmd.exe /c exit 7" exited ${status}, expected 7`);
-    } else {
-      ok('smoke test: capc (installed from the tarball) propagates the wrapped exit code');
+    for (const { tool, arg } of smokeCases) {
+      const ps1 = path.join(home, 'bin', `${tool}.ps1`);
+      if (!fs.existsSync(ps1)) {
+        fail(`bin/${tool}.ps1 missing from the installed tarball`);
+        continue;
+      }
+      let status = null;
+      try {
+        execFileSync('powershell', ['-NoProfile', '-File', ps1, arg, 'cmd.exe', '/c', 'exit', '7'], { stdio: 'ignore' });
+        status = 0;
+      } catch (err) {
+        status = err.status;
+      }
+      if (status !== 7) {
+        fail(`smoke test: "${tool} ${arg} cmd.exe /c exit 7" exited ${status}, expected 7`);
+      } else {
+        ok(`smoke test: ${tool} (installed from the tarball) propagates the wrapped exit code`);
+      }
     }
   }
 } finally {
-  fs.rmSync(home, { recursive: true, force: true });
-  fs.rmSync(installPrefix, { recursive: true, force: true });
-  fs.rmSync(skillHome, { recursive: true, force: true });
-  fs.rmSync(tarballPath, { force: true });
+  if (tarballPath) fs.rmSync(tarballPath, { force: true });
+  if (home) fs.rmSync(home, { recursive: true, force: true });
+  if (installPrefix) fs.rmSync(installPrefix, { recursive: true, force: true });
+  if (skillHome) fs.rmSync(skillHome, { recursive: true, force: true });
 }
 
 // CHANGELOG.md's topmost heading must be the version actually being
