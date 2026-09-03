@@ -2,30 +2,61 @@
 # win-nice: managed-file
 # Deliberately no param()/[CmdletBinding()]: a declared parameter name (even
 # without a [Parameter()] attribute) can still be ambiguously prefix-matched by
-# flags meant for the wrapped command (e.g. "-p" matching "-Percent"). Reading
+# flags meant for the wrapped command (e.g. "-s" matching "-Size"). Reading
 # everything from $args sidesteps PowerShell's parameter binder entirely.
+#
+# Why caps exists: capc/capt/capm deliberately impose no timeout - a quota tool
+# shouldn't unilaterally decide a legitimate long build is stuck (same precedent
+# as nice/cpulimit, which bound resource use but never wall-clock time). caps is
+# the complement: the caller has already decided "kill this after N seconds no
+# matter what", and the Job Object (not process walking) is what makes "and
+# nothing survives it" true for the whole spawned tree.
+$usage = "usage: caps <seconds> <command> [args...]  (seconds: positive whole or " +
+    "decimal number, e.g. 2 or 2.5 - converted to whole milliseconds; minimum " +
+    "1 ms, maximum 4294967294 ms (~49.7 days), because 0xFFFFFFFF is the " +
+    "wait-forever sentinel, not a deadline)"
+
 if ($args.Count -lt 2) {
-    Write-Error "usage: capc <percent 1-100> <command> [args...]"
+    Write-Error $usage
     exit 1
 }
-$percentValue = 0
-if (-not [int]::TryParse($args[0], [ref]$percentValue) -or $percentValue -lt 1 -or $percentValue -gt 100) {
-    Write-Error "usage: capc <percent 1-100> <command> [args...]"
+
+$secondsArg = $args[0]
+if ($secondsArg -notmatch '^(?<num>\d+(\.\d+)?)$') {
+    Write-Error $usage
     exit 1
 }
+# TryParse, not a raw [double] cast: an arbitrarily long digit string (the
+# regex above has no length limit) overflows a plain [double] cast with a
+# raw, unhandled PowerShell conversion error (path/line number and all) -
+# TryParse fails cleanly instead, so every invalid <seconds> hits the same
+# single usage message regardless of why it's invalid. (Same reason capm.ps1
+# documents for its own <size>.)
+$secondsNum = 0.0
+$numOk = [double]::TryParse($Matches['num'], [System.Globalization.NumberStyles]::Float,
+    [System.Globalization.CultureInfo]::InvariantCulture, [ref]$secondsNum)
+if (-not $numOk -or [double]::IsNaN($secondsNum) -or [double]::IsInfinity($secondsNum) -or $secondsNum -le 0) {
+    Write-Error "caps: <seconds> is out of range. $usage"
+    exit 1
+}
+# WaitForSingleObject's dwMilliseconds is a uint32 whose 0xFFFFFFFF value is
+# reserved as INFINITE - so this tool's deadline cap is 0xFFFFFFFE ms (~49.7
+# days). Anything larger would silently wrap/truncate into a different
+# deadline or collide with the wait-forever sentinel; reject it as the usage
+# error it is instead. Floor to whole milliseconds so a sub-millisecond value
+# can neither round up nor truncate to a meaningless 0 unnoticed.
+$timeoutMsDouble = $secondsNum * 1000.0
+if ($timeoutMsDouble -lt 1 -or $timeoutMsDouble -gt 4294967294) {
+    Write-Error "caps: <seconds> is out of range. $usage"
+    exit 1
+}
+$timeoutMs = [uint32][math]::Floor($timeoutMsDouble)
 $Command = @($args[1..($args.Count - 1)])
 
 # Fallback command line for when the target isn't a directly-launchable .exe (see
-# CapcLauncher.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
-# neutralize its operators (&|<>^) and not just whitespace, or e.g. "A&B" gets split
-# into two commands. NOTE: a literal "%" in an argument can still trigger cmd.exe
-# environment-variable expansion (e.g. "%PATH%") even when quoted, and cmd.exe pairs
-# up "%" characters across argument/quote boundaries - two unrelated arguments that
-# each contain one "%" can corrupt each other. There is no reliable per-character
-# escape for this at the cmd.exe /c level; it's a known, inherent limitation shared
-# by anything that shells out through cmd.exe (Node's own child_process included).
-# This fallback path only runs for .bat/.cmd/builtin targets - a direct .exe target
-# never goes through cmd.exe at all, so it isn't exposed to this limitation.
+# CapsLauncher.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
+# neutralize its operators (&|<>^) and not just whitespace - see capc.ps1 for the
+# same logic and its documented "%" limitation.
 $commandLine = ($Command | ForEach-Object {
     $escaped = $_ -replace '"', '\"'
     if ($escaped -eq '' -or $escaped -match '[\s"&|<>^]') { '"' + $escaped + '"' } else { $escaped }
@@ -36,7 +67,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class CapcLauncher
+public static class CapsLauncher
 {
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct STARTUPINFO
@@ -106,13 +137,6 @@ public static class CapcLauncher
         public UIntPtr PeakJobMemoryUsed;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    struct JOBOBJECT_CPU_RATE_CONTROL_INFORMATION
-    {
-        public uint ControlFlags;
-        public uint CpuRate;
-    }
-
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool CreateProcess(string lpApplicationName, StringBuilder lpCommandLine,
         IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles,
@@ -140,13 +164,19 @@ public static class CapcLauncher
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
 
+    // The timeout path's whole-tree kill: TerminateJobObject terminates every
+    // process still assigned to the job in one atomic kernel call - the direct
+    // child and everything it spawned, no process-tree walking, no window
+    // where a descendant outlives the child. (TerminateProcess above stays for
+    // the failure paths, where the best-effort kill can only ever target the
+    // one process handle in hand.)
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool TerminateJobObject(IntPtr hJob, uint uExitCode);
+
     [DllImport("kernel32.dll")]
     static extern bool CloseHandle(IntPtr hObject);
 
     const uint CREATE_SUSPENDED = 0x00000004;
-    const int JobObjectCpuRateControlInformation = 15;
-    const uint JOB_OBJECT_CPU_RATE_CONTROL_ENABLE = 0x1;
-    const uint JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP = 0x4;
     const int JobObjectExtendedLimitInformation = 9;
     const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
 
@@ -191,7 +221,7 @@ public static class CapcLauncher
         return string.Join(" ", parts);
     }
 
-    public static int Run(int percent, string[] argv, string cmdExeCommandLine)
+    public static int Run(uint timeoutMs, string[] argv, string cmdExeCommandLine)
     {
         IntPtr hJob = CreateJobObject(IntPtr.Zero, null);
         if (hJob == IntPtr.Zero)
@@ -207,18 +237,32 @@ public static class CapcLauncher
         IntPtr hThread = IntPtr.Zero;
         try
         {
-            var cpuInfo = new JOBOBJECT_CPU_RATE_CONTROL_INFORMATION
+            var extInfo = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
             {
-                ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
-                CpuRate = (uint)(percent * 100)
+                BasicLimitInformation = new JOBOBJECT_BASIC_LIMIT_INFORMATION
+                {
+                    // KILL_ON_JOB_CLOSE: the cleanup in the finally below only runs
+                    // if this launcher process survives to execute it. Killed from
+                    // outside (taskkill without /T, a crash), nothing in-process
+                    // ever runs - without this flag the last job handle dying with
+                    // the process would leave every process still assigned to the
+                    // job running on, untracked and unmanaged. With it, Windows
+                    // itself terminates the whole job at that moment. On the normal
+                    // path this never fires: the wait below has already reaped the
+                    // child (emptying the job) before the finally closes hJob.
+                    // caps sets no other limit flag - the job exists purely so the
+                    // timeout kill (and that close-of-business kill) covers the
+                    // whole process tree, not to impose any resource ceiling.
+                    LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                }
             };
-            int size = Marshal.SizeOf(cpuInfo);
+            int size = Marshal.SizeOf(extInfo);
             IntPtr ptr = Marshal.AllocHGlobal(size);
             bool ok;
             try
             {
-                Marshal.StructureToPtr(cpuInfo, ptr, false);
-                ok = SetInformationJobObject(hJob, JobObjectCpuRateControlInformation, ptr, (uint)size);
+                Marshal.StructureToPtr(extInfo, ptr, false);
+                ok = SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, ptr, (uint)size);
             }
             finally
             {
@@ -227,53 +271,13 @@ public static class CapcLauncher
             if (!ok)
                 throw new InvalidOperationException("SetInformationJobObject failed: " + Marshal.GetLastWin32Error());
 
-            // KILL_ON_JOB_CLOSE: the cleanup in the finally below only runs if this
-            // launcher process survives to execute it. Killed from outside (taskkill
-            // without /T, a crash), nothing in-process ever runs - without this flag
-            // the last job handle dying with the process would leave every process
-            // still assigned to the job running on, untracked and unmanaged. With
-            // it, Windows itself terminates the whole job at that moment. On the
-            // normal path this never fires: the wait below has already reaped the
-            // child (emptying the job) before the finally closes hJob. Every other
-            // field stays zero - Windows only reads a struct field when its own
-            // LimitFlags bit is set.
-            // Set via the EXTENDED info class: JobObjectBasicLimitInformation
-            // rejects this flag with ERROR_INVALID_PARAMETER.
-            var extInfo = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
-            {
-                BasicLimitInformation = new JOBOBJECT_BASIC_LIMIT_INFORMATION
-                {
-                    LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-                }
-            };
-            int extSize = Marshal.SizeOf(extInfo);
-            IntPtr extPtr = Marshal.AllocHGlobal(extSize);
-            bool extOk;
-            try
-            {
-                Marshal.StructureToPtr(extInfo, extPtr, false);
-                extOk = SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, extPtr, (uint)extSize);
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(extPtr);
-            }
-            if (!extOk)
-                throw new InvalidOperationException("SetInformationJobObject failed: " + Marshal.GetLastWin32Error());
-
             var si = new STARTUPINFO();
             si.cb = Marshal.SizeOf(si);
             PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
 
-            // Try launching the target directly first (no shell at all) - unless it's a
-            // .bat/.cmd file. CreateProcess has an undocumented-but-real fallback of its
-            // own for those: instead of failing, it silently re-invokes them through
-            // cmd.exe using OUR unescaped argv text (ArgvQuote only protects CRT argv
-            // parsing, not cmd.exe's operators), reopening the exact "A&B" splits this
-            // whole file exists to prevent. A bare name with no extension is safe either
-            // way: CreateProcess only ever auto-appends ".exe" to it, never ".bat/.cmd",
-            // so it fails cleanly (ERROR_FILE_NOT_FOUND) when only a same-named .bat/.cmd
-            // exists, and falls through to the escaped path below.
+            // See capc.ps1 for why .bat/.cmd targets skip the direct attempt entirely:
+            // CreateProcess silently re-invokes them through cmd.exe on its own, using
+            // unescaped text, instead of failing the way a genuinely missing exe would.
             bool isBatOrCmd = argv.Length > 0 && (
                 argv[0].EndsWith(".bat", StringComparison.OrdinalIgnoreCase) ||
                 argv[0].EndsWith(".cmd", StringComparison.OrdinalIgnoreCase));
@@ -344,9 +348,15 @@ public static class CapcLauncher
                 throw new InvalidOperationException(message);
             }
 
-            if (WaitForSingleObject(hProcess, 0xFFFFFFFF) == 0xFFFFFFFF)
+            // caps' one behavioral difference from every other launcher in this
+            // repo: the wait is bounded. The PowerShell side validated the
+            // deadline into [1, 0xFFFFFFFE] ms before the cast, so the value can
+            // never collide with the 0xFFFFFFFF INFINITE sentinel.
+            uint waitResult = WaitForSingleObject(hProcess, timeoutMs);
+            if (waitResult == 0xFFFFFFFF)
             {
-                // The child's actual state is unknown here - don't just report
+                // WAIT_FAILED - same handling as every other launcher: the
+                // child's actual state is unknown here - don't just report
                 // failure and potentially leave it running unmanaged in the
                 // background. Best-effort kill before giving up.
                 int waitErr = Marshal.GetLastWin32Error();
@@ -356,6 +366,25 @@ public static class CapcLauncher
                     message += "; TerminateProcess also failed: " + Marshal.GetLastWin32Error();
                 throw new InvalidOperationException(message);
             }
+            if (waitResult == 0x00000102) // WAIT_TIMEOUT
+            {
+                // The deadline passed - the whole point of this tool. Kill the
+                // entire job now (see TerminateJobObject above for why one
+                // kernel call is the right primitive). KILL_ON_JOB_CLOSE is
+                // only the backstop for THIS wrapper dying non-cooperatively;
+                // on this path the wrapper is alive and kills the job itself.
+                //
+                // 124: the unix timeout(1) convention, reported by the
+                // PowerShell handler below. Deliberately NOT
+                // GetExitCodeProcess here - the reason for exiting is already
+                // known, and the process may still be mid-death when asked.
+                if (!TerminateJobObject(hJob, 124))
+                    throw new InvalidOperationException("TerminateJobObject failed: " + Marshal.GetLastWin32Error());
+                throw new TimeoutException("caps: timed out after " + timeoutMs + " ms");
+            }
+            // WAIT_OBJECT_0: the child finished inside the deadline - fall
+            // through to the exact same GetExitCodeProcess/propagate path as
+            // every other launcher.
 
             uint exitCode;
             if (!GetExitCodeProcess(hProcess, out exitCode))
@@ -377,7 +406,12 @@ public static class CapcLauncher
 Add-Type -TypeDefinition $source -Language CSharp
 
 try {
-    exit ([CapcLauncher]::Run($percentValue, [string[]]$Command, $commandLine))
+    exit ([CapsLauncher]::Run($timeoutMs, [string[]]$Command, $commandLine))
+} catch [System.TimeoutException] {
+    # $secondsArg is the user's own spelling of the deadline ("2", "2.5") -
+    # echo that, not a re-derived number, and exit with timeout(1)'s 124.
+    Write-Error "caps: timed out after ${secondsArg}s - job and every process in it were force-killed"
+    exit 124
 } catch {
     Write-Error $_.Exception.InnerException.Message
     exit 1

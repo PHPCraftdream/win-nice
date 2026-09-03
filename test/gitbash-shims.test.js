@@ -73,6 +73,16 @@ test('capm receives its bare-percent size argument and propagates the exit code'
   assert.equal(res.status, 6, `stderr: ${res.stderr}`);
 });
 
+test('caps receives its timeout first argument and propagates the exit code', { skip: SKIP }, () => {
+  const res = runShim('caps', ['30', 'cmd.exe', '/c', 'exit', '8']);
+  assert.equal(res.status, 8, `stderr: ${res.stderr}`);
+});
+
+test('capn receives its count first argument and propagates the exit code', { skip: SKIP }, () => {
+  const res = runShim('capn', ['10', 'cmd.exe', '/c', 'exit', '9']);
+  assert.equal(res.status, 9, `stderr: ${res.stderr}`);
+});
+
 test('shim resolves its .ps1 sibling when invoked as ./<tool> from bin/', { skip: SKIP }, () => {
   const res = spawnSync('bash', ['./idle', 'cmd.exe', '/c', 'exit', '2'], {
     encoding: 'utf8',

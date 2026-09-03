@@ -1,6 +1,6 @@
 ---
 name: win-nice
-description: Reference for win-nice's Windows CLI tools for process priority, hard CPU quotas, CPU affinity, and memory limits (idle, belownormal, abovenormal, high, realtime, capc, capt, capm, uiup, admin). Use when the user asks how to limit CPU usage, priority, thread/core affinity, or memory for a command on Windows, wants to avoid a build/test freezing the desktop, or mentions any of these tool names.
+description: Reference for win-nice's Windows CLI tools for process priority, hard CPU quotas, CPU affinity, memory limits, process-count ceilings, and a wall-clock timeout (idle, belownormal, abovenormal, high, realtime, capc, capt, capm, caps, capn, uiup, admin). Use when the user asks how to limit CPU usage, priority, thread/core affinity, memory, or the number of concurrent processes for a command on Windows, wants to kill a command after a timeout, wants to avoid a build/test freezing the desktop, or mentions any of these tool names.
 ---
 
 <!-- win-nice: managed-skill -->
@@ -66,9 +66,33 @@ processes brought up through an external broker/service (e.g. WMI's
   usually crashes the wrapped program since most don't handle that
   gracefully; set it too low and even the wrapped runtime can fail to start.
   Example: `capm 512m npm run build`.
+- `caps <seconds> <command> [args...]` — hard wall-clock timeout for the whole
+  process tree: if the command hasn't exited within `<seconds>`, one
+  `TerminateJobObject` kernel call force-kills everything still in the Job
+  Object (the whole subtree, from the first instruction via the same
+  suspend-then-assign-then-resume mechanism as `capc`/`capt`/`capm`), and
+  `caps` exits with code 124 (unix `timeout(1)` convention). The job carries
+  only `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` — no resource limit — which is also
+  the backstop if the `caps` wrapper itself dies non-cooperatively. `<seconds>`:
+  positive whole or decimal (`2`, `2.5`), converted to whole milliseconds
+  (min 1 ms); max 4294967294 ms (~49.7 days) since `WaitForSingleObject`'s
+  `dwMilliseconds` is a uint32 with `0xFFFFFFFF` reserved as INFINITE — larger
+  values are a usage error, never silently truncated. Finishing in time
+  propagates the exit code like every other launcher.
+  Example: `caps 300 npm test`.
+- `capn <count> <command> [args...]` — hard ceiling on the number of
+  simultaneously active processes in the whole tree
+  (`JOB_OBJECT_LIMIT_ACTIVE_PROCESS`). The count includes the directly
+  wrapped process itself (it is assigned to the still-empty job before it can
+  spawn anything), so `capn 1 <command>` lets the command run but fails its
+  first child-spawn attempt. Exceeding the limit fails only the offending
+  spawn attempt - nothing is killed or throttled, and a command within budget
+  is unaffected (all confirmed empirically). `<count>`: positive whole
+  number, 1 to 4294967295 (the uint32 `ActiveProcessLimit` field's own
+  range). Example: `capn 10 npm run build`.
 
 **A limit sticks to any daemon the wrapped command leaves running**, for that
-daemon's whole lifetime, not just the one `capc`/`capt`/`capm` call — Job
+daemon's whole lifetime, not just the one `capc`/`capt`/`capm`/`capn` call — Job
 Object membership is permanent once assigned. Build tools that reuse a background
 process to skip cold-start cost (`dotnet build`'s VBCSCompiler/MSBuild node
 reuse, a Gradle daemon, `npm run watch`-style file watchers) can leave a
@@ -91,8 +115,21 @@ while memory (`capm`) ceilings apply independently to accounting scopes of
 different sizes - a job's committed-memory accounting includes every child
 job's committed memory plus its own process, a child job's accounting
 doesn't see the outer wrapper's process at all - so nested `capm` ceilings
-don't reduce to a simple `min(limit1, limit2)`. Priority (`idle`/etc.) isn't
-a Job Object limit at all - the last one applied wins. See README.md's
+don't reduce to a simple `min(limit1, limit2)`. Process count (`capn`) limits
+are likewise enforced independently per job - a spawn has to fit under every
+job in the chain at once, and an outer job's count already includes the inner
+wrapper process itself (plus anything it spawns, down to a PowerShell-based
+inner tool's own csc.exe/CVTRES.EXE compiler children), so `capn 1 capn 5 ...`
+fails before the inner limit even matters and the effective budget is not a
+plain `min()` - leave outer headroom for the chain itself (roughly 3 slots
+for a PowerShell-based inner tool). Priority (`idle`/etc.) isn't
+a Job Object limit at all - the last one applied wins. A timeout (`caps`) is
+likewise not a Job Object limit being combined - it's a deadline each `caps`
+wrapper enforces on its own direct child: the innermost `caps` fires at its own
+deadline (the outer propagates the 124), while an outer `caps` whose deadline
+fires first kills the whole subtree including the inner wrapper, whose own
+`KILL_ON_JOB_CLOSE` job then takes down everything beneath it - so the caller
+sees 124 either way. See README.md's
 "Chaining these tools together" for the full explanation.
 
 ## Elevation / desktop responsiveness

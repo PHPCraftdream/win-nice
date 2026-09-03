@@ -14,6 +14,31 @@ everything below shipped together as `0.2.0`.
 - `capm` - hard memory ceiling via Job Objects; `<size>` accepts a bare
   integer `1`-`100` (percent of total physical RAM, same convention as
   `capc`'s own `<percent 1-100>`), or `m`/`M` (MB), or `g`/`G` (GB).
+- `caps` - wall-clock timeout wrapper: runs `<command>` for up to `<seconds>`
+  and if it's still running, force-terminates it and its whole process tree in
+  one kernel call (`TerminateJobObject` on the tool's Job Object), then exits
+  `124` (the unix `timeout` convention) with a message on stderr. Finishes
+  inside the deadline: the wrapped exit code propagates like every other
+  launcher. `<seconds>` accepts a positive whole or decimal number (e.g. `2`
+  or `2.5`), converted to whole milliseconds, minimum 1 ms, maximum
+  `4294967294` ms (~49.7 days) because `WaitForSingleObject` reserves
+  `0xFFFFFFFF` ms as INFINITE - anything larger is a usage error, not a
+  silently truncated deadline. Unlike `capc`/`capt`/`capm` it sets no resource
+  limit - the Job Object (with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so a
+  non-cooperatively killed wrapper still takes the tree down) exists purely to
+  make the timeout kill cover the whole spawned tree.
+- `capn` - process-count ceiling wrapper: caps the number of simultaneously
+  active processes in the wrapped command's whole tree via
+  `JOB_OBJECT_LIMIT_ACTIVE_PROCESS`. The count includes the wrapped process
+  itself (it is assigned to the still-empty job before it can spawn
+  anything), so `capn 1 <command>` lets the command run but fails its first
+  child-spawn attempt. Exceeding the limit refuses only the offending spawn -
+  nothing already running is killed or throttled, and a command within budget
+  is unaffected (all confirmed empirically). `<count>` accepts a positive
+  whole number, minimum 1, maximum 4294967295 (`ActiveProcessLimit` is a
+  uint32 field). Like the other Job Object launchers it carries
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so a non-cooperatively killed `capn`
+  wrapper still takes the whole tree down.
 - These tools can be chained by name (e.g. `capm 50 capc 50 idle <command>`)
   - each wrapper's Job Object nests inside the outer one (Windows 8+). Nested
   limits do *not* uniformly take the smaller value: CPU rate (`capc`)
@@ -21,8 +46,11 @@ everything below shipped together as `0.2.0`.
   memory (`capm`) ceilings apply independently to accounting scopes that
   aren't the same size (a parent job's accounting includes every child job's
   committed memory plus its own process, so nested `capm` ceilings don't
-  reduce to a simple minimum). See README's "Chaining these tools together"
-  section for the full picture.
+  reduce to a simple minimum). Process count (`capn`) limits are enforced
+  independently per job, and an outer job's count already includes the inner
+  wrapper process itself, so nested `capn` ceilings aren't a simple minimum
+  either - leave the outer value headroom for the chain itself. See README's
+  "Chaining these tools together" section for the full picture.
 
 ### Changed
 
@@ -52,6 +80,13 @@ everything below shipped together as `0.2.0`.
   `install` already did - previously they deleted a real
   `%LOCALAPPDATA%\win-nice` installation and its PATH entry, then silently
   failed to restore it.
+- `capc`/`capt`/`capm` now set `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` on their
+  Job Object: a wrapper killed non-cooperatively from outside (`taskkill`
+  without `/T`, a crash) no longer leaves orphaned grandchild processes (e.g.
+  a linker spawned by a build) running unbounded outside the resource limit -
+  Windows itself terminates everything still in the job when the last job
+  handle dies with the wrapper. Normal exits are unaffected: the job is
+  already empty by the time the wrapper closes its own handle.
 
 ## [0.1.0] - 2026-09-02
 

@@ -79,6 +79,28 @@ public static class CaptLauncher
         public uint SchedulingClass;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    struct IO_COUNTERS
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool CreateProcess(string lpApplicationName, StringBuilder lpCommandLine,
         IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles,
@@ -110,8 +132,9 @@ public static class CaptLauncher
     static extern bool CloseHandle(IntPtr hObject);
 
     const uint CREATE_SUSPENDED = 0x00000004;
-    const int JobObjectBasicLimitInformation = 2;
+    const int JobObjectExtendedLimitInformation = 9;
     const uint JOB_OBJECT_LIMIT_AFFINITY = 0x00000010;
+    const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
 
     // Standard MSVCRT/CommandLineToArgvW quoting: safe for a directly-launched .exe's
     // own argv parsing. No cmd.exe involved on this path, so none of its operator or
@@ -170,18 +193,31 @@ public static class CaptLauncher
         IntPtr hThread = IntPtr.Zero;
         try
         {
-            var limitInfo = new JOBOBJECT_BASIC_LIMIT_INFORMATION
+            // KILL_ON_JOB_CLOSE: the cleanup in the finally below only runs if this
+            // launcher process survives to execute it. Killed from outside (taskkill
+            // without /T, a crash), nothing in-process ever runs - without this flag
+            // the last job handle dying with the process would leave every process
+            // still assigned to the job running on, untracked and unmanaged. With
+            // it, Windows itself terminates the whole job at that moment. On the
+            // normal path this never fires: the wait below has already reaped the
+            // child (emptying the job) before the finally closes hJob.
+            // Set via the EXTENDED info class: JobObjectBasicLimitInformation
+            // rejects this flag with ERROR_INVALID_PARAMETER.
+            var extInfo = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
             {
-                LimitFlags = JOB_OBJECT_LIMIT_AFFINITY,
-                Affinity = (UIntPtr)affinityMask
+                BasicLimitInformation = new JOBOBJECT_BASIC_LIMIT_INFORMATION
+                {
+                    LimitFlags = JOB_OBJECT_LIMIT_AFFINITY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                    Affinity = (UIntPtr)affinityMask
+                }
             };
-            int size = Marshal.SizeOf(limitInfo);
+            int size = Marshal.SizeOf(extInfo);
             IntPtr ptr = Marshal.AllocHGlobal(size);
             bool ok;
             try
             {
-                Marshal.StructureToPtr(limitInfo, ptr, false);
-                ok = SetInformationJobObject(hJob, JobObjectBasicLimitInformation, ptr, (uint)size);
+                Marshal.StructureToPtr(extInfo, ptr, false);
+                ok = SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, ptr, (uint)size);
             }
             finally
             {

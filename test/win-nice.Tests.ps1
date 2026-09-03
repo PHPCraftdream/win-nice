@@ -457,16 +457,16 @@ Write-Output ("{0:N1}" -f $pct)
         # not absolute ones - an absolute "baseline must exceed cap+20" gate was
         # tried and rejected valid signal on a loaded machine (baseline=37.3,
         # capped=25.6 - a real, working cap - got skipped for "baseline too low").
-        # 8 attempts, not 5: a sustained contention spike (e.g. this test running
+        # 10 attempts, not 8: a sustained contention spike (e.g. this test running
         # right after a long, heavy back-to-back Pester run) can poison every
-        # attempt's baseline in a 5-attempt window too - confirmed again:
-        # isolated re-run passed cleanly in 9.8s immediately after a 5-attempt
-        # exhaustion inside a run with heavy concurrent background load
-        # (baseline=30.7 < cap*1.15=34.5 on every attempt, cap=30).
+        # attempt's baseline in an 8-attempt window too - confirmed again:
+        # isolated re-run passed cleanly in 10.0s immediately after an 8-attempt
+        # exhaustion inside a full-suite run (206 passed/1 failed/3 skipped, 338s)
+        # with heavy concurrent process-spawning load from other Describe blocks.
         $passed = $false
         $lastBaseline = $null
         $lastCapped = $null
-        for ($attempt = 1; $attempt -le 8 -and -not $passed; $attempt++) {
+        for ($attempt = 1; $attempt -le 10 -and -not $passed; $attempt++) {
             $baseline = [double](powershell -NoProfile -File $burnFile $threads $seconds)
             $cappedOut = & (Join-Path $bin 'capc.bat') $cap powershell -NoProfile -File $burnFile $threads $seconds
             $capped = [double]($cappedOut | Select-Object -Last 1)
@@ -505,6 +505,8 @@ $fallbackPercentTools = @(
     @{ Name = 'capc'; Prefix = @('50') }
     @{ Name = 'capt'; Prefix = @('1') }
     @{ Name = 'capm'; Prefix = @('100m') }
+    @{ Name = 'caps'; Prefix = @('30') }
+    @{ Name = 'capn'; Prefix = @('10') }
 )
 
 Describe '%-fail-closed on the cmd.exe fallback path' {
@@ -566,6 +568,8 @@ $spacedFallbackTools = @(
     @{ Name = 'capc'; Prefix = @('50') }
     @{ Name = 'capt'; Prefix = @('1') }
     @{ Name = 'capm'; Prefix = @('100m') }
+    @{ Name = 'caps'; Prefix = @('30') }
+    @{ Name = 'capn'; Prefix = @('10') }
 )
 
 Describe 'cmd.exe fallback quoting survives a target path containing a space (<Name>)' {
@@ -1570,12 +1574,19 @@ function New-LauncherFaultProbe {
 }
 
 # The 8 non-Job launchers share a byte-identical Run() body (verified), and so
-# do the 3 Job-Object ones, so these two compiled probes are enough to cover
+# do 2 of the 4 original Job-Object ones - but caps's and capn's Run() bodies
+# are NOT byte-identical to the other Job launchers (caps's first Run()
+# argument is a timeout in ms that bounds WaitForSingleObject, plus a
+# WAIT_TIMEOUT branch the others don't have; capn's first Run() argument is an
+# active-process count whose distinguishing struct field is ActiveProcessLimit
+# (uint), not Affinity (UIntPtr)), which is exactly why they get their own
+# compiled probe entries below. These two probes are still enough to cover
 # every FAILURE branch in detail. But a byte-identical body is only a claim
 # about SOURCE TEXT - the source-shape guard below checks it textually, and
-# neither that nor these two probes ever actually RUNS admin/cy/cx/capt/capm's
-# own compiled Run(). $script:allLauncherProbes (below) compiles and executes
-# all 11, closing that gap with a success-path smoke test per file.
+# neither that nor these two probes ever actually RUNS
+# admin/cy/cx/capt/capm/caps/capn's own compiled Run(). $script:allLauncherProbes
+# (below) compiles and executes all 13, closing that gap with a success-path
+# smoke test per file.
 $script:probePriority = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'idle.ps1') `
     -Namespace 'WinNiceFaultProbePriority' -ClassName 'IdleLauncher'
 $script:probeJob = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'capc.ps1') `
@@ -1595,6 +1606,8 @@ $script:allLauncherProbes = [ordered]@{
     capc        = $script:probeJob
     capt        = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'capt.ps1') -Namespace 'WinNiceFaultProbePint' -ClassName 'CaptLauncher' -JobObject
     capm        = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'capm.ps1') -Namespace 'WinNiceFaultProbeCapm' -ClassName 'CapmLauncher' -JobObject
+    caps        = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'caps.ps1') -Namespace 'WinNiceFaultProbeCaps' -ClassName 'CapsLauncher' -JobObject
+    capn        = New-LauncherFaultProbe -Ps1Path (Join-Path $bin 'capn.ps1') -Namespace 'WinNiceFaultProbeCapn' -ClassName 'CapnLauncher' -JobObject
 }
 
 # Kills a probe child that survived a failed assertion (a successful test's
@@ -1622,8 +1635,12 @@ function Wait-ProbeChildGone {
 
 # One row per launcher file, describing how to call ITS Run() - the embedded
 # C# signature differs by shape (see docs/plans/2026-09-02-safehandle-fault-
-# injection-plan.md section 1.1): JobArg is non-null only for the 3 Job Object
-# launchers (percent/affinity-mask/memory-bytes as their first argument),
+# injection-plan.md section 1.1): JobArg is non-null only for the 4 Job Object
+# launchers (percent/affinity-mask/memory-bytes/timeout-ms/active-process-count
+# as their first argument - caps's JobArg is its timeout in ms, which bounds its
+# WaitForSingleObject; capn's is its active-process count; neither ever makes a
+# test slow, since the smoke child exits instantly and every fault case either
+# fails before the wait or makes the wait fail immediately),
 # HasPriorityFlag is true only for the 5 launchers that take a raw
 # dwCreationFlags priority value, and both are absent for cy/cx/admin (no
 # first argument at all). ExpectedHandles is ClosedHandles.Count on a clean
@@ -1642,9 +1659,15 @@ $launcherExecCases = @(
     @{ Name = 'capc';        HasPriorityFlag = $null;  JobArg = 50;         ExpectedHandles = 3 }
     @{ Name = 'capt';        HasPriorityFlag = $null;  JobArg = 1;          ExpectedHandles = 3 }
     @{ Name = 'capm';        HasPriorityFlag = $null;  JobArg = 209715200;  ExpectedHandles = 3 }
+    @{ Name = 'caps';        HasPriorityFlag = $null;  JobArg = 10000;      ExpectedHandles = 3 }
+    @{ Name = 'capn';        HasPriorityFlag = $null;  JobArg = 10;         ExpectedHandles = 3 }
 )
-# Just the 3 Job Object launchers, for fault cases that only exist on that
+# Just the 5 Job Object launchers, for fault cases that only exist on that
 # shape (ResumeThread/AssignProcessToJobObject/SetInformationJobObject).
+# caps and capn join automatically by filtering on non-null JobArg - caps's
+# Run() first argument IS the timeout in ms and capn's is its active-process
+# count, the exact same call shape Invoke-LauncherProbe
+# below already uses for every Job launcher, so no per-launcher special case.
 $jobLauncherCases = @($launcherExecCases | Where-Object { $null -ne $_.JobArg })
 
 function Invoke-LauncherProbe {
@@ -1683,7 +1706,7 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
         $t::ResetProbe()
     }
 
-    It 'reports the TerminateProcess failure alongside the original error, and leaves the child running, when the best-effort kill itself fails (<Name>)' -TestCases $launcherExecCases {
+    It 'reports the TerminateProcess failure alongside the original error when the best-effort kill itself fails (<Name>)' -TestCases $launcherExecCases {
         param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles)
         $t = $script:allLauncherProbes[$Name]
         $t::ResetProbe()
@@ -1700,10 +1723,19 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
         $t::ClosedHandles.Count | Should Be $ExpectedHandles
         (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be $ExpectedHandles
         $t::CloseHandleFailures | Should Be 0
-        # The probe's TerminateProcess never called through to the real one, so
-        # the child genuinely must still be alive - proving the message above
-        # isn't silently overclaiming a kill that didn't actually happen.
-        (Get-Process -Id $t::LastProcessId -ErrorAction SilentlyContinue) | Should Not Be $null
+        # The probe's TerminateProcess never called through to the real one -
+        # proving the message above isn't silently overclaiming a kill that
+        # didn't actually happen. What kills the child then differs by shape:
+        # non-Job launchers have no job, nothing else kills it, so it must
+        # still be running here. Job-Object launchers' finally closes hJob (the
+        # last job handle) after the throw, and KILL_ON_JOB_CLOSE makes Windows
+        # terminate the child even though the in-process kill failed - assert
+        # the cascade's outcome, with the same bounded poll as elsewhere.
+        if ($null -eq $JobArg) {
+            (Get-Process -Id $t::LastProcessId -ErrorAction SilentlyContinue) | Should Not Be $null
+        } else {
+            (Wait-ProbeChildGone -ProcessId $t::LastProcessId) | Should Be $true
+        }
         Remove-ProbeChild -ProcessId $t::LastProcessId
         $t::ResetProbe()
     }
@@ -1826,13 +1858,13 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
 # $launcherExecCases (defined above, alongside Invoke-LauncherProbe) drives
 # both the failure-branch Describe above and this one - the source-shape
 # guard below checks the other files' SOURCE TEXT matches the same template,
-# but neither that nor a fault case alone proves admin/cy/cx/capt/capm's own
+# but neither that nor a fault case alone proves admin/cy/cx/capt/capm/caps/capn's own
 # compiled Run() actually executes correctly end to end. This closes that
-# gap: every one of the 11 gets a real success-path execution, proving each
+# gap: every one of the 13 gets a real success-path execution, proving each
 # file's unique body (comment wording, per-tool struct/flag differences)
 # still compiles, links, and runs correctly - not just that a line count
 # matches.
-Describe 'fault-injection probes actually execute all 11 launcher files (not just idle/capc)' {
+Describe 'fault-injection probes actually execute all 13 launcher files (not just idle/capc)' {
     It 'runs Run() for real, propagates the exit code, and closes the expected handle count (<Name>)' -TestCases $launcherExecCases {
         param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles)
         $t = $script:allLauncherProbes[$Name]
@@ -1860,6 +1892,8 @@ $launcherSourceFiles = @(
     @{ Name = 'capc';        Shape = 'Job' }
     @{ Name = 'capt';        Shape = 'Job' }
     @{ Name = 'capm';        Shape = 'Job' }
+    @{ Name = 'caps';        Shape = 'Job' }
+    @{ Name = 'capn';        Shape = 'Job' }
 )
 
 Describe 'embedded launcher C# keeps the single-owner cleanup shape (<Name>)' {
@@ -1877,8 +1911,464 @@ Describe 'embedded launcher C# keeps the single-owner cleanup shape (<Name>)' {
     }
 }
 
+Describe 'Job Object kill-on-close cascade when the launcher is killed non-cooperatively (capc.ps1)' {
+    It 'terminates the wrapped child and its grandchild when the launcher itself is taskkilled /F without /T' {
+        $marker = 'win-nice-cascade-' + [guid]::NewGuid().ToString('N')
+        $childPidFile = New-TempFile
+        $grandchildPidFile = New-TempFile
+        # The grandchild script's own path carries the unique marker, it writes
+        # its PID, and it self-terminates on a bounded deadline - so a failure
+        # path can never leak a live process even if an assertion below aborts.
+        $grandchildFile = Join-Path $script:testRoot ($marker + '.ps1')
+        Set-Content -Path $grandchildFile -Value @"
+`$deadline = [DateTime]::UtcNow.AddSeconds(60)
+Set-Content -Path '$grandchildPidFile' -Value `$PID
+while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
+"@
+        # Same rule as every other multi-hop test in this file: nested scripts go
+        # in temp FILES, never inline -Command strings (triple-nested quoting).
+        # The child writes its PID, spawns the grandchild, then sleeps - long
+        # enough to still be alive when the test kills the launcher mid-flight,
+        # bounded so a failure path can't wedge the suite.
+        $outerFile = New-TempScript
+        Set-Content -Path $outerFile -Value @"
+Set-Content -Path '$childPidFile' -Value `$PID
+Start-Process powershell -ArgumentList @('-NoProfile', '-File', '$grandchildFile') -WindowStyle Hidden | Out-Null
+Start-Sleep -Seconds 60
+"@
+        $launcher = Start-Process powershell -ArgumentList @('-NoProfile', '-File', (Join-Path $bin 'capc.ps1'), '50', 'powershell', '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
+        $childPid = 0
+        $grandchildPid = 0
+        try {
+            # Bounded wait until BOTH the child and its grandchild are confirmed
+            # running - killing the launcher only proves anything once the
+            # grandchild is really inside the job.
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            while ([DateTime]::UtcNow -lt $deadline) {
+                if ($childPid -eq 0 -and (Test-Path $childPidFile)) {
+                    $childPid = [int](Get-Content $childPidFile | Select-Object -First 1)
+                }
+                if ($childPid -ne 0 -and $grandchildPid -eq 0 -and (Test-Path $grandchildPidFile)) {
+                    $grandchildPid = [int](Get-Content $grandchildPidFile | Select-Object -First 1)
+                }
+                if ($childPid -ne 0 -and $grandchildPid -ne 0) { break }
+                Start-Sleep -Milliseconds 100
+            }
+            $childPid | Should Not Be 0
+            $grandchildPid | Should Not Be 0
+            (Get-Process -Id $childPid -ErrorAction SilentlyContinue) | Should Not Be $null
+            (Get-Process -Id $grandchildPid -ErrorAction SilentlyContinue) | Should Not Be $null
+
+            # The bug scenario itself: /F = hard kill (no in-process cleanup can
+            # run), and deliberately NO /T - any tree-wide cleanup must come from
+            # the job's kill-on-close cascade, not from taskkill itself.
+            & taskkill /F /PID $launcher.Id | Out-Null
+            $LASTEXITCODE | Should Be 0
+            (Wait-ProbeChildGone -ProcessId $launcher.Id -TimeoutMs 10000) | Should Be $true
+
+            # Cascade assertion, bounded poll (job termination completes
+            # asynchronously - an instant check is a documented race here).
+            (Wait-ProbeChildGone -ProcessId $grandchildPid -TimeoutMs 15000) | Should Be $true
+            (Wait-ProbeChildGone -ProcessId $childPid -TimeoutMs 15000) | Should Be $true
+        } finally {
+            # Best-effort cleanup on every path - a failed assertion above must
+            # not leave the launcher, child, or grandchild running (the two
+            # generated scripts also self-terminate within 60s as a backstop).
+            if ($launcher -and -not $launcher.HasExited) { Stop-Process -Id $launcher.Id -Force -ErrorAction SilentlyContinue }
+            if ($childPid -gt 0) { Remove-ProbeChild -ProcessId $childPid }
+            if ($grandchildPid -gt 0) { Remove-ProbeChild -ProcessId $grandchildPid }
+            Remove-Item $childPidFile, $grandchildPidFile, $grandchildFile, $outerFile -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'sets JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE in every Job-Object launcher (<Name>)' -TestCases @(
+        @{ Name = 'capc' }
+        @{ Name = 'capt' }
+        @{ Name = 'capm' }
+        @{ Name = 'caps' }
+        @{ Name = 'capn' }
+    ) {
+        param($Name)
+        # Textual companion to the behavioral cascade test above (which exercises
+        # capc only): the flag must be present AND OR'd into a LimitFlags
+        # assignment in all five files, so a future edit can't silently drop it
+        # from capt/capm/caps/capn while the capc-only cascade stays green.
+        $src = Get-LauncherCSharp -Ps1Path (Join-Path $bin "$Name.ps1")
+        $src | Should Match ([regex]::Escape('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000'))
+        $src | Should Match 'LimitFlags\s*=\s*[^;\r\n]*JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE'
+    }
+}
+
+Describe 'caps.ps1 argument validation' {
+    # Same driver pattern as capm/capc validation tests: through the .bat wrapper
+    # (real user entry point), stderr discarded, only the exit code asserted.
+    It 'rejects a non-numeric seconds value' {
+        & (Join-Path $bin 'caps.bat') abc cmd /c "echo hi" 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'rejects 0' {
+        & (Join-Path $bin 'caps.bat') 0 cmd /c "echo hi" 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'rejects a negative value' {
+        & (Join-Path $bin 'caps.bat') -1 cmd /c "echo hi" 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'rejects a missing command' {
+        & (Join-Path $bin 'caps.bat') 5 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'rejects a huge 400-digit <seconds> cleanly with the usage error - no raw PowerShell conversion error leaked' {
+        # Same TryParse rationale as capm's huge-digit test above: the regex has
+        # no length limit, so an absurdly long digit string must fail cleanly
+        # into the controlled usage error rather than crash with a raw cast
+        # error. Whitespace-normalize before matching (Pester-console word-wrap).
+        $digits = '9' * 400
+        $out = & (Join-Path $bin 'caps.bat') $digits cmd /c "echo hi" 2>&1
+        $LASTEXITCODE | Should Be 1
+        (($out | Out-String) -replace '\s+', ' ') | Should Match 'out of range'
+        (($out | Out-String) -replace '\s+', ' ') | Should Not Match 'Cannot convert value'
+    }
+
+    It 'rejects a seconds value whose millisecond conversion overflows the uint32/INFINITE boundary (<Seconds>)' -TestCases @(
+        @{ Seconds = '4294967295' }
+        @{ Seconds = '4294967.3' }
+    ) {
+        param($Seconds)
+        # 0xFFFFFFFF ms is WaitForSingleObject's wait-forever sentinel, not a
+        # deadline - anything converting to more than 0xFFFFFFFE ms must be the
+        # clean usage error. The decimal case is the same guard for a fractional
+        # seconds value whose *1000 conversion crosses the boundary (a value
+        # that looks small in seconds but overflows in milliseconds).
+        & (Join-Path $bin 'caps.bat') $Seconds cmd /c "echo hi" 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'shows the out-of-range usage error (not a crash) for the overflowing decimal value' {
+        $out = & (Join-Path $bin 'caps.bat') 4294967.3 cmd /c "echo hi" 2>&1
+        $LASTEXITCODE | Should Be 1
+        (($out | Out-String) -replace '\s+', ' ') | Should Match 'out of range'
+    }
+
+    It 'accepts a seconds value just under the boundary and propagates the wrapped exit code' {
+        # 4294967 seconds = 4,294,967,000 ms <= 4,294,967,294 (0xFFFFFFFE) - the
+        # deadline is accepted and only BOUNDS the wait, never delays it: the
+        # child exits instantly, so this must be fast.
+        & (Join-Path $bin 'caps.bat') 4294967 cmd /c "exit 0"
+        $LASTEXITCODE | Should Be 0
+    }
+}
+
+Describe 'caps.ps1 behavior' {
+    It 'propagates the wrapped exit code when the command finishes inside the timeout' {
+        & (Join-Path $bin 'caps.bat') 30 cmd /c "exit 7"
+        $LASTEXITCODE | Should Be 7
+    }
+
+    It 'times out at the deadline, kills the wrapped child, and exits 124 with a stderr message' {
+        $childPidFile = New-TempFile
+        # Generated as a temp FILE (never inline -Command), same pattern as the
+        # cascade test: writes its PID, then sleeps up to a bounded 60s
+        # self-terminate deadline so a failure path can't wedge the suite.
+        $hungFile = New-TempScript
+        Set-Content -Path $hungFile -Value @"
+`$deadline = [DateTime]::UtcNow.AddSeconds(60)
+Set-Content -Path '$childPidFile' -Value `$PID
+while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
+"@
+        try {
+            $stderr = & powershell -NoProfile -File (Join-Path $bin 'caps.ps1') 2 powershell -NoProfile -File $hungFile 2>&1
+            $exitCode = $LASTEXITCODE
+            $exitCode | Should Be 124
+            # The console word-wraps Write-Error text (same technique as the
+            # "%"-fail-closed assertion), so match whitespace-normalized text.
+            # Two fragments rather than one full sentence: the 2>&1 capture
+            # interleaves the NativeCommandError/CategoryInfo boilerplate
+            # BETWEEN the wrapped halves of the message ("...were <boilerplate>
+            # force-killed"), which no amount of whitespace collapsing removes.
+            $normalized = (($stderr | Out-String) -replace '\s+', ' ')
+            $normalized | Should Match ([regex]::Escape('caps: timed out after 2s'))
+            $normalized | Should Match ([regex]::Escape('force-killed'))
+            $childPid = [int](Get-Content $childPidFile | Select-Object -First 1)
+            (Wait-ProbeChildGone -ProcessId $childPid -TimeoutMs 15000) | Should Be $true
+        } finally {
+            if (Test-Path $childPidFile) {
+                Remove-ProbeChild -ProcessId ([int](Get-Content $childPidFile | Select-Object -First 1)) -ErrorAction SilentlyContinue
+            }
+            Remove-Item $childPidFile, $hungFile -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'kills the wrapped child AND its grandchild when the timeout fires' {
+        # Same structure as the capc kill-on-close cascade test, but here nobody
+        # taskkills anything - the deadline ITSELF is the kill being tested:
+        # caps must exit 124 on its own at ~5s and the job's termination must
+        # take both generations with it.
+        $childPidFile = New-TempFile
+        $grandchildPidFile = New-TempFile
+        $grandchildFile = New-TempScript
+        Set-Content -Path $grandchildFile -Value @"
+`$deadline = [DateTime]::UtcNow.AddSeconds(60)
+Set-Content -Path '$grandchildPidFile' -Value `$PID
+while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
+"@
+        # Nested scripts in temp FILES, never inline -Command strings (same
+        # rule as every other multi-hop test in this file).
+        $outerFile = New-TempScript
+        Set-Content -Path $outerFile -Value @"
+Set-Content -Path '$childPidFile' -Value `$PID
+Start-Process powershell -ArgumentList @('-NoProfile', '-File', '$grandchildFile') -WindowStyle Hidden | Out-Null
+Start-Sleep -Seconds 60
+"@
+        $launcher = Start-Process powershell -ArgumentList @('-NoProfile', '-File', (Join-Path $bin 'caps.ps1'), '5', 'powershell', '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
+        $childPid = 0
+        $grandchildPid = 0
+        try {
+            # Bounded wait until BOTH pid files exist and BOTH processes are
+            # confirmed alive - this ordering is what proves the grandchild was
+            # already inside the job BEFORE the 5s deadline fired (otherwise a
+            # pass could just mean the grandchild never started).
+            $deadline = [DateTime]::UtcNow.AddSeconds(4)
+            while ([DateTime]::UtcNow -lt $deadline) {
+                if ($childPid -eq 0 -and (Test-Path $childPidFile)) {
+                    $childPid = [int](Get-Content $childPidFile | Select-Object -First 1)
+                }
+                if ($childPid -ne 0 -and $grandchildPid -eq 0 -and (Test-Path $grandchildPidFile)) {
+                    $grandchildPid = [int](Get-Content $grandchildPidFile | Select-Object -First 1)
+                }
+                if ($childPid -ne 0 -and $grandchildPid -ne 0 -and
+                    (Get-Process -Id $childPid -ErrorAction SilentlyContinue) -and
+                    (Get-Process -Id $grandchildPid -ErrorAction SilentlyContinue)) { break }
+                Start-Sleep -Milliseconds 100
+            }
+            $childPid | Should Not Be 0
+            $grandchildPid | Should Not Be 0
+            (Get-Process -Id $childPid -ErrorAction SilentlyContinue) | Should Not Be $null
+            (Get-Process -Id $grandchildPid -ErrorAction SilentlyContinue) | Should Not Be $null
+
+            # caps exits BY ITSELF at the deadline - nobody kills the launcher.
+            (Wait-ProbeChildGone -ProcessId $launcher.Id -TimeoutMs 15000) | Should Be $true
+            $launcher.ExitCode | Should Be 124
+
+            # Cascade assertions, bounded polls (job termination completes
+            # asynchronously - an instant check is a documented race).
+            (Wait-ProbeChildGone -ProcessId $grandchildPid -TimeoutMs 15000) | Should Be $true
+            (Wait-ProbeChildGone -ProcessId $childPid -TimeoutMs 15000) | Should Be $true
+        } finally {
+            # Best-effort cleanup on every path (the generated scripts also
+            # self-terminate within 60s as a backstop).
+            if ($launcher -and -not $launcher.HasExited) { Stop-Process -Id $launcher.Id -Force -ErrorAction SilentlyContinue }
+            if ($childPid -gt 0) { Remove-ProbeChild -ProcessId $childPid }
+            if ($grandchildPid -gt 0) { Remove-ProbeChild -ProcessId $grandchildPid }
+            Remove-Item $childPidFile, $grandchildPidFile, $grandchildFile, $outerFile -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'capn.ps1 argument validation' {
+    # Same driver pattern as capc/capt/capm/caps validation tests: through the
+    # .bat wrapper (real user entry point), stderr discarded, only the exit
+    # code asserted.
+    It 'rejects a non-numeric count' {
+        & (Join-Path $bin 'capn.bat') abc cmd /c "echo hi" 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'rejects 0' {
+        & (Join-Path $bin 'capn.bat') 0 cmd /c "echo hi" 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'rejects a negative count' {
+        & (Join-Path $bin 'capn.bat') -1 cmd /c "echo hi" 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'rejects a missing command' {
+        & (Join-Path $bin 'capn.bat') 5 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'rejects a huge 400-digit <count> cleanly with the usage error - no raw PowerShell conversion error leaked' {
+        # Same TryParse rationale as capm/caps's huge-digit tests above: the
+        # parse has no length limit, so an absurdly long digit string must fail
+        # cleanly into the controlled usage error rather than crash with a raw
+        # cast error. Whitespace-normalize before matching (Pester-console
+        # word-wrap).
+        $digits = '9' * 400
+        $out = & (Join-Path $bin 'capn.bat') $digits cmd /c "echo hi" 2>&1
+        $LASTEXITCODE | Should Be 1
+        (($out | Out-String) -replace '\s+', ' ') | Should Match 'usage: capn'
+        (($out | Out-String) -replace '\s+', ' ') | Should Not Match 'Cannot convert value'
+    }
+
+    It 'rejects a count above the uint32 ActiveProcessLimit boundary (<Count>)' -TestCases @(
+        @{ Count = '4294967296' }
+        @{ Count = '99999999999' }
+    ) {
+        param($Count)
+        # 4294967295 (0xFFFFFFFF) is the largest value the uint32
+        # ActiveProcessLimit struct field can hold; anything above it must be
+        # the clean usage error, never a silently wrapped/truncated limit.
+        & (Join-Path $bin 'capn.bat') $Count cmd /c "echo hi" 2>&1 | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+
+    It 'accepts a count at the uint32 boundary and propagates the wrapped exit code' {
+        # 4294967295 is the uint32 maximum - a valid ActiveProcessLimit. The
+        # child exits instantly, so the huge ceiling never delays anything.
+        & (Join-Path $bin 'capn.bat') 4294967295 cmd /c "exit 0"
+        $LASTEXITCODE | Should Be 0
+    }
+}
+
+Describe 'capn.ps1 behavior' {
+    It 'propagates the wrapped exit code when the command stays under the limit' {
+        & (Join-Path $bin 'capn.bat') 10 cmd /c "exit 7"
+        $LASTEXITCODE | Should Be 7
+    }
+
+    It 'runs a wrapped command with 2 children normally under a limit of 3 (nothing is refused inside the budget)' {
+        # Wrapped parent + 2 simultaneously-alive children = exactly 3 active
+        # processes against a ceiling of 3, so every spawn must succeed. The
+        # children self-terminate on a bounded 10s sleep, and the finally kills
+        # them, so a failure path can't leak live processes.
+        $out = New-TempFile
+        $script = @'
+$ErrorActionPreference = 'Stop'
+$p1 = Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 10') -WindowStyle Hidden -PassThru
+$p2 = Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 10') -WindowStyle Hidden -PassThru
+try {{
+    Start-Sleep -Seconds 2
+    $a1 = $null -ne (Get-Process -Id $p1.Id -ErrorAction SilentlyContinue)
+    $a2 = $null -ne (Get-Process -Id $p2.Id -ErrorAction SilentlyContinue)
+    Set-Content -Path '{0}' -Value "CHILD1-ALIVE=$a1 CHILD2-ALIVE=$a2"
+}} finally {{
+    Stop-Process -Id $p1.Id, $p2.Id -Force -ErrorAction SilentlyContinue
+}}
+exit 0
+'@ -f $out
+        $scriptFile = New-TempScript
+        Set-Content -Path $scriptFile -Value $script
+        & (Join-Path $bin 'capn.bat') 3 powershell -NoProfile -File $scriptFile
+        $LASTEXITCODE | Should Be 0
+        (Get-Content $out).Trim() | Should Be 'CHILD1-ALIVE=True CHILD2-ALIVE=True'
+        Remove-Item $out, $scriptFile -ErrorAction SilentlyContinue
+    }
+
+    It 'refuses an over-limit child spawn without killing the wrapped process (limit 1: the wrapped process itself fills the job)' {
+        # The count includes the directly wrapped process: it is assigned to
+        # the still-empty job before it can spawn anything, so at limit 1 the
+        # wrapped command runs but its very first child-spawn attempt fails.
+        # The marker file is written AFTER the failed spawn attempt and proves
+        # the wrapped process itself was not killed - only the excess spawn
+        # was refused (confirmed empirically before writing this test: the
+        # spawn surfaces "Not enough quota is available to process this
+        # command." and the parent goes on running).
+        $out = New-TempFile
+        $script = @'
+$ErrorActionPreference = 'Stop'
+$spawnFailed = $false
+try {{
+    Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 10') -WindowStyle Hidden | Out-Null
+}} catch {{
+    $spawnFailed = $true
+}}
+# Written after the failed spawn: proves the wrapped process kept running -
+# the limit refused the child, it did not kill the parent.
+Set-Content -Path '{0}' -Value "SPAWN-FAILED=$spawnFailed PARENT-STILL-RUNNING=$PID"
+exit 0
+'@ -f $out
+        $scriptFile = New-TempScript
+        Set-Content -Path $scriptFile -Value $script
+        & (Join-Path $bin 'capn.bat') 1 powershell -NoProfile -File $scriptFile
+        $LASTEXITCODE | Should Be 0
+        (Get-Content $out).Trim() | Should Match 'SPAWN-FAILED=True PARENT-STILL-RUNNING=\d+'
+        Remove-Item $out, $scriptFile -ErrorAction SilentlyContinue
+    }
+
+    It 'terminates the wrapped child and its grandchild when the capn launcher itself is taskkilled /F without /T (KILL_ON_JOB_CLOSE cascade)' {
+        # Same taskkill-without-/T pattern as the capc-based cascade test
+        # above, proven explicitly for this launcher too: capn's job carries
+        # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE like every Job-Object launcher
+        # here, so a non-cooperatively killed capn wrapper must take the whole
+        # spawned tree down with it - the limit flag is not what does this,
+        # the KILL_ON_JOB_CLOSE flag is, and it must be there independently.
+        $marker = 'win-nice-cascade-' + [guid]::NewGuid().ToString('N')
+        $childPidFile = New-TempFile
+        $grandchildPidFile = New-TempFile
+        # The grandchild script's own path carries the unique marker, it writes
+        # its PID, and it self-terminates on a bounded deadline - so a failure
+        # path can never leak a live process even if an assertion below aborts.
+        $grandchildFile = Join-Path $script:testRoot ($marker + '.ps1')
+        Set-Content -Path $grandchildFile -Value @"
+`$deadline = [DateTime]::UtcNow.AddSeconds(60)
+Set-Content -Path '$grandchildPidFile' -Value `$PID
+while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
+"@
+        # Same rule as every other multi-hop test in this file: nested scripts go
+        # in temp FILES, never inline -Command strings (triple-nested quoting).
+        # The child writes its PID, spawns the grandchild, then sleeps - long
+        # enough to still be alive when the test kills the launcher mid-flight,
+        # bounded so a failure path can't wedge the suite.
+        $outerFile = New-TempScript
+        Set-Content -Path $outerFile -Value @"
+Set-Content -Path '$childPidFile' -Value `$PID
+Start-Process powershell -ArgumentList @('-NoProfile', '-File', '$grandchildFile') -WindowStyle Hidden | Out-Null
+Start-Sleep -Seconds 60
+"@
+        $launcher = Start-Process powershell -ArgumentList @('-NoProfile', '-File', (Join-Path $bin 'capn.ps1'), '10', 'powershell', '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
+        $childPid = 0
+        $grandchildPid = 0
+        try {
+            # Bounded wait until BOTH the child and its grandchild are confirmed
+            # running - killing the launcher only proves anything once the
+            # grandchild is really inside the job.
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            while ([DateTime]::UtcNow -lt $deadline) {
+                if ($childPid -eq 0 -and (Test-Path $childPidFile)) {
+                    $childPid = [int](Get-Content $childPidFile | Select-Object -First 1)
+                }
+                if ($childPid -ne 0 -and $grandchildPid -eq 0 -and (Test-Path $grandchildPidFile)) {
+                    $grandchildPid = [int](Get-Content $grandchildPidFile | Select-Object -First 1)
+                }
+                if ($childPid -ne 0 -and $grandchildPid -ne 0) { break }
+                Start-Sleep -Milliseconds 100
+            }
+            $childPid | Should Not Be 0
+            $grandchildPid | Should Not Be 0
+            (Get-Process -Id $childPid -ErrorAction SilentlyContinue) | Should Not Be $null
+            (Get-Process -Id $grandchildPid -ErrorAction SilentlyContinue) | Should Not Be $null
+
+            # The bug scenario itself: /F = hard kill (no in-process cleanup can
+            # run), and deliberately NO /T - any tree-wide cleanup must come from
+            # the job's kill-on-close cascade, not from taskkill itself.
+            & taskkill /F /PID $launcher.Id | Out-Null
+            $LASTEXITCODE | Should Be 0
+            (Wait-ProbeChildGone -ProcessId $launcher.Id -TimeoutMs 10000) | Should Be $true
+
+            # Cascade assertion, bounded poll (job termination completes
+            # asynchronously - an instant check is a documented race here).
+            (Wait-ProbeChildGone -ProcessId $grandchildPid -TimeoutMs 15000) | Should Be $true
+            (Wait-ProbeChildGone -ProcessId $childPid -TimeoutMs 15000) | Should Be $true
+        } finally {
+            # Best-effort cleanup on every path - a failed assertion above must
+            # not leave the launcher, child, or grandchild running (the two
+            # generated scripts also self-terminate within 60s as a backstop).
+            if ($launcher -and -not $launcher.HasExited) { Stop-Process -Id $launcher.Id -Force -ErrorAction SilentlyContinue }
+            if ($childPid -gt 0) { Remove-ProbeChild -ProcessId $childPid }
+            if ($grandchildPid -gt 0) { Remove-ProbeChild -ProcessId $grandchildPid }
+            Remove-Item $childPidFile, $grandchildPidFile, $grandchildFile, $outerFile -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Describe 'sequential invocation in one PowerShell session' {
-    It 'runs idle/belownormal/abovenormal/high/realtime/capc/capt/capm/cy/cx/admin one after another without an Add-Type type-collision error' {
+    It 'runs idle/belownormal/abovenormal/high/realtime/capc/capt/capm/caps/capn/cy/cx/admin one after another without an Add-Type type-collision error' {
         # Regression test: bare-name resolution (idle args..., not idle.bat) runs the
         # .ps1 in the CURRENT process/AppDomain, not a new one - each of these used to
         # Add-Type an identically-named "Launcher" class, so calling a second one in the
@@ -1886,7 +2376,7 @@ Describe 'sequential invocation in one PowerShell session' {
         # (and, for cy/cx's different Run() signature, could fail outright). Confirmed
         # empirically before the fix; each now has its own unique class name
         # (IdleLauncher, BelowNormalLauncher, ..., CapcLauncher, CaptLauncher, CapmLauncher,
-        # CyLauncher, CxLauncher, AdminLauncher).
+        # CapsLauncher, CapnLauncher, CyLauncher, CxLauncher, AdminLauncher).
         $out = New-TempFile
         $probe = 'Set-Content -Path $env:WIN_NICE_TEST_OUT -Value "ok"'
         $probeFile = New-TempScript
@@ -1910,6 +2400,10 @@ if (`$LASTEXITCODE -ne 0) { throw "capc failed with exit `$LASTEXITCODE" }
 if (`$LASTEXITCODE -ne 0) { throw "capt failed with exit `$LASTEXITCODE" }
 & (Join-Path '$bin' 'capm.ps1') 90 powershell -NoProfile -File '$probeFile'
 if (`$LASTEXITCODE -ne 0) { throw "capm failed with exit `$LASTEXITCODE" }
+& (Join-Path '$bin' 'caps.ps1') 30 powershell -NoProfile -File '$probeFile'
+if (`$LASTEXITCODE -ne 0) { throw "caps failed with exit `$LASTEXITCODE" }
+& (Join-Path '$bin' 'capn.ps1') 10 powershell -NoProfile -File '$probeFile'
+if (`$LASTEXITCODE -ne 0) { throw "capn failed with exit `$LASTEXITCODE" }
 & (Join-Path '$bin' 'cy.ps1')
 if (`$LASTEXITCODE -ne 0) { throw "cy failed with exit `$LASTEXITCODE" }
 & (Join-Path '$bin' 'cx.ps1')

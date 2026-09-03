@@ -198,7 +198,7 @@ Windows PowerShell 5.1 itself at 30 MB crashes it with
 whatever interpreter/runtime the wrapped command needs just to start, on top
 of what your actual workload needs.
 
-**A `capc`/`capt`/`capm` limit sticks to any daemon the wrapped command leaves
+**A `capc`/`capt`/`capm`/`capn` limit sticks to any daemon the wrapped command leaves
 running**, for that daemon's entire lifetime — not just for the wrapped
 command's own run. Job Object membership is permanent for a process once
 assigned (short of an explicit, disallowed breakaway); a background process
@@ -214,6 +214,74 @@ don't leave the daemon running across a call whose limit shouldn't persist
 (`dotnet build -p:UseSharedCompilation=false`, `gradle --no-daemon`), or
 accept that the limit is now effectively attached to the daemon until it's
 killed.
+
+### `caps <seconds> <command> [args...]`
+Runs the command with a hard wall-clock deadline: if it hasn't exited within
+`<seconds>`, it is force-killed and `caps` exits with code **124** (the unix
+`timeout(1)` convention), printing
+`caps: timed out after <seconds>s - job and every process in it were force-killed`
+to stderr. If the command finishes in time, `caps` propagates its exit code
+exactly like every other launcher in this family.
+
+The same "covers the whole subtree from the first instruction" guarantee
+applies: same suspend-then-assign-then-resume Job Object mechanism as
+`capc`/`capt`/`capm`, so at expiry a single `TerminateJobObject` kernel call
+kills the direct child *and every descendant it spawned* — no process-tree
+walking, no window where a grandchild outlives the child. The job carries only
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, which doubles as the backstop if the
+`caps` wrapper itself is killed non-cooperatively (`taskkill` without `/T`, a
+crash): Windows itself then terminates the whole job at that moment.
+
+`<seconds>` accepts a positive whole or decimal number (`2`, `2.5`), converted
+to whole milliseconds (floored; minimum 1 ms). The maximum is 4294967294 ms
+(~49.7 days) because `WaitForSingleObject`'s `dwMilliseconds` is a uint32 whose
+`0xFFFFFFFF` value is reserved as the wait-forever sentinel — anything larger
+is rejected as a usage error (exit 1), never silently truncated into a
+different deadline.
+
+**`caps` sets no resource limit of any kind** — no CPU, memory, priority, or
+affinity limit. It is not a quota tool: `capc`/`capt`/`capm` deliberately
+impose no timeout (a quota tool shouldn't unilaterally decide a legitimate long
+build is stuck — same precedent as `nice`/`cpulimit`); `caps` is the
+complement, for when *you* have already decided that N seconds is the hard
+limit, no matter what.
+
+```
+caps 300 npm test
+```
+
+### `capn <count> <command> [args...]`
+Runs the command under a hard ceiling on the number of **simultaneously active
+processes** in its whole process tree (`JOBOBJECT_BASIC_LIMIT_INFORMATION`,
+`JOB_OBJECT_LIMIT_ACTIVE_PROCESS`) — same suspend-then-assign-then-resume Job
+Object mechanism as `capc`/`capt`/`capm`, so the same "covers the whole subtree
+from the first instruction" and "breakaway fails closed" guarantees apply.
+
+The count **includes the directly wrapped process itself**: it is assigned to
+the still-empty job before it can spawn anything, so `capn 1 <command>` runs
+the command but the instant it tries to spawn any child — including
+infrastructure children like PowerShell's own `Add-Type` compiler (`csc.exe`,
+plus the `CVTRES.EXE` that compiler runs) — that spawn attempt fails.
+Confirmed empirically, not just from docs: under `capn 1`, a wrapped
+PowerShell's `Start-Process` fails with "Not enough quota is available to
+process this command." and the parent keeps running and exits 0.
+
+Unlike a `capc` throttle, exceeding the limit doesn't degrade anything — the
+offending spawn attempt itself is what fails (closer to `capm`'s failed
+allocation): nothing is killed, nothing already running is affected, and the
+wrapped process sees an ordinary process-creation failure from its own spawn
+call. A command that stays within the budget is completely unaffected —
+`capn 3` wrapping a parent that spawns 2 children runs exactly like an
+uncapped one (also confirmed empirically).
+
+`<count>` is a positive whole number, minimum 1, maximum 4294967295 — the
+`ActiveProcessLimit` struct field is a uint32, so anything larger (or
+negative, or non-numeric) is a usage error (exit 1), never a silently
+truncated limit.
+
+```
+capn 10 npm run build
+```
 
 ## Chaining these tools together
 
@@ -269,6 +337,30 @@ each limit type combines differently:**
   Confirmed empirically: `capt 2 capt 3 ...` (inner asking for *more*
   processors than the outer allows) still comes back pinned to the outer's
   2, not the inner's 3 — no error, just silently clamped to the tighter mask.
+- **Process count (`capn`)**: each job enforces its own `ActiveProcessLimit`
+  independently against its own simultaneously-active count — a spawn has to
+  fit under *every* job in the chain at once, and an outer job's count
+  includes the inner wrapper process itself plus everything beneath it. Not a
+  "silently clamped to the tighter limit" rule like affinity, and not a plain
+  `min()`: confirmed empirically, `capn 1 capn 5 ...` fails outright (the
+  outer job is already full with the inner wrapper alone, so the inner
+  wrapper can't even start its target — for a PowerShell-based inner tool
+  this surfaces as its own `Add-Type`/`csc.exe` child spawn being refused,
+  exit 1); `capn 2 capn 5 ...` still fails one step later (the compiler's own
+  `CVTRES.EXE` child doesn't fit); `capn 3 capn 5 ...` works. In the other
+  direction, `capn 5 capn 1 <cmd-that-spawns>` runs the command but its child
+  spawn is refused by the *inner* limit while the outer still has room. Leave
+  real headroom in an outer `capn` for the chain itself — roughly 3 slots
+  before a PowerShell-based inner tool's actual workload even starts.
+- **Timeout (`caps`)**: not a Job Object limit being combined at all — each
+  `caps` enforces its own deadline on its direct child. The innermost `caps`
+  wrapping the eventual work fires at its own deadline and the outer one
+  propagates the inner's 124 exit code like any other tool's. If the *outer*
+  deadline fires first, its `TerminateJobObject` kills the whole subtree
+  including the inner `caps` wrapper — and everything the inner wrapper had
+  assigned to its own job dies with it via that inner job's own
+  `KILL_ON_JOB_CLOSE` flag (the same cascade documented above). Either way the
+  caller sees 124.
 
 Test any combination you actually plan to depend on; don't assume "more
 wrappers, more restrictive" holds uniformly across limit types.
@@ -481,7 +573,7 @@ case - run both for full coverage.
 `npm run release-check` (`scripts/release-check.js`) is a maintainer-only,
 source-checkout-only command that packs the actual npm tarball, installs it
 into an isolated temp directory, and verifies the real installed artifact
-(launcher file set, manifest version, `capc`/`capt`/`capm` exit-code smoke
+(launcher file set, manifest version, `capc`/`capt`/`capm`/`caps`/`capn` exit-code smoke
 tests, and CHANGELOG/tag consistency) - this is what `publish.yml` runs right
 before `npm publish`. It needs `scripts/` and git tag history, neither of
 which is part of the published package, so it can't run against an installed

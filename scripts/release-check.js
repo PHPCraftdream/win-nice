@@ -44,15 +44,61 @@ function fail(msg) {
   process.exitCode = 1;
 }
 
-// Full contract: each of the 12 tools ships exactly 3 entry points
-// (extensionless Git Bash shim, .bat, .ps1) - 36 files total - and the 6
+// Full contract: each of the 14 tools ships exactly 3 entry points
+// (extensionless Git Bash shim, .bat, .ps1) - 42 files total - and the 6
 // pre-rename legacy names (cap/pint, renamed to capc/capt) must never
 // reappear in a real install.
 const expectedTools = [
   'idle', 'belownormal', 'abovenormal', 'high', 'realtime',
-  'capc', 'capt', 'capm', 'admin', 'uiup', 'cy', 'cx',
+  'capc', 'capt', 'capm', 'caps', 'capn', 'admin', 'uiup', 'cy', 'cx',
 ];
 const expectedFiles = expectedTools.flatMap((t) => [t, `${t}.bat`, `${t}.ps1`]);
+
+// Same 42 paths the bin/ check below compares, hoisted here so the
+// whole-tarball allowlist can build on them (and so
+// test/release-check-allowlist.test.js can import the full contract without
+// running the gate).
+const expectedBinPaths = expectedFiles.map((f) => `bin/${f}`);
+
+// package.json's `files` whitelist ships install/ and skills/ whole too, so
+// a stray file anywhere - not just bin/ - gets packed into the real
+// published tarball. Deliberately a hardcoded literal list, not a scan of
+// install/ and skills/: the point is to catch a file that exists on disk but
+// must not ship, and a scan would just bless whatever happens to be there.
+// 54 paths = 42 launchers + 6 install/*.js + skills/win-nice/SKILL.md +
+// package.json (always packed by npm even though it is not listed in
+// `files`) + the 4 whitelisted root docs/licenses.
+const expectedNonBinPaths = [
+  'install/cli.js',
+  'install/install.js',
+  'install/manifest.js',
+  'install/paths.js',
+  'install/skill.js',
+  'install/uninstall.js',
+  'skills/win-nice/SKILL.md',
+  'package.json',
+  'README.md',
+  'CHANGELOG.md',
+  'LICENSE-MIT',
+  'LICENSE-APACHE',
+];
+const expectedTarballPaths = [...expectedBinPaths, ...expectedNonBinPaths];
+
+function diffTarballPaths(packedPaths) {
+  return {
+    missing: expectedTarballPaths.filter((p) => !packedPaths.includes(p)),
+    extra: packedPaths.filter((p) => !expectedTarballPaths.includes(p)),
+  };
+}
+
+// Required as a module (test/release-check-allowlist.test.js): expose the
+// pure allowlist data/comparator without running the gate. A top-level
+// return is valid CommonJS; executed directly (npm run release-check),
+// execution falls through to the gate below.
+if (require.main !== module) {
+  module.exports = { expectedTarballPaths, diffTarballPaths };
+  return;
+}
 
 // Resources are declared before the try so a failure during npm pack itself
 // (bad JSON, npm error, mkdtempSync failure) still lets the finally clean up
@@ -76,12 +122,11 @@ try {
     // stray file dropped in there gets packed - but install/'s
     // listSourceFiles() only installs .bat/.ps1/extensionless names, so the
     // installed-manifest check below would still pass green and never notice.
-    // Compare the tarball's actual file list against the same 36-path
+    // Compare the tarball's actual file list against the same 42-path
     // allowlist: bin/ must be exactly the launcher contract, nothing more.
-    const packedBinPaths = (Array.isArray(packInfo.files) ? packInfo.files : [])
-      .map((f) => f.path)
-      .filter((p) => p.startsWith('bin/'));
-    const expectedBinPaths = expectedFiles.map((f) => `bin/${f}`);
+    const packedAllPaths = (Array.isArray(packInfo.files) ? packInfo.files : [])
+      .map((f) => f.path);
+    const packedBinPaths = packedAllPaths.filter((p) => p.startsWith('bin/'));
     const packedMissing = expectedBinPaths.filter((p) => !packedBinPaths.includes(p));
     const packedExtra = packedBinPaths.filter((p) => !expectedBinPaths.includes(p));
     if (packedMissing.length || packedExtra.length) {
@@ -91,6 +136,21 @@ try {
       fail(`packed tarball's bin/ does not match the exact ${expectedFiles.length}-file launcher contract (${parts.join('; ')})`);
     } else {
       ok(`packed tarball's bin/ contains exactly the ${expectedFiles.length} expected launcher files`);
+    }
+
+    // The bin/ check above stays green when the mismatch is anywhere else in
+    // the tarball (a stray install/ or skills/ file, a missing root doc), so
+    // compare the FULL packed list against the exact allowlist too. Same
+    // comparison, same message style - the bin/-specific result above says
+    // whether the launchers specifically drifted.
+    const tarballDiff = diffTarballPaths(packedAllPaths);
+    if (tarballDiff.missing.length || tarballDiff.extra.length) {
+      const parts = [];
+      if (tarballDiff.missing.length) parts.push(`missing from tarball: ${tarballDiff.missing.join(', ')}`);
+      if (tarballDiff.extra.length) parts.push(`unexpected in tarball: ${tarballDiff.extra.join(', ')}`);
+      fail(`packed tarball does not match the exact ${expectedTarballPaths.length}-file allowlist (${parts.join('; ')})`);
+    } else {
+      ok(`packed tarball contains exactly the ${expectedTarballPaths.length} expected files`);
     }
 
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-release-check-home-'));
@@ -129,21 +189,26 @@ try {
         if (missing.length) parts.push(`missing: ${missing.join(', ')}`);
         if (extra.length) parts.push(`extra: ${extra.join(', ')}`);
         if (forbidden.length) parts.push(`forbidden legacy name(s) present: ${forbidden.join(', ')}`);
-        fail(`installed manifest does not match the exact 36-file launcher contract (${parts.join('; ')})`);
+        fail(`installed manifest does not match the exact 42-file launcher contract (${parts.join('; ')})`);
       } else {
-        ok(`all ${expectedFiles.length} expected launcher files present (12 tools x 3 variants), no legacy names`);
+        ok(`all ${expectedFiles.length} expected launcher files present (14 tools x 3 variants), no legacy names`);
       }
     }
 
     // The manifest/exact-file-set check above only proves the files exist,
     // not that each one actually runs - exercise one .ps1 per Job-Object
     // launcher family (capc/capt/capm each wrap process creation
-    // differently), not just capc, so a capt/capm-only regression can't slip
+    // differently; caps wraps the same process-creation machinery with a
+    // bounded wait instead of an infinite one; capn sets an
+    // active-process-count limit instead), not just capc, so a
+    // capt/capm/caps/capn-only regression can't slip
     // through a gate that only ever smoke-tested capc.
     const smokeCases = [
       { tool: 'capc', arg: '50' },
       { tool: 'capt', arg: '1' },
       { tool: 'capm', arg: '50' },
+      { tool: 'caps', arg: '30' },
+      { tool: 'capn', arg: '10' },
     ];
     for (const { tool, arg } of smokeCases) {
       const ps1 = path.join(home, 'bin', `${tool}.ps1`);

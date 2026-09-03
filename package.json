@@ -1,7 +1,7 @@
 {
   "name": "win-nice",
   "version": "0.2.0",
-  "description": "Windows nice/renice/cpulimit for parallel AI coding agents - process priority (idle/belownormal/abovenormal/high/realtime), hard CPU quotas, thread affinity, and memory limits via Job Objects, elevation (admin), a UI responsiveness boost, and an optional Claude Code/Codex reference skill, with no dependencies.",
+  "description": "Windows nice/renice/cpulimit for parallel AI coding agents - process priority (idle/belownormal/abovenormal/high/realtime), hard CPU quotas, thread affinity, memory limits, and process-count ceilings via Job Objects (capc/capt/capm/capn), a wall-clock timeout that kills the whole tree on expiry (caps), elevation (admin), a UI responsiveness boost, and an optional Claude Code/Codex reference skill, with no dependencies.",
   "license": "MIT OR Apache-2.0",
   "author": {
     "name": "Marat K",
@@ -32,7 +32,7 @@
   ],
   "scripts": {
     "postinstall": "node install/cli.js install",
-    "test": "node --test test/cli.test.js test/docs-sync.test.js test/gitbash-shims.test.js test/install-uninstall.test.js test/manifest.test.js test/paths.test.js test/skill.test.js",
+    "test": "node --test test/cli.test.js test/docs-sync.test.js test/gitbash-shims.test.js test/install-uninstall.test.js test/manifest.test.js test/paths.test.js test/release-check-allowlist.test.js test/skill.test.js",
     "test:elevated": "powershell -NoProfile -ExecutionPolicy Bypass -File test\\run-elevated.ps1",
     "release-check": "node scripts/release-check.js"
   },

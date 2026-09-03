@@ -192,6 +192,7 @@ public static class CapmLauncher
     const uint CREATE_SUSPENDED = 0x00000004;
     const int JobObjectExtendedLimitInformation = 9;
     const uint JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200;
+    const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
 
     // Used by the PowerShell side to resolve a "<N>%" size argument into bytes
     // before Run() is ever called - the percentage is relative to total physical
@@ -275,7 +276,16 @@ public static class CapmLauncher
             {
                 BasicLimitInformation = new JOBOBJECT_BASIC_LIMIT_INFORMATION
                 {
-                    LimitFlags = JOB_OBJECT_LIMIT_JOB_MEMORY
+                    // KILL_ON_JOB_CLOSE: the cleanup in the finally below only runs
+                    // if this launcher process survives to execute it. Killed from
+                    // outside (taskkill without /T, a crash), nothing in-process
+                    // ever runs - without this flag the last job handle dying with
+                    // the process would leave every process still assigned to the
+                    // job running on, untracked and unmanaged. With it, Windows
+                    // itself terminates the whole job at that moment. On the normal
+                    // path this never fires: the wait below has already reaped the
+                    // child (emptying the job) before the finally closes hJob.
+                    LimitFlags = JOB_OBJECT_LIMIT_JOB_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
                 },
                 JobMemoryLimit = (UIntPtr)memoryLimitBytes
             };

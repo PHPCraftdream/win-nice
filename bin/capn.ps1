@@ -2,30 +2,39 @@
 # win-nice: managed-file
 # Deliberately no param()/[CmdletBinding()]: a declared parameter name (even
 # without a [Parameter()] attribute) can still be ambiguously prefix-matched by
-# flags meant for the wrapped command (e.g. "-p" matching "-Percent"). Reading
+# flags meant for the wrapped command (e.g. "-c" matching "-Count"). Reading
 # everything from $args sidesteps PowerShell's parameter binder entirely.
+$usage = "usage: capn <count> <command> [args...]  (count: positive whole number, " +
+    "minimum 1; maximum 4294967295, because ActiveProcessLimit is a uint32 struct " +
+    "field - there is no smaller natural bound the way capt's thread-count has)"
+
 if ($args.Count -lt 2) {
-    Write-Error "usage: capc <percent 1-100> <command> [args...]"
+    Write-Error $usage
     exit 1
 }
-$percentValue = 0
-if (-not [int]::TryParse($args[0], [ref]$percentValue) -or $percentValue -lt 1 -or $percentValue -gt 100) {
-    Write-Error "usage: capc <percent 1-100> <command> [args...]"
+
+$countArg = $args[0]
+# TryParse, not a raw [int]/[uint32] cast: an arbitrarily long digit string (a
+# usage mistake, not an attack) overflows a plain cast with a raw, unhandled
+# PowerShell conversion error (path/line number and all) - TryParse fails
+# cleanly instead, so every invalid <count> hits the same single usage message
+# regardless of why it's invalid. (Same reason capm.ps1/caps.ps1 document for
+# their own arguments.) [uint32], not [int]: ActiveProcessLimit is a uint32
+# struct field and there is no other natural maximum here, so the type's own
+# range IS the validation - anything above 4294967295 (or negative, or
+# non-numeric) must be rejected as the usage error it is, never silently
+# wrapped/truncated into a different limit.
+$countValue = [uint32]0
+if (-not [uint32]::TryParse($countArg, [ref]$countValue) -or $countValue -lt 1) {
+    Write-Error $usage
     exit 1
 }
 $Command = @($args[1..($args.Count - 1)])
 
 # Fallback command line for when the target isn't a directly-launchable .exe (see
-# CapcLauncher.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
-# neutralize its operators (&|<>^) and not just whitespace, or e.g. "A&B" gets split
-# into two commands. NOTE: a literal "%" in an argument can still trigger cmd.exe
-# environment-variable expansion (e.g. "%PATH%") even when quoted, and cmd.exe pairs
-# up "%" characters across argument/quote boundaries - two unrelated arguments that
-# each contain one "%" can corrupt each other. There is no reliable per-character
-# escape for this at the cmd.exe /c level; it's a known, inherent limitation shared
-# by anything that shells out through cmd.exe (Node's own child_process included).
-# This fallback path only runs for .bat/.cmd/builtin targets - a direct .exe target
-# never goes through cmd.exe at all, so it isn't exposed to this limitation.
+# CapnLauncher.Run below) - re-parsed by cmd.exe (via "cmd.exe /c"), so quoting must
+# neutralize its operators (&|<>^) and not just whitespace - see capc.ps1 for the
+# same logic and its documented "%" limitation.
 $commandLine = ($Command | ForEach-Object {
     $escaped = $_ -replace '"', '\"'
     if ($escaped -eq '' -or $escaped -match '[\s"&|<>^]') { '"' + $escaped + '"' } else { $escaped }
@@ -36,7 +45,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class CapcLauncher
+public static class CapnLauncher
 {
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct STARTUPINFO
@@ -106,13 +115,6 @@ public static class CapcLauncher
         public UIntPtr PeakJobMemoryUsed;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    struct JOBOBJECT_CPU_RATE_CONTROL_INFORMATION
-    {
-        public uint ControlFlags;
-        public uint CpuRate;
-    }
-
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool CreateProcess(string lpApplicationName, StringBuilder lpCommandLine,
         IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles,
@@ -144,10 +146,15 @@ public static class CapcLauncher
     static extern bool CloseHandle(IntPtr hObject);
 
     const uint CREATE_SUSPENDED = 0x00000004;
-    const int JobObjectCpuRateControlInformation = 15;
-    const uint JOB_OBJECT_CPU_RATE_CONTROL_ENABLE = 0x1;
-    const uint JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP = 0x4;
     const int JobObjectExtendedLimitInformation = 9;
+    // JOB_OBJECT_LIMIT_ACTIVE_PROCESS: ceiling on the number of SIMULTANEOUSLY
+    // ACTIVE processes in the job. Hex value verified two ways: Microsoft
+    // Learn's JOBOBJECT_BASIC_LIMIT_INFORMATION page (winnt.h) documents
+    // 0x00000008, and empirically - with ONLY this flag set plus a plausible
+    // ActiveProcessLimit, an over-limit spawn attempt fails, while the same
+    // ActiveProcessLimit value with a different flag bit
+    // (JOB_OBJECT_LIMIT_AFFINITY, 0x00000010) does not restrict spawning.
+    const uint JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008;
     const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
 
     // Standard MSVCRT/CommandLineToArgvW quoting: safe for a directly-launched .exe's
@@ -191,7 +198,7 @@ public static class CapcLauncher
         return string.Join(" ", parts);
     }
 
-    public static int Run(int percent, string[] argv, string cmdExeCommandLine)
+    public static int Run(uint activeProcessLimit, string[] argv, string cmdExeCommandLine)
     {
         IntPtr hJob = CreateJobObject(IntPtr.Zero, null);
         if (hJob == IntPtr.Zero)
@@ -207,18 +214,43 @@ public static class CapcLauncher
         IntPtr hThread = IntPtr.Zero;
         try
         {
-            var cpuInfo = new JOBOBJECT_CPU_RATE_CONTROL_INFORMATION
+            // KILL_ON_JOB_CLOSE: the cleanup in the finally below only runs if this
+            // launcher process survives to execute it. Killed from outside (taskkill
+            // without /T, a crash), nothing in-process ever runs - without this flag
+            // the last job handle dying with the process would leave every process
+            // still assigned to the job running on, untracked and unmanaged. With
+            // it, Windows itself terminates the whole job at that moment. On the
+            // normal path this never fires: the wait below has already reaped the
+            // child (emptying the job) before the finally closes hJob.
+            // Set via the EXTENDED info class: JobObjectBasicLimitInformation
+            // rejects this flag with ERROR_INVALID_PARAMETER.
+            // ACTIVE_PROCESS: exceeding it is neither a kill nor a throttle -
+            // the offending spawn attempt itself is the thing that fails
+            // (CreateProcess returns failure for a child that would push the
+            // count past ActiveProcessLimit, in the same spirit as capm's
+            // failed allocation, not capc's silent throttling). The directly
+            // wrapped process occupies one slot on its own: it is assigned to
+            // the still-empty job before it can spawn anything, so "capn 1
+            // <command>" runs the command but makes its very first child-spawn
+            // attempt fail while the command itself keeps running (confirmed
+            // empirically: with limit 1, a wrapped PowerShell's Start-Process
+            // failed with "Not enough quota is available to process this
+            // command." and the parent went on to run and exit 0).
+            var extInfo = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
             {
-                ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
-                CpuRate = (uint)(percent * 100)
+                BasicLimitInformation = new JOBOBJECT_BASIC_LIMIT_INFORMATION
+                {
+                    LimitFlags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                    ActiveProcessLimit = activeProcessLimit
+                }
             };
-            int size = Marshal.SizeOf(cpuInfo);
+            int size = Marshal.SizeOf(extInfo);
             IntPtr ptr = Marshal.AllocHGlobal(size);
             bool ok;
             try
             {
-                Marshal.StructureToPtr(cpuInfo, ptr, false);
-                ok = SetInformationJobObject(hJob, JobObjectCpuRateControlInformation, ptr, (uint)size);
+                Marshal.StructureToPtr(extInfo, ptr, false);
+                ok = SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, ptr, (uint)size);
             }
             finally
             {
@@ -227,53 +259,13 @@ public static class CapcLauncher
             if (!ok)
                 throw new InvalidOperationException("SetInformationJobObject failed: " + Marshal.GetLastWin32Error());
 
-            // KILL_ON_JOB_CLOSE: the cleanup in the finally below only runs if this
-            // launcher process survives to execute it. Killed from outside (taskkill
-            // without /T, a crash), nothing in-process ever runs - without this flag
-            // the last job handle dying with the process would leave every process
-            // still assigned to the job running on, untracked and unmanaged. With
-            // it, Windows itself terminates the whole job at that moment. On the
-            // normal path this never fires: the wait below has already reaped the
-            // child (emptying the job) before the finally closes hJob. Every other
-            // field stays zero - Windows only reads a struct field when its own
-            // LimitFlags bit is set.
-            // Set via the EXTENDED info class: JobObjectBasicLimitInformation
-            // rejects this flag with ERROR_INVALID_PARAMETER.
-            var extInfo = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
-            {
-                BasicLimitInformation = new JOBOBJECT_BASIC_LIMIT_INFORMATION
-                {
-                    LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-                }
-            };
-            int extSize = Marshal.SizeOf(extInfo);
-            IntPtr extPtr = Marshal.AllocHGlobal(extSize);
-            bool extOk;
-            try
-            {
-                Marshal.StructureToPtr(extInfo, extPtr, false);
-                extOk = SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, extPtr, (uint)extSize);
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(extPtr);
-            }
-            if (!extOk)
-                throw new InvalidOperationException("SetInformationJobObject failed: " + Marshal.GetLastWin32Error());
-
             var si = new STARTUPINFO();
             si.cb = Marshal.SizeOf(si);
             PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
 
-            // Try launching the target directly first (no shell at all) - unless it's a
-            // .bat/.cmd file. CreateProcess has an undocumented-but-real fallback of its
-            // own for those: instead of failing, it silently re-invokes them through
-            // cmd.exe using OUR unescaped argv text (ArgvQuote only protects CRT argv
-            // parsing, not cmd.exe's operators), reopening the exact "A&B" splits this
-            // whole file exists to prevent. A bare name with no extension is safe either
-            // way: CreateProcess only ever auto-appends ".exe" to it, never ".bat/.cmd",
-            // so it fails cleanly (ERROR_FILE_NOT_FOUND) when only a same-named .bat/.cmd
-            // exists, and falls through to the escaped path below.
+            // See capc.ps1 for why .bat/.cmd targets skip the direct attempt entirely:
+            // CreateProcess silently re-invokes them through cmd.exe on its own, using
+            // unescaped text, instead of failing the way a genuinely missing exe would.
             bool isBatOrCmd = argv.Length > 0 && (
                 argv[0].EndsWith(".bat", StringComparison.OrdinalIgnoreCase) ||
                 argv[0].EndsWith(".cmd", StringComparison.OrdinalIgnoreCase));
@@ -323,7 +315,7 @@ public static class CapcLauncher
 
             if (!AssignProcessToJobObject(hJob, hProcess))
             {
-                // Can't guarantee the cap - kill instead of letting it run uncapped and orphaned.
+                // Can't guarantee the limit - kill instead of letting it run uncapped and orphaned.
                 int err = Marshal.GetLastWin32Error();
                 string message = "AssignProcessToJobObject failed: " + err;
                 // Report if the best-effort kill itself also failed.
@@ -377,7 +369,7 @@ public static class CapcLauncher
 Add-Type -TypeDefinition $source -Language CSharp
 
 try {
-    exit ([CapcLauncher]::Run($percentValue, [string[]]$Command, $commandLine))
+    exit ([CapnLauncher]::Run($countValue, [string[]]$Command, $commandLine))
 } catch {
     Write-Error $_.Exception.InnerException.Message
     exit 1
