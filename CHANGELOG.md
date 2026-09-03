@@ -23,7 +23,12 @@ everything below shipped together as `0.2.0`.
   or `2.5`), converted to whole milliseconds, minimum 1 ms, maximum
   `4294967294` ms (~49.7 days) because `WaitForSingleObject` reserves
   `0xFFFFFFFF` ms as INFINITE - anything larger is a usage error, not a
-  silently truncated deadline. Unlike `capc`/`capt`/`capm` it sets no resource
+  silently truncated deadline. The deadline is absolute, not a plain relative
+  `WaitForSingleObject` wait: it is computed from `DateTime.UtcNow` and
+  re-checked on a short poll loop, so time spent in sleep/suspend counts
+  against it and the timeout fires on wake if the deadline passed during sleep
+  (a relative wait doesn't count sleep time on Windows 8+). Unlike
+  `capc`/`capt`/`capm` it sets no resource
   limit - the Job Object (with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so a
   non-cooperatively killed wrapper still takes the tree down) exists purely to
   make the timeout kill cover the whole spawned tree.
@@ -80,13 +85,17 @@ everything below shipped together as `0.2.0`.
   `install` already did - previously they deleted a real
   `%LOCALAPPDATA%\win-nice` installation and its PATH entry, then silently
   failed to restore it.
-- `capc`/`capt`/`capm` now set `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` on their
-  Job Object: a wrapper killed non-cooperatively from outside (`taskkill`
-  without `/T`, a crash) no longer leaves orphaned grandchild processes (e.g.
-  a linker spawned by a build) running unbounded outside the resource limit -
-  Windows itself terminates everything still in the job when the last job
-  handle dies with the wrapper. Normal exits are unaffected: the job is
-  already empty by the time the wrapper closes its own handle.
+- `capc`/`capt`/`capm`/`caps`/`capn` now set `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
+  on their Job Object as a backstop for non-cooperative termination: a wrapper
+  killed from outside (`taskkill` without `/T`, a crash), or a `caps` deadline
+  expiring, no longer leaves orphaned grandchild processes (e.g. a linker
+  spawned by a build) running unbounded outside the resource limit - Windows
+  itself terminates everything still in the job at that moment. A clean,
+  successful exit releases this guard first, so a daemon/compiler-server/
+  watcher the wrapped command legitimately left running still survives -
+  matching this same section's existing "a limit sticks to any daemon ... for
+  that daemon's whole lifetime" guarantee, which an earlier draft of this
+  change would otherwise have silently broken.
 
 ## [0.1.0] - 2026-09-02
 

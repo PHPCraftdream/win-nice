@@ -198,9 +198,18 @@ public static class CaptLauncher
             // without /T, a crash), nothing in-process ever runs - without this flag
             // the last job handle dying with the process would leave every process
             // still assigned to the job running on, untracked and unmanaged. With
-            // it, Windows itself terminates the whole job at that moment. On the
-            // normal path this never fires: the wait below has already reaped the
-            // child (emptying the job) before the finally closes hJob.
+            // it, Windows itself terminates the whole job at that moment.
+            //
+            // A backstop only, never the normal exit mechanism: the last handle
+            // closing terminates every process still assigned to the job FOR ANY
+            // reason, including this wrapper's own orderly close in the finally -
+            // and the wait below only waits on the directly wrapped root process,
+            // so a daemon it spawned and left running can still be in the job at
+            // that point, the root long gone. Killing a daemon on a SUCCESSFUL
+            // exit would break the documented daemon-survival contract (README:
+            // the affinity limit sticks to any daemon the wrapped command leaves
+            // running, for that daemon's whole lifetime), so the success path
+            // below clears this flag first - see capc.ps1 for the full write-up.
             // Set via the EXTENDED info class: JobObjectBasicLimitInformation
             // rejects this flag with ERROR_INVALID_PARAMETER.
             var extInfo = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
@@ -319,6 +328,40 @@ public static class CaptLauncher
             uint exitCode;
             if (!GetExitCodeProcess(hProcess, out exitCode))
                 throw new InvalidOperationException("GetExitCodeProcess failed: " + Marshal.GetLastWin32Error());
+
+            // Normal success: the root process finished - release the
+            // kill-on-close backstop so the finally below closes hJob WITHOUT
+            // terminating anything still assigned to the job (the documented
+            // daemon-survival contract: the affinity cap keeps applying to
+            // whatever the command left running, it just outlives this
+            // wrapper's handle). Deliberately best-effort, not a throw: the
+            // wrapped command succeeded, and a failed cleanup syscall must not
+            // turn its real exit code below into a wrapper error - warn on
+            // stderr instead. Same struct and field values as the original
+            // set above, minus the kill-on-close bit, so the daemon keeps its
+            // affinity pin.
+            var releaseInfo = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+            {
+                BasicLimitInformation = new JOBOBJECT_BASIC_LIMIT_INFORMATION
+                {
+                    LimitFlags = JOB_OBJECT_LIMIT_AFFINITY,
+                    Affinity = (UIntPtr)affinityMask
+                }
+            };
+            int releaseSize = Marshal.SizeOf(releaseInfo);
+            IntPtr releasePtr = Marshal.AllocHGlobal(releaseSize);
+            bool releaseOk;
+            try
+            {
+                Marshal.StructureToPtr(releaseInfo, releasePtr, false);
+                releaseOk = SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, releasePtr, (uint)releaseSize);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(releasePtr);
+            }
+            if (!releaseOk)
+                Console.Error.WriteLine("warning: could not release the job's kill-on-close guard - a still-running background process left by the wrapped command may be terminated when this wrapper exits");
 
             return (int)exitCode;
         }

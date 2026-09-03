@@ -1574,7 +1574,7 @@ function New-LauncherFaultProbe {
 }
 
 # The 8 non-Job launchers share a byte-identical Run() body (verified), and so
-# do 2 of the 4 original Job-Object ones - but caps's and capn's Run() bodies
+# do 2 of 3 original Job-Object ones - but caps's and capn's Run() bodies
 # are NOT byte-identical to the other Job launchers (caps's first Run()
 # argument is a timeout in ms that bounds WaitForSingleObject, plus a
 # WAIT_TIMEOUT branch the others don't have; capn's first Run() argument is an
@@ -1635,7 +1635,7 @@ function Wait-ProbeChildGone {
 
 # One row per launcher file, describing how to call ITS Run() - the embedded
 # C# signature differs by shape (see docs/plans/2026-09-02-safehandle-fault-
-# injection-plan.md section 1.1): JobArg is non-null only for the 4 Job Object
+# injection-plan.md section 1.1): JobArg is non-null only for the 5 Job Object
 # launchers (percent/affinity-mask/memory-bytes/timeout-ms/active-process-count
 # as their first argument - caps's JobArg is its timeout in ms, which bounds its
 # WaitForSingleObject; capn's is its active-process count; neither ever makes a
@@ -1999,6 +1999,107 @@ Start-Sleep -Seconds 60
     }
 }
 
+Describe 'clean root exit leaves a detached daemon alive (kill-on-close released on success)' {
+    # The OPPOSITE direction from the cascade tests above, which prove everything
+    # in the job dies together on an abnormal path. Here the wrapped root spawns
+    # an independent daemon and then exits successfully ON ITS OWN - the exact
+    # build-daemon/watcher scenario README's daemon-survival paragraph documents.
+    # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE terminates every process still in the job
+    # when the last job handle closes for ANY reason, including the wrapper's own
+    # orderly finally-close, so each launcher must clear the flag on its success
+    # path before that close - or the daemon dies even though the wrapped command
+    # returned 0. Behavioral regression for release review round 16
+    # (docs/reviews/2026-09-03-1619-6329eef) P1-1. The daemon self-terminates on
+    # a bounded 60s deadline (job death must NOT be what stops it), and the
+    # finally block stops it explicitly like every other multi-process test.
+    It 'keeps the daemon the wrapped command left running alive after the wrapper exits 0 (<Name>)' -TestCases @(
+        @{ Name = 'capc'; ToolArg = '50' }
+        @{ Name = 'capt'; ToolArg = '1' }
+        @{ Name = 'capm'; ToolArg = '2g' }
+        @{ Name = 'caps'; ToolArg = '30' }
+        @{ Name = 'capn'; ToolArg = '10' }
+    ) {
+        param($Name, $ToolArg)
+        $childPidFile = New-TempFile
+        $daemonPidFile = New-TempFile
+        $daemonFile = New-TempScript
+        Set-Content -Path $daemonFile -Value @"
+`$deadline = [DateTime]::UtcNow.AddSeconds(60)
+Set-Content -Path '$daemonPidFile' -Value `$PID
+while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
+"@
+        # The child (the directly wrapped root) writes its PID, spawns the daemon
+        # via Start-Process (independent and detached; it inherits the child's job
+        # membership - the cascade tests prove grandchild-in-job), then exits 0 on
+        # its own: no timeout, no kill, a completely normal exit.
+        $outerFile = New-TempScript
+        Set-Content -Path $outerFile -Value @"
+Set-Content -Path '$childPidFile' -Value `$PID
+Start-Process powershell -ArgumentList @('-NoProfile', '-File', '$daemonFile') -WindowStyle Hidden | Out-Null
+exit 0
+"@
+        $launcher = Start-Process powershell -ArgumentList @('-NoProfile', '-File', (Join-Path $bin "$Name.ps1"), $ToolArg, 'powershell', '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
+        $childPid = 0
+        $daemonPid = 0
+        try {
+            # Bounded wait until the child has written its PID, the daemon its
+            # own, and the WRAPPER has exited - the ordering proves the daemon
+            # was inside the job before the wrapper's finally closed hJob.
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            while ([DateTime]::UtcNow -lt $deadline) {
+                if ($childPid -eq 0 -and (Test-Path $childPidFile)) {
+                    $childPid = [int](Get-Content $childPidFile | Select-Object -First 1)
+                }
+                if ($childPid -ne 0 -and $daemonPid -eq 0 -and (Test-Path $daemonPidFile)) {
+                    $daemonPid = [int](Get-Content $daemonPidFile | Select-Object -First 1)
+                }
+                if ($childPid -ne 0 -and $daemonPid -ne 0 -and $launcher.HasExited) { break }
+                Start-Sleep -Milliseconds 100
+            }
+            $childPid | Should Not Be 0
+            $daemonPid | Should Not Be 0
+            # The wrapper finished normally, propagating the wrapped root's real
+            # exit code - not 124, not 1.
+            $launcher.HasExited | Should Be $true
+            $launcher.ExitCode | Should Be 0
+            # The root exited on its own (nothing killed it)...
+            (Wait-ProbeChildGone -ProcessId $childPid -TimeoutMs 15000) | Should Be $true
+            # ...and the daemon it left behind is STILL ALIVE several seconds
+            # after the wrapper's process is gone - the documented contract.
+            # The opposite assertion of the cascade tests: nothing dies here.
+            Start-Sleep -Seconds 3
+            (Get-Process -Id $daemonPid -ErrorAction SilentlyContinue) | Should Not Be $null
+        } finally {
+            # Best-effort cleanup on every path - a failed assertion above must
+            # not leak the launcher, child, or daemon (the generated scripts
+            # also self-terminate within 60s as a backstop).
+            if ($launcher -and -not $launcher.HasExited) { Stop-Process -Id $launcher.Id -Force -ErrorAction SilentlyContinue }
+            if ($childPid -gt 0) { Remove-ProbeChild -ProcessId $childPid }
+            if ($daemonPid -gt 0) { Remove-ProbeChild -ProcessId $daemonPid }
+            Remove-Item $childPidFile, $daemonPidFile, $daemonFile, $outerFile -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'clears the kill-on-close guard on the success path of every Job-Object launcher (<Name>)' -TestCases @(
+        @{ Name = 'capc' }
+        @{ Name = 'capt' }
+        @{ Name = 'capm' }
+        @{ Name = 'caps' }
+        @{ Name = 'capn' }
+    ) {
+        param($Name)
+        # Textual companion to the behavioral daemon-survival test above (same
+        # pattern as the cascade Describe's flag test): the release call AND its
+        # must-not-pass-silently warning must exist in all five files, so a
+        # future edit can't silently drop the success-path release from one of
+        # them while the behavioral test (which runs each launcher for real)
+        # is the runtime backstop.
+        $src = Get-LauncherCSharp -Ps1Path (Join-Path $bin "$Name.ps1")
+        $src | Should Match ([regex]::Escape('SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, releasePtr, (uint)releaseSize)'))
+        $src | Should Match ([regex]::Escape("could not release the job's kill-on-close guard"))
+    }
+}
+
 Describe 'caps.ps1 argument validation' {
     # Same driver pattern as capm/capc validation tests: through the .bat wrapper
     # (real user entry point), stderr discarded, only the exit code asserted.
@@ -2166,6 +2267,83 @@ Start-Sleep -Seconds 60
             if ($grandchildPid -gt 0) { Remove-ProbeChild -ProcessId $grandchildPid }
             Remove-Item $childPidFile, $grandchildPidFile, $grandchildFile, $outerFile -ErrorAction SilentlyContinue
         }
+    }
+
+    It 'returns promptly when the command finishes well inside the deadline (no full-poll-slice stall)' {
+        # The bounded polling loop (absolute UTC deadline, re-derived remaining
+        # time every slice) must never delay a fast command: the first
+        # WaitForSingleObject slice returns WAIT_OBJECT_0 the instant the child
+        # exits, so the wrapper completes in roughly its own startup runtime,
+        # nowhere near the 60s deadline it was given.
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        & (Join-Path $bin 'caps.bat') 60 cmd /c "exit 0"
+        $sw.Stop()
+        $LASTEXITCODE | Should Be 0
+        # Generous bound (PowerShell + Add-Type startup dominates). The point:
+        # this finishes in seconds against a 60s deadline, never ~60s.
+        ($sw.Elapsed.TotalMilliseconds -lt 25000) | Should Be $true
+    }
+
+    It 'fires the timeout at approximately the deadline wall-clock time (polling adds no meaningful delay)' {
+        $hungFile = New-TempScript
+        Set-Content -Path $hungFile -Value @"
+`$deadline = [DateTime]::UtcNow.AddSeconds(60)
+while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
+"@
+        try {
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            & powershell -NoProfile -File (Join-Path $bin 'caps.ps1') 3 powershell -NoProfile -File $hungFile 2>&1 | Out-Null
+            $sw.Stop()
+            $LASTEXITCODE | Should Be 124
+            # The deadline must fire AT ~3s: not early (lower bound), and not a
+            # poll slice or startup jitter late (upper bound; the child process
+            # startups included in $sw account for several of those seconds).
+            ($sw.Elapsed.TotalMilliseconds -ge 2800) | Should Be $true
+            ($sw.Elapsed.TotalMilliseconds -lt 15000) | Should Be $true
+        } finally {
+            Remove-Item $hungFile -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'caps.ps1 absolute-deadline arithmetic (sleep/suspend-safe)' {
+    # WaitForSingleObject's relative dwMilliseconds doesn't count time spent in
+    # sleep/suspend on Windows 8+, so caps derives its deadline from absolute
+    # DateTime.UtcNow timestamps re-checked every poll slice. A CI runner can't
+    # be genuinely suspended on demand, so the regression value lives in the
+    # pure arithmetic: RemainingWaitMs(deadlineUtc, nowUtc, maxSliceMs) is the
+    # exact function the wait loop feeds WaitForSingleObject, exercised here
+    # with synthetic timestamps - including the simulated suspend where "now"
+    # jumps past the deadline while the machine was paused. Called on the
+    # already-compiled caps probe type: $script:allLauncherProbes compiles the
+    # real embedded C# of every launcher at load time.
+    $t = $script:allLauncherProbes['caps']
+
+    It 'returns the full poll slice while plenty of deadline remains' {
+        $now = [DateTime]::UtcNow
+        $t::RemainingWaitMs($now.AddSeconds(5), $now, 1000) | Should Be 1000
+    }
+
+    It 'caps the final slice at the remaining time so the last wait lands on the deadline' {
+        $now = [DateTime]::UtcNow
+        $t::RemainingWaitMs($now.AddMilliseconds(300.7), $now, 1000) | Should Be 301
+    }
+
+    It 'returns 0 once the deadline has passed - the timeout path, with no further wait' {
+        $now = [DateTime]::UtcNow
+        $t::RemainingWaitMs($now.AddSeconds(-5), $now, 1000) | Should Be 0
+        $t::RemainingWaitMs($now, $now, 1000) | Should Be 0
+    }
+
+    It 'reports the timeout immediately after a simulated suspend overshoots the deadline' {
+        # The P2 scenario itself: the wrapper computes deadline = start + 5s,
+        # then the machine suspends for 8s. On wake "now" is 3s PAST the
+        # deadline - the old single relative wait would have kept counting its
+        # preserved remainder; this must demand 0 ms, i.e. timeout right now.
+        $start = [DateTime]::UtcNow
+        $deadline = $start.AddSeconds(5)
+        $wake = $start.AddSeconds(13)
+        $t::RemainingWaitMs($deadline, $wake, 1000) | Should Be 0
     }
 }
 

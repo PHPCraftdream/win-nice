@@ -180,6 +180,11 @@ public static class CapsLauncher
     const int JobObjectExtendedLimitInformation = 9;
     const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
 
+    // Poll-slice length for the absolute-deadline wait loop in Run(): long
+    // enough that a bounded run costs only one kernel call per second, short
+    // enough that timeout detection after an unexpected wake is prompt.
+    const uint DeadlinePollSliceMs = 1000;
+
     // Standard MSVCRT/CommandLineToArgvW quoting: safe for a directly-launched .exe's
     // own argv parsing. No cmd.exe involved on this path, so none of its operator or
     // "%" expansion semantics apply - this is the safe path, used whenever possible.
@@ -221,6 +226,24 @@ public static class CapsLauncher
         return string.Join(" ", parts);
     }
 
+    // Pure deadline arithmetic for the wait loop in Run(), public and with both
+    // timestamps injectable so tests can pin the sleep/suspend semantics
+    // deterministically (a CI runner can't be genuinely suspended on demand):
+    // returns the milliseconds to pass to the next WaitForSingleObject slice -
+    // min(maxSliceMs, time left until deadlineUtc as of nowUtc) - or 0 when the
+    // deadline has passed, which the caller must treat as its timeout path
+    // without waiting again. The partial final slice is ceilinged so the last
+    // wait lands on the deadline instead of a fraction short of it.
+    public static uint RemainingWaitMs(DateTime deadlineUtc, DateTime nowUtc, uint maxSliceMs)
+    {
+        double remainingMs = (deadlineUtc - nowUtc).TotalMilliseconds;
+        if (remainingMs <= 0.0)
+            return 0;
+        if (remainingMs >= maxSliceMs)
+            return maxSliceMs;
+        return (uint)Math.Ceiling(remainingMs);
+    }
+
     public static int Run(uint timeoutMs, string[] argv, string cmdExeCommandLine)
     {
         IntPtr hJob = CreateJobObject(IntPtr.Zero, null);
@@ -247,9 +270,20 @@ public static class CapsLauncher
                     // ever runs - without this flag the last job handle dying with
                     // the process would leave every process still assigned to the
                     // job running on, untracked and unmanaged. With it, Windows
-                    // itself terminates the whole job at that moment. On the normal
-                    // path this never fires: the wait below has already reaped the
-                    // child (emptying the job) before the finally closes hJob.
+                    // itself terminates the whole job at that moment.
+                    //
+                    // A backstop only, never a normal exit mechanism: the last
+                    // handle closing terminates every process still assigned to
+                    // the job FOR ANY reason, including this wrapper's own orderly
+                    // close in the finally - and the bounded wait below only waits
+                    // on the directly wrapped root process, so a daemon it spawned
+                    // and left running can still be in the job then. Killing a
+                    // daemon on a SUCCESSFUL exit would break the documented
+                    // daemon-survival contract (README: a limit sticks to any
+                    // daemon the wrapped command leaves running, for that daemon's
+                    // whole lifetime), so the success path clears this flag before
+                    // returning; the timeout path keeps it (it kills the job
+                    // itself). See capc.ps1 for the full write-up.
                     // caps sets no other limit flag - the job exists purely so the
                     // timeout kill (and that close-of-business kill) covers the
                     // whole process tree, not to impose any resource ceiling.
@@ -352,7 +386,39 @@ public static class CapsLauncher
             // repo: the wait is bounded. The PowerShell side validated the
             // deadline into [1, 0xFFFFFFFE] ms before the cast, so the value can
             // never collide with the 0xFFFFFFFF INFINITE sentinel.
-            uint waitResult = WaitForSingleObject(hProcess, timeoutMs);
+            //
+            // The deadline is computed once as an ABSOLUTE UTC timestamp and
+            // polled in short slices - NOT passed as one long relative wait.
+            // WaitForSingleObject's relative dwMilliseconds does not count time
+            // spent in low-power sleep/suspend on Windows 8+ (see its Microsoft
+            // docs page), so a laptop suspended mid-wait would otherwise resume
+            // with most of its original countdown still ahead of it instead of
+            // noticing the wall-clock deadline passed while it slept.
+            // DateTime.UtcNow keeps advancing across a suspend (the RTC keeps
+            // running), so re-deriving the remaining time from it before every
+            // slice makes the deadline genuinely absolute: right after waking
+            // from an overslept suspend, the very next iteration sees no time
+            // left and takes the timeout path immediately.
+            // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject
+            DateTime deadlineUtc = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+            uint waitResult;
+            while (true)
+            {
+                // Capped by the real remaining time (see RemainingWaitMs). A
+                // fast-exiting child is still detected instantly via
+                // WAIT_OBJECT_0 - the polling never delays a normal run.
+                uint sliceMs = RemainingWaitMs(deadlineUtc, DateTime.UtcNow, DeadlinePollSliceMs);
+                if (sliceMs == 0)
+                {
+                    // No time left before the deadline - indistinguishable from
+                    // the single-wait WAIT_TIMEOUT result handled below.
+                    waitResult = 0x00000102; // WAIT_TIMEOUT
+                    break;
+                }
+                waitResult = WaitForSingleObject(hProcess, sliceMs);
+                if (waitResult != 0x00000102)
+                    break; // WAIT_OBJECT_0 (finished) or WAIT_FAILED (handled below)
+            }
             if (waitResult == 0xFFFFFFFF)
             {
                 // WAIT_FAILED - same handling as every other launcher: the
@@ -389,6 +455,40 @@ public static class CapsLauncher
             uint exitCode;
             if (!GetExitCodeProcess(hProcess, out exitCode))
                 throw new InvalidOperationException("GetExitCodeProcess failed: " + Marshal.GetLastWin32Error());
+
+            // WAIT_OBJECT_0 path only: the root process finished inside the
+            // deadline - release the kill-on-close backstop so the finally
+            // below closes hJob WITHOUT terminating anything still assigned
+            // to the job (the documented daemon-survival contract: whatever
+            // the command left running detached outlives this wrapper's
+            // handle, uncapped by design - caps imposes no resource limit).
+            // NOT reached by the timeout path above: that one kills the job
+            // itself via TerminateJobObject and keeps the flag as the
+            // non-cooperative-death backstop. Deliberately best-effort, not a
+            // throw: the wrapped command succeeded, and a failed cleanup
+            // syscall must not turn its real exit code below into a wrapper
+            // error - warn on stderr instead.
+            var releaseInfo = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+            {
+                BasicLimitInformation = new JOBOBJECT_BASIC_LIMIT_INFORMATION
+                {
+                    LimitFlags = 0
+                }
+            };
+            int releaseSize = Marshal.SizeOf(releaseInfo);
+            IntPtr releasePtr = Marshal.AllocHGlobal(releaseSize);
+            bool releaseOk;
+            try
+            {
+                Marshal.StructureToPtr(releaseInfo, releasePtr, false);
+                releaseOk = SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, releasePtr, (uint)releaseSize);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(releasePtr);
+            }
+            if (!releaseOk)
+                Console.Error.WriteLine("warning: could not release the job's kill-on-close guard - a still-running background process left by the wrapped command may be terminated when this wrapper exits");
 
             return (int)exitCode;
         }

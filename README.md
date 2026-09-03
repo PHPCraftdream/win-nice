@@ -223,6 +223,13 @@ Runs the command with a hard wall-clock deadline: if it hasn't exited within
 to stderr. If the command finishes in time, `caps` propagates its exit code
 exactly like every other launcher in this family.
 
+The deadline is genuinely wall-clock: `caps` computes it once as an absolute
+UTC timestamp and re-checks the real elapsed time on a short poll loop, so
+time the machine spends asleep/suspended counts against it (a single relative
+`WaitForSingleObject` wait does not count sleep time on Windows 8+). Put the
+laptop to sleep mid-run and `caps` still fires the moment it wakes if the
+deadline passed during sleep, instead of waiting out the leftover countdown.
+
 The same "covers the whole subtree from the first instruction" guarantee
 applies: same suspend-then-assign-then-resume Job Object mechanism as
 `capc`/`capt`/`capm`, so at expiry a single `TerminateJobObject` kernel call
@@ -230,7 +237,11 @@ kills the direct child *and every descendant it spawned* — no process-tree
 walking, no window where a grandchild outlives the child. The job carries only
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, which doubles as the backstop if the
 `caps` wrapper itself is killed non-cooperatively (`taskkill` without `/T`, a
-crash): Windows itself then terminates the whole job at that moment.
+crash): Windows itself then terminates the whole job at that moment. That
+backstop is released before a normal, inside-the-deadline exit, so a
+background daemon the wrapped command legitimately left running survives -
+`caps` only forces a whole-tree kill on its own timeout or on the wrapper's
+own non-cooperative death, never on an ordinary successful exit.
 
 `<seconds>` accepts a positive whole or decimal number (`2`, `2.5`), converted
 to whole milliseconds (floored; minimum 1 ms). The maximum is 4294967294 ms
