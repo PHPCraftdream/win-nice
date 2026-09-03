@@ -1961,7 +1961,11 @@ Describe 'test/run-elevated.ps1' {
     It 'refuses -SelfElevated without -LogPath (internal flag - not meant to be passed by hand)' {
         $errOut = & powershell -NoProfile -File (Join-Path $PSScriptRoot 'run-elevated.ps1') -SelfElevated 2>&1
         $LASTEXITCODE | Should Be 1
-        ($errOut -join "`n") | Should Match 'requires -LogPath'
+        # PowerShell's default error-view word-wraps Write-Error text to the
+        # console width, which can split "requires -LogPath" across a line
+        # break - collapse whitespace before matching (same pattern as the
+        # sibling test below and the "%" fail-closed assertion above).
+        (($errOut -join ' ') -replace '\s+', ' ') | Should Match 'requires -LogPath'
     }
 
     # The regression this guards: -SelfElevated used to be trusted at face value,

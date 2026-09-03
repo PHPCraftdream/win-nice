@@ -44,6 +44,16 @@ function fail(msg) {
   process.exitCode = 1;
 }
 
+// Full contract: each of the 12 tools ships exactly 3 entry points
+// (extensionless Git Bash shim, .bat, .ps1) - 36 files total - and the 6
+// pre-rename legacy names (cap/pint, renamed to capc/capt) must never
+// reappear in a real install.
+const expectedTools = [
+  'idle', 'belownormal', 'abovenormal', 'high', 'realtime',
+  'capc', 'capt', 'capm', 'admin', 'uiup', 'cy', 'cx',
+];
+const expectedFiles = expectedTools.flatMap((t) => [t, `${t}.bat`, `${t}.ps1`]);
+
 // Resources are declared before the try so a failure during npm pack itself
 // (bad JSON, npm error, mkdtempSync failure) still lets the finally clean up
 // whatever was actually created, instead of leaking temp dirs/tarball.
@@ -61,6 +71,27 @@ try {
     fail(`npm pack did not produce ${packInfo.filename}`);
   } else {
     ok(`packed ${packInfo.filename} (${packInfo.entryCount} files, ${packInfo.size} bytes)`);
+
+    // package.json's `files` whitelist ships the whole bin/ directory, so any
+    // stray file dropped in there gets packed - but install/'s
+    // listSourceFiles() only installs .bat/.ps1/extensionless names, so the
+    // installed-manifest check below would still pass green and never notice.
+    // Compare the tarball's actual file list against the same 36-path
+    // allowlist: bin/ must be exactly the launcher contract, nothing more.
+    const packedBinPaths = (Array.isArray(packInfo.files) ? packInfo.files : [])
+      .map((f) => f.path)
+      .filter((p) => p.startsWith('bin/'));
+    const expectedBinPaths = expectedFiles.map((f) => `bin/${f}`);
+    const packedMissing = expectedBinPaths.filter((p) => !packedBinPaths.includes(p));
+    const packedExtra = packedBinPaths.filter((p) => !expectedBinPaths.includes(p));
+    if (packedMissing.length || packedExtra.length) {
+      const parts = [];
+      if (packedMissing.length) parts.push(`missing from tarball: ${packedMissing.join(', ')}`);
+      if (packedExtra.length) parts.push(`unexpected in tarball: ${packedExtra.join(', ')}`);
+      fail(`packed tarball's bin/ does not match the exact ${expectedFiles.length}-file launcher contract (${parts.join('; ')})`);
+    } else {
+      ok(`packed tarball's bin/ contains exactly the ${expectedFiles.length} expected launcher files`);
+    }
 
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-release-check-home-'));
     installPrefix = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-release-check-npm-'));
@@ -88,15 +119,6 @@ try {
         ok(`installed manifest version matches package.json (${pkg.version})`);
       }
 
-      // Full contract: each of the 12 tools ships exactly 3 entry points
-      // (extensionless Git Bash shim, .bat, .ps1) - 36 files total - and the 6
-      // pre-rename legacy names (cap/pint, renamed to capc/capt) must never
-      // reappear in a real install.
-      const expectedTools = [
-        'idle', 'belownormal', 'abovenormal', 'high', 'realtime',
-        'capc', 'capt', 'capm', 'admin', 'uiup', 'cy', 'cx',
-      ];
-      const expectedFiles = expectedTools.flatMap((t) => [t, `${t}.bat`, `${t}.ps1`]);
       const legacyNames = ['cap', 'cap.bat', 'cap.ps1', 'pint', 'pint.bat', 'pint.ps1'];
       const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
       const missing = expectedFiles.filter((f) => !manifestFiles.includes(f));
@@ -150,6 +172,71 @@ try {
         fail(`smoke test: "${tool} ${arg} cmd.exe /c exit 7" exited ${status}, expected 7${stderr ? ` (stderr: ${stderr})` : ''}`);
       } else {
         ok(`smoke test: ${tool} (installed from the tarball) propagates the wrapped exit code`);
+      }
+    }
+    // Every tool ships three launcher variants but the loop above only ever
+    // exercises the .ps1 one; run one .bat and one extensionless Git Bash shim
+    // from the installed tarball too, so a variant-only regression can't pass
+    // the gate either. idle takes the wrapped command directly (no numeric
+    // size/percent argument like the capc/capt/capm launchers).
+    const bat = path.join(home, 'bin', 'idle.bat');
+    if (!fs.existsSync(bat)) {
+      fail('bin/idle.bat missing from the installed tarball');
+    } else {
+      let status = null;
+      let stderr = '';
+      try {
+        execFileSync('cmd.exe', ['/d', '/c', bat, 'cmd.exe', '/c', 'exit', '7'], {
+          stdio: ['ignore', 'ignore', 'pipe'],
+          encoding: 'utf8',
+        });
+        status = 0;
+      } catch (err) {
+        status = err.status;
+        stderr = err.stderr ? err.stderr.trim() : '';
+      }
+      if (status !== 7) {
+        fail(`smoke test: "idle.bat cmd.exe /c exit 7" exited ${status}, expected 7${stderr ? ` (stderr: ${stderr})` : ''}`);
+      } else {
+        ok('smoke test: idle.bat (installed from the tarball) propagates the wrapped exit code');
+      }
+    }
+
+    // Same guard as test/gitbash-shims.test.js: `bash` on PATH isn't
+    // necessarily Git Bash/MSYS (WSL ships one too and can't run these
+    // Windows-path shims) - skip with a note instead of failing confusingly.
+    let hasGitBash = false;
+    try {
+      const uname = execFileSync('bash', ['-c', 'uname -s'], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        encoding: 'utf8',
+      });
+      hasGitBash = /^(MINGW|MSYS)/.test(uname.trim());
+    } catch {
+      hasGitBash = false;
+    }
+    const shim = path.join(home, 'bin', 'idle').replace(/\\/g, '/');
+    if (!hasGitBash) {
+      console.log('release-check: note - no Git Bash/MSYS on PATH; skipping the extensionless-shim smoke test');
+    } else if (!fs.existsSync(shim)) {
+      fail('bin/idle (extensionless shim) missing from the installed tarball');
+    } else {
+      let status = null;
+      let stderr = '';
+      try {
+        execFileSync('bash', [shim, 'cmd.exe', '/c', 'exit', '7'], {
+          stdio: ['ignore', 'ignore', 'pipe'],
+          encoding: 'utf8',
+        });
+        status = 0;
+      } catch (err) {
+        status = err.status;
+        stderr = err.stderr ? err.stderr.trim() : '';
+      }
+      if (status !== 7) {
+        fail(`smoke test: "idle cmd.exe /c exit 7" (extensionless shim via Git Bash) exited ${status}, expected 7${stderr ? ` (stderr: ${stderr})` : ''}`);
+      } else {
+        ok('smoke test: idle extensionless shim (installed from the tarball, via Git Bash) propagates the wrapped exit code');
       }
     }
   }

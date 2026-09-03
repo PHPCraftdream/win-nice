@@ -45,6 +45,14 @@ everything below shipped together as `0.2.0`.
   to the new version's content. Initial skill installation is still opt-in -
   this only ever touches a copy that's already there.
 
+### Fixed
+
+- `uninstall` and `reinstall` run from a source checkout of this repository
+  without an explicit `WIN_NICE_HOME` set now refuse to run, matching what
+  `install` already did - previously they deleted a real
+  `%LOCALAPPDATA%\win-nice` installation and its PATH entry, then silently
+  failed to restore it.
+
 ## [0.1.0] - 2026-09-02
 
 ### Added
