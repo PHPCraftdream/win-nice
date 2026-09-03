@@ -65,6 +65,16 @@ jobs:
           $result = Invoke-Pester -Path test\win-nice.Tests.ps1 -PassThru
           if ($result.FailedCount -gt 0) { exit 1 }
 
+      - name: Verify the actual packed artifact (scripts/release-check.js)
+        shell: bash
+        # Source-tree tests above never touch the packed tarball itself - a
+        # files-whitelist mistake or a CHANGELOG/tag drift (the exact class of
+        # bug round 11's review caught by hand) could still slip past both
+        # suites. Installs the real tarball into an isolated WIN_NICE_HOME,
+        # verifies manifest version/launcher names, smoke-tests capc's exit
+        # code, and cross-checks CHANGELOG's latest heading/compare-base tag.
+        run: npm run release-check
+
       - name: Publish
         timeout-minutes: 5
         # win-nice@0.1.0's first publish used a classic NPM_TOKEN (Trusted Publisher

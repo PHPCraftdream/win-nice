@@ -45,6 +45,30 @@ function installSkill() {
   return results;
 }
 
+// Called from install() (postinstall / `win-nice install|reinstall`), not just
+// the explicit opt-in `win-nice skill install` - a package upgrade must not
+// leave a previously-installed skill copy silently stale (e.g. recommending
+// tool names a breaking rename just deleted). Only refreshes copies that are
+// ALREADY there and still carry the marker: never creates one for a user who
+// never opted in, and never touches a missing or foreign/unmarked file.
+function updateInstalledSkill() {
+  const content = fs.readFileSync(SOURCE, 'utf8');
+  const results = [];
+  for (const target of targets()) {
+    if (!fs.existsSync(target)) {
+      results.push({ file: target, updated: false, reason: 'not installed' });
+      continue;
+    }
+    if (!fs.readFileSync(target, 'utf8').includes(MARKER)) {
+      results.push({ file: target, updated: false, reason: 'marker missing (modified by user?)' });
+      continue;
+    }
+    fs.writeFileSync(target, content);
+    results.push({ file: target, updated: true });
+  }
+  return results;
+}
+
 function uninstallSkill() {
   const results = [];
   for (const target of targets()) {
@@ -65,4 +89,4 @@ function uninstallSkill() {
   return results;
 }
 
-module.exports = { installSkill, uninstallSkill, targets, MARKER };
+module.exports = { installSkill, uninstallSkill, updateInstalledSkill, targets, MARKER };

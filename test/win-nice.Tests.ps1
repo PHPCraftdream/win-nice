@@ -1620,14 +1620,50 @@ function Wait-ProbeChildGone {
     return -not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
 }
 
+# One row per launcher file, describing how to call ITS Run() - the embedded
+# C# signature differs by shape (see docs/plans/2026-09-02-safehandle-fault-
+# injection-plan.md section 1.1): JobArg is non-null only for the 3 Job Object
+# launchers (percent/affinity-mask/memory-bytes as their first argument),
+# HasPriorityFlag is true only for the 5 launchers that take a raw
+# dwCreationFlags priority value, and both are absent for cy/cx/admin (no
+# first argument at all). ExpectedHandles is ClosedHandles.Count on a clean
+# success run - 2 for non-Job (hThread/hProcess), 3 for Job (+hJob). Shared by
+# every Describe below so a failure case and a success case for the same
+# launcher can never silently disagree on how to invoke it.
+$launcherExecCases = @(
+    @{ Name = 'idle';        HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
+    @{ Name = 'belownormal'; HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
+    @{ Name = 'abovenormal'; HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
+    @{ Name = 'high';        HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
+    @{ Name = 'realtime';    HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
+    @{ Name = 'cy';          HasPriorityFlag = $false; JobArg = $null;      ExpectedHandles = 2 }
+    @{ Name = 'cx';          HasPriorityFlag = $false; JobArg = $null;      ExpectedHandles = 2 }
+    @{ Name = 'admin';       HasPriorityFlag = $false; JobArg = $null;      ExpectedHandles = 2 }
+    @{ Name = 'capc';        HasPriorityFlag = $null;  JobArg = 50;         ExpectedHandles = 3 }
+    @{ Name = 'capt';        HasPriorityFlag = $null;  JobArg = 1;          ExpectedHandles = 3 }
+    @{ Name = 'capm';        HasPriorityFlag = $null;  JobArg = 209715200;  ExpectedHandles = 3 }
+)
+# Just the 3 Job Object launchers, for fault cases that only exist on that
+# shape (ResumeThread/AssignProcessToJobObject/SetInformationJobObject).
+$jobLauncherCases = @($launcherExecCases | Where-Object { $null -ne $_.JobArg })
+
+function Invoke-LauncherProbe {
+    param($Case, [object[]]$Argv, [string]$CmdLine)
+    $t = $script:allLauncherProbes[$Case.Name]
+    if ($null -ne $Case.JobArg) { return $t::Run($Case.JobArg, [string[]]$Argv, $CmdLine) }
+    if ($Case.HasPriorityFlag) { return $t::Run(64, [string[]]$Argv, $CmdLine) }
+    return $t::Run([string[]]$Argv, $CmdLine)
+}
+
 Describe 'native failure branches (fault-injected copy of the embedded C#)' {
-    It 'kills the child, reports the wait error, and closes every handle exactly once when WaitForSingleObject fails (Job Object template)' {
-        $t = $script:probeJob
+    It 'kills the child, reports the wait error, and closes every handle exactly once when WaitForSingleObject fails (<Name>)' -TestCases $launcherExecCases {
+        param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles)
+        $t = $script:allLauncherProbes[$Name]
         $t::ResetProbe()
         $t::FailWait = $true
         $message = $null
         try {
-            $t::Run(50, [string[]]@('ping', '-n', '30', '127.0.0.1'), 'ping -n 30 127.0.0.1') | Out-Null
+            Invoke-LauncherProbe -Case @{ HasPriorityFlag = $HasPriorityFlag; JobArg = $JobArg; Name = $Name } -Argv @('ping', '-n', '30', '127.0.0.1') -CmdLine 'ping -n 30 127.0.0.1' | Out-Null
         } catch {
             $message = $_.Exception.InnerException.Message
         }
@@ -1635,10 +1671,10 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
         # TerminateProcess call, which would otherwise overwrite it.
         $message | Should Be 'WaitForSingleObject failed: 6'
         $t::TerminateCalls | Should Be 1
-        # hThread, hProcess, hJob - each closed once, each close succeeded
-        # (a double close would return false and bump CloseHandleFailures).
-        $t::ClosedHandles.Count | Should Be 3
-        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 3
+        # Every owned handle closed once, each close succeeded (a double close
+        # would return false and bump CloseHandleFailures).
+        $t::ClosedHandles.Count | Should Be $ExpectedHandles
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be $ExpectedHandles
         $t::CloseHandleFailures | Should Be 0
         # Fail-closed: the wrapper reported failure, so the child must not still
         # be running in the background.
@@ -1647,21 +1683,22 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
         $t::ResetProbe()
     }
 
-    It 'reports the TerminateProcess failure alongside the original error, and leaves the child running, when the best-effort kill itself fails (Job Object template)' {
-        $t = $script:probeJob
+    It 'reports the TerminateProcess failure alongside the original error, and leaves the child running, when the best-effort kill itself fails (<Name>)' -TestCases $launcherExecCases {
+        param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles)
+        $t = $script:allLauncherProbes[$Name]
         $t::ResetProbe()
         $t::FailWait = $true
         $t::FailTerminate = $true
         $message = $null
         try {
-            $t::Run(50, [string[]]@('ping', '-n', '30', '127.0.0.1'), 'ping -n 30 127.0.0.1') | Out-Null
+            Invoke-LauncherProbe -Case @{ HasPriorityFlag = $HasPriorityFlag; JobArg = $JobArg; Name = $Name } -Argv @('ping', '-n', '30', '127.0.0.1') -CmdLine 'ping -n 30 127.0.0.1' | Out-Null
         } catch {
             $message = $_.Exception.InnerException.Message
         }
         $message | Should Be 'WaitForSingleObject failed: 6; TerminateProcess also failed: 5'
         $t::TerminateCalls | Should Be 1
-        $t::ClosedHandles.Count | Should Be 3
-        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 3
+        $t::ClosedHandles.Count | Should Be $ExpectedHandles
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be $ExpectedHandles
         $t::CloseHandleFailures | Should Be 0
         # The probe's TerminateProcess never called through to the real one, so
         # the child genuinely must still be alive - proving the message above
@@ -1671,13 +1708,14 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
         $t::ResetProbe()
     }
 
-    It 'kills the still-suspended child and reports the resume error when ResumeThread fails (Job Object template)' {
-        $t = $script:probeJob
+    It 'kills the still-suspended child and reports the resume error when ResumeThread fails (<Name>)' -TestCases $jobLauncherCases {
+        param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles)
+        $t = $script:allLauncherProbes[$Name]
         $t::ResetProbe()
         $t::FailResume = $true
         $message = $null
         try {
-            $t::Run(50, [string[]]@('ping', '-n', '30', '127.0.0.1'), 'ping -n 30 127.0.0.1') | Out-Null
+            Invoke-LauncherProbe -Case @{ HasPriorityFlag = $HasPriorityFlag; JobArg = $JobArg; Name = $Name } -Argv @('ping', '-n', '30', '127.0.0.1') -CmdLine 'ping -n 30 127.0.0.1' | Out-Null
         } catch {
             $message = $_.Exception.InnerException.Message
         }
@@ -1686,63 +1724,68 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
         # Without this kill the child stays suspended forever: CREATE_SUSPENDED
         # was never undone and nobody else holds a handle to it.
         $t::TerminateCalls | Should Be 1
-        $t::ClosedHandles.Count | Should Be 3
+        $t::ClosedHandles.Count | Should Be $ExpectedHandles
         $t::CloseHandleFailures | Should Be 0
         Wait-ProbeChildGone -ProcessId $t::LastProcessId | Should Be $true
         Remove-ProbeChild -ProcessId $t::LastProcessId
         $t::ResetProbe()
     }
 
-    It 'closes the job handle - and only it, exactly once - on the "%" fail-closed branch (Job Object template)' {
-        $t = $script:probeJob
+    It 'closes the ownership handle(s) exactly once, launches nothing, on the "%" fail-closed branch (<Name>)' -TestCases $launcherExecCases {
+        param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles)
+        $t = $script:allLauncherProbes[$Name]
         $t::ResetProbe()
         $targetBat = (New-TempScript).Replace('.ps1', '.bat')
         Set-Content -Path $targetBat -Value "@echo off`r`nexit /b 0`r`n"
         $message = $null
         try {
-            $t::Run(50, [string[]]@($targetBat, '100%OFF'), 'x') | Out-Null
+            Invoke-LauncherProbe -Case @{ HasPriorityFlag = $HasPriorityFlag; JobArg = $JobArg; Name = $Name } -Argv @($targetBat, '100%OFF') -CmdLine 'x' | Out-Null
         } catch {
             $message = $_.Exception.InnerException.Message
         }
         ($message -replace '\s+', ' ') | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
-        # No process was ever created on this branch, so hJob is the only handle
-        # in flight - and it must still be released. Part 1's single-owner finally
-        # closes it here (see docs/plans/2026-09-02-safehandle-fault-injection-plan.md 4.2).
-        $t::ClosedHandles.Count | Should Be 1
+        # No process was ever created on this branch. Job-shape launchers
+        # already hold hJob at this point (1 handle); non-Job launchers hold
+        # nothing yet - ownership only starts once CreateProcess succeeds for
+        # them (Part 1's deliberate asymmetry, plan section 2.3).
+        $expectedOwnershipHandles = if ($null -ne $JobArg) { 1 } else { 0 }
+        $t::ClosedHandles.Count | Should Be $expectedOwnershipHandles
         $t::CloseHandleFailures | Should Be 0
         $t::LastProcessId | Should Be 0
         Remove-Item $targetBat -ErrorAction SilentlyContinue
         $t::ResetProbe()
     }
 
-    It 'kills the still-suspended child and reports the assign error when AssignProcessToJobObject fails (Job Object template)' {
-        $t = $script:probeJob
+    It 'kills the still-suspended child and reports the assign error when AssignProcessToJobObject fails (<Name>)' -TestCases $jobLauncherCases {
+        param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles)
+        $t = $script:allLauncherProbes[$Name]
         $t::ResetProbe()
         $t::FailAssign = $true
         $message = $null
         try {
-            $t::Run(50, [string[]]@('ping', '-n', '30', '127.0.0.1'), 'ping -n 30 127.0.0.1') | Out-Null
+            Invoke-LauncherProbe -Case @{ HasPriorityFlag = $HasPriorityFlag; JobArg = $JobArg; Name = $Name } -Argv @('ping', '-n', '30', '127.0.0.1') -CmdLine 'ping -n 30 127.0.0.1' | Out-Null
         } catch {
             $message = $_.Exception.InnerException.Message
         }
         # ERROR_ACCESS_DENIED (5) - deterministic, injected by the probe.
         $message | Should Be 'AssignProcessToJobObject failed: 5'
         $t::TerminateCalls | Should Be 1
-        $t::ClosedHandles.Count | Should Be 3
-        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 3
+        $t::ClosedHandles.Count | Should Be $ExpectedHandles
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be $ExpectedHandles
         $t::CloseHandleFailures | Should Be 0
         Wait-ProbeChildGone -ProcessId $t::LastProcessId | Should Be $true
         Remove-ProbeChild -ProcessId $t::LastProcessId
         $t::ResetProbe()
     }
 
-    It 'closes only the job handle and never launches the child when SetInformationJobObject fails (Job Object template)' {
-        $t = $script:probeJob
+    It 'closes only the job handle and never launches the child when SetInformationJobObject fails (<Name>)' -TestCases $jobLauncherCases {
+        param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles)
+        $t = $script:allLauncherProbes[$Name]
         $t::ResetProbe()
         $t::FailSetInfo = $true
         $message = $null
         try {
-            $t::Run(50, [string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"') | Out-Null
+            Invoke-LauncherProbe -Case @{ HasPriorityFlag = $HasPriorityFlag; JobArg = $JobArg; Name = $Name } -Argv @('cmd', '/c', 'exit 7') -CmdLine 'cmd /c "exit 7"' | Out-Null
         } catch {
             $message = $_.Exception.InnerException.Message
         }
@@ -1757,13 +1800,14 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
         $t::ResetProbe()
     }
 
-    It 'reports the exit-code error and still closes every handle when GetExitCodeProcess fails (Job Object template)' {
-        $t = $script:probeJob
+    It 'reports the exit-code error and still closes every handle when GetExitCodeProcess fails (<Name>)' -TestCases $launcherExecCases {
+        param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles)
+        $t = $script:allLauncherProbes[$Name]
         $t::ResetProbe()
         $t::FailGetExitCode = $true
         $message = $null
         try {
-            $t::Run(50, [string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"') | Out-Null
+            Invoke-LauncherProbe -Case @{ HasPriorityFlag = $HasPriorityFlag; JobArg = $JobArg; Name = $Name } -Argv @('cmd', '/c', 'exit 7') -CmdLine 'cmd /c "exit 7"' | Out-Null
         } catch {
             $message = $_.Exception.InnerException.Message
         }
@@ -1771,112 +1815,29 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
         # The real wait already succeeded (the child ran to completion) - only
         # the exit-code fetch was faked, so nothing needed killing.
         $t::TerminateCalls | Should Be 0
-        $t::ClosedHandles.Count | Should Be 3
-        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 3
-        $t::CloseHandleFailures | Should Be 0
-        Remove-ProbeChild -ProcessId $t::LastProcessId
-        $t::ResetProbe()
-    }
-
-    It 'kills the child, reports the wait error, and closes both handles exactly once when WaitForSingleObject fails (priority template)' {
-        $t = $script:probePriority
-        $t::ResetProbe()
-        $t::FailWait = $true
-        $message = $null
-        try {
-            $script:probePriority::Run(64, [string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"') | Out-Null
-        } catch {
-            $message = $_.Exception.InnerException.Message
-        }
-        $message | Should Be 'WaitForSingleObject failed: 6'
-        $t::TerminateCalls | Should Be 1
-        $t::ClosedHandles.Count | Should Be 2
-        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 2
-        $t::CloseHandleFailures | Should Be 0
-        Wait-ProbeChildGone -ProcessId $t::LastProcessId | Should Be $true
-        Remove-ProbeChild -ProcessId $t::LastProcessId
-        $t::ResetProbe()
-    }
-
-    It 'reports the exit-code error and still closes both handles when GetExitCodeProcess fails (priority template)' {
-        $t = $script:probePriority
-        $t::ResetProbe()
-        $t::FailGetExitCode = $true
-        $message = $null
-        try {
-            $script:probePriority::Run(64, [string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"') | Out-Null
-        } catch {
-            $message = $_.Exception.InnerException.Message
-        }
-        $message | Should Be 'GetExitCodeProcess failed: 6'
-        $t::TerminateCalls | Should Be 0
-        $t::ClosedHandles.Count | Should Be 2
-        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 2
-        $t::CloseHandleFailures | Should Be 0
-        Remove-ProbeChild -ProcessId $t::LastProcessId
-        $t::ResetProbe()
-    }
-
-    It 'still returns the real exit code and closes every handle exactly once on the success path (Job Object template)' {
-        $t = $script:probeJob
-        $t::ResetProbe()
-        $result = $t::Run(50, [string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"')
-        $result | Should Be 7
-        $t::TerminateCalls | Should Be 0
-        $t::ClosedHandles.Count | Should Be 3
-        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 3
-        $t::CloseHandleFailures | Should Be 0
-        Remove-ProbeChild -ProcessId $t::LastProcessId
-        $t::ResetProbe()
-    }
-
-    It 'still returns the real exit code and closes both handles exactly once on the success path (priority template)' {
-        $t = $script:probePriority
-        $t::ResetProbe()
-        $result = $script:probePriority::Run(64, [string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"')
-        $result | Should Be 7
-        $t::TerminateCalls | Should Be 0
-        $t::ClosedHandles.Count | Should Be 2
-        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 2
+        $t::ClosedHandles.Count | Should Be $ExpectedHandles
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be $ExpectedHandles
         $t::CloseHandleFailures | Should Be 0
         Remove-ProbeChild -ProcessId $t::LastProcessId
         $t::ResetProbe()
     }
 }
 
-# The two probes above give idle/capc deep FAILURE-branch coverage, and the
-# source-shape guard below checks the other 9 files' SOURCE TEXT matches the
-# same template - but neither one ever actually executes admin/cy/cx/capt/
-# capm's own compiled Run(). This closes that gap: every one of the 11 gets a
-# real success-path execution (not just idle/capc), proving each file's unique
-# body (comment wording, per-tool struct/flag differences) still compiles,
-# links, and runs correctly - not just that a line count matches.
-$launcherExecCases = @(
-    @{ Name = 'idle';        HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
-    @{ Name = 'belownormal'; HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
-    @{ Name = 'abovenormal'; HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
-    @{ Name = 'high';        HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
-    @{ Name = 'realtime';    HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
-    @{ Name = 'cy';          HasPriorityFlag = $false; JobArg = $null;      ExpectedHandles = 2 }
-    @{ Name = 'cx';          HasPriorityFlag = $false; JobArg = $null;      ExpectedHandles = 2 }
-    @{ Name = 'admin';       HasPriorityFlag = $false; JobArg = $null;      ExpectedHandles = 2 }
-    @{ Name = 'capc';        HasPriorityFlag = $null;  JobArg = 50;         ExpectedHandles = 3 }
-    @{ Name = 'capt';        HasPriorityFlag = $null;  JobArg = 1;          ExpectedHandles = 3 }
-    @{ Name = 'capm';        HasPriorityFlag = $null;  JobArg = 209715200;  ExpectedHandles = 3 }
-)
-
+# $launcherExecCases (defined above, alongside Invoke-LauncherProbe) drives
+# both the failure-branch Describe above and this one - the source-shape
+# guard below checks the other files' SOURCE TEXT matches the same template,
+# but neither that nor a fault case alone proves admin/cy/cx/capt/capm's own
+# compiled Run() actually executes correctly end to end. This closes that
+# gap: every one of the 11 gets a real success-path execution, proving each
+# file's unique body (comment wording, per-tool struct/flag differences)
+# still compiles, links, and runs correctly - not just that a line count
+# matches.
 Describe 'fault-injection probes actually execute all 11 launcher files (not just idle/capc)' {
     It 'runs Run() for real, propagates the exit code, and closes the expected handle count (<Name>)' -TestCases $launcherExecCases {
         param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles)
         $t = $script:allLauncherProbes[$Name]
         $t::ResetProbe()
-        if ($null -ne $JobArg) {
-            $result = $t::Run($JobArg, [string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"')
-        } elseif ($HasPriorityFlag) {
-            $result = $t::Run(64, [string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"')
-        } else {
-            $result = $t::Run([string[]]@('cmd', '/c', 'exit 7'), 'cmd /c "exit 7"')
-        }
+        $result = Invoke-LauncherProbe -Case @{ HasPriorityFlag = $HasPriorityFlag; JobArg = $JobArg; Name = $Name } -Argv @('cmd', '/c', 'exit 7') -CmdLine 'cmd /c "exit 7"'
         $result | Should Be 7
         $t::TerminateCalls | Should Be 0
         $t::ClosedHandles.Count | Should Be $ExpectedHandles

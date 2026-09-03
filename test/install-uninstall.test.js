@@ -18,15 +18,28 @@ function freshHome() {
 
 // updatePath is always false in these tests - they must never touch the real
 // user PATH/registry. That mutation path is exercised manually, not here.
+//
+// install() now also calls updateInstalledSkill() internally (see
+// install/skill.js), which reads its target directory from the SEPARATE
+// WIN_NICE_SKILL_HOME env var, not WIN_NICE_HOME - so isolating only
+// WIN_NICE_HOME here would leave every install() call in this file free to
+// read/write the real ~/.claude/skills and ~/.agents/skills (confirmed: it
+// did, once, before this env var was added here). Isolate both.
 function withHome(home, fn) {
   const prev = process.env.WIN_NICE_HOME;
+  const prevSkillHome = process.env.WIN_NICE_SKILL_HOME;
+  const skillHome = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-skillhome-'));
   process.env.WIN_NICE_HOME = home;
+  process.env.WIN_NICE_SKILL_HOME = skillHome;
   try {
     return fn();
   } finally {
     if (prev === undefined) delete process.env.WIN_NICE_HOME;
     else process.env.WIN_NICE_HOME = prev;
+    if (prevSkillHome === undefined) delete process.env.WIN_NICE_SKILL_HOME;
+    else process.env.WIN_NICE_SKILL_HOME = prevSkillHome;
     fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(skillHome, { recursive: true, force: true });
   }
 }
 
@@ -176,6 +189,78 @@ test('install (upgrade path) removes a stale manifest-tracked file the current v
       manifest.read(manifestFile).files.slice().sort(),
       result.files.slice().sort(),
       'manifest must not still list the stale names'
+    );
+  });
+});
+
+test('install (upgrade path) removes a stale MARKED file via a binDir scan when the manifest is missing', () => {
+  withHome(freshHome(), () => {
+    const first = install({ updatePath: false });
+    const dir = paths.binDir();
+
+    const staleNames = ['oldtool.bat', 'oldtool.ps1', 'oldtool'];
+    for (const name of staleNames) fs.writeFileSync(path.join(dir, name), `# ${manifest.MARKER}\nstale\n`);
+    fs.unlinkSync(paths.manifestPath());
+
+    install({ updatePath: false });
+
+    for (const name of staleNames) {
+      assert.equal(fs.existsSync(path.join(dir, name)), false, `${name} (marked, stale) must be removed even without a manifest`);
+    }
+    for (const name of first.files) {
+      assert.equal(fs.existsSync(path.join(dir, name)), true, `${name} (still shipped) must survive`);
+    }
+  });
+});
+
+test('install (upgrade path) removes a stale MARKED file via a binDir scan when the manifest is corrupt (non-array files)', () => {
+  withHome(freshHome(), () => {
+    const first = install({ updatePath: false });
+    const dir = paths.binDir();
+
+    const staleNames = ['oldtool.bat', 'oldtool.ps1', 'oldtool'];
+    for (const name of staleNames) fs.writeFileSync(path.join(dir, name), `# ${manifest.MARKER}\nstale\n`);
+    manifest.write(paths.manifestPath(), { version: '0.1.0', files: 'not-an-array' });
+
+    install({ updatePath: false });
+
+    for (const name of staleNames) {
+      assert.equal(fs.existsSync(path.join(dir, name)), false, `${name} (marked, stale) must be removed even with a corrupt manifest`);
+    }
+    for (const name of first.files) {
+      assert.equal(fs.existsSync(path.join(dir, name)), true, `${name} (still shipped) must survive`);
+    }
+  });
+});
+
+test('install (upgrade path) fallback scan never removes an unrelated UNMARKED file from binDir', () => {
+  withHome(freshHome(), () => {
+    install({ updatePath: false });
+    const dir = paths.binDir();
+    const foreign = path.join(dir, 'not-ours.txt');
+    fs.writeFileSync(foreign, 'unrelated user file');
+    fs.unlinkSync(paths.manifestPath());
+
+    install({ updatePath: false });
+
+    assert.equal(fs.existsSync(foreign), true, 'unmarked foreign file must survive the fallback scan');
+  });
+});
+
+test('install() refreshes an existing marked skill copy on upgrade, not just via explicit `skill install`', () => {
+  const { installSkill, targets } = require('../install/skill');
+  withHome(freshHome(), () => {
+    installSkill();
+    const [claudeTarget] = targets();
+    const original = fs.readFileSync(claudeTarget, 'utf8');
+    fs.writeFileSync(claudeTarget, original.replace('# win-nice', '# win-nice (STALE PRE-RENAME COPY)'));
+
+    install({ updatePath: false });
+
+    assert.equal(
+      fs.readFileSync(claudeTarget, 'utf8'),
+      original,
+      'a previously-installed skill copy must be refreshed by a plain install(), not just `win-nice skill install`'
     );
   });
 });

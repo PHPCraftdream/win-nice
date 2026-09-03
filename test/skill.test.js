@@ -5,7 +5,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { installSkill, uninstallSkill, targets, MARKER } = require('../install/skill');
+const { installSkill, uninstallSkill, updateInstalledSkill, targets, MARKER } = require('../install/skill');
+
+const SOURCE_PATH = path.join(__dirname, '..', 'skills', 'win-nice', 'SKILL.md');
 
 function freshHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-skillhome-'));
@@ -96,5 +98,42 @@ test('installSkill overwrites its own previously-installed (marked) copy', () =>
     const results = installSkill();
     assert.ok(results.every((r) => r.installed));
     assert.ok(fs.readFileSync(claudeTarget, 'utf8').includes(MARKER));
+  });
+});
+
+test('updateInstalledSkill refreshes an existing marked copy to the current SOURCE content', () => {
+  withHome(freshHome(), () => {
+    installSkill();
+    const [claudeTarget] = targets();
+    const sourceContent = fs.readFileSync(SOURCE_PATH, 'utf8');
+    // Simulate a stale marked copy left by an older version - still has the
+    // marker (ours to update), but different body text.
+    fs.writeFileSync(claudeTarget, sourceContent.replace('# win-nice', '# win-nice (STALE PRE-RENAME COPY)'));
+
+    const results = updateInstalledSkill();
+    const claudeResult = results.find((r) => r.file === claudeTarget);
+    assert.equal(claudeResult.updated, true);
+    assert.equal(fs.readFileSync(claudeTarget, 'utf8'), sourceContent);
+  });
+});
+
+test('updateInstalledSkill leaves a missing copy missing (stays opt-in, never auto-installs)', () => {
+  withHome(freshHome(), () => {
+    const results = updateInstalledSkill();
+    assert.ok(results.every((r) => r.updated === false && r.reason === 'not installed'));
+    for (const target of targets()) assert.equal(fs.existsSync(target), false);
+  });
+});
+
+test('updateInstalledSkill never touches a foreign/unmarked file', () => {
+  withHome(freshHome(), () => {
+    const [claudeTarget] = targets();
+    fs.mkdirSync(path.dirname(claudeTarget), { recursive: true });
+    fs.writeFileSync(claudeTarget, 'someone else\'s unrelated file');
+
+    const results = updateInstalledSkill();
+    const claudeResult = results.find((r) => r.file === claudeTarget);
+    assert.equal(claudeResult.updated, false);
+    assert.equal(fs.readFileSync(claudeTarget, 'utf8'), 'someone else\'s unrelated file');
   });
 });

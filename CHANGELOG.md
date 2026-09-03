@@ -6,44 +6,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.2.0] - 2026-09-02
 
-### Changed
-
-- `cap` renamed to `capc`; `pint` renamed to `capt` (breaking - the old names
-  no longer exist).
-- Every launcher's best-effort `TerminateProcess` kill (triggered when
-  `WaitForSingleObject`/`ResumeThread`/`AssignProcessToJobObject` fails) now
-  checks its own result too. If the kill itself also fails, the thrown error
-  says so explicitly instead of silently treating a failed kill the same as a
-  successful one.
-
-## [0.1.1] - 2026-09-02
+The first release since `0.1.0` - `0.1.1` was never tagged or published;
+everything below shipped together as `0.2.0`.
 
 ### Added
 
 - `capm` - hard memory ceiling via Job Objects; `<size>` accepts a bare
   integer `1`-`100` (percent of total physical RAM, same convention as
-  `cap`'s own `<percent 1-100>`), or `m`/`M` (MB), or `g`/`G` (GB).
-- These tools can be chained by name (e.g. `capm 50 cap 50 idle <command>`)
+  `capc`'s own `<percent 1-100>`), or `m`/`M` (MB), or `g`/`G` (GB).
+- These tools can be chained by name (e.g. `capm 50 capc 50 idle <command>`)
   - each wrapper's Job Object nests inside the outer one (Windows 8+). Nested
-  limits do *not* uniformly take the smaller value: CPU rate (`cap`)
-  multiplies relative to its parent (`cap 50 cap 50` ≈ 25%, not 50%); memory
-  (`capm`) ceilings apply independently to accounting scopes that aren't the
-  same size (a parent job's accounting includes every child job's committed
-  memory plus its own process, so nested `capm` ceilings don't reduce to a
-  simple minimum). See README's "Chaining these tools together" section for
-  the full picture.
+  limits do *not* uniformly take the smaller value: CPU rate (`capc`)
+  multiplies relative to its parent (`capc 50 capc 50` ≈ 25%, not 50%);
+  memory (`capm`) ceilings apply independently to accounting scopes that
+  aren't the same size (a parent job's accounting includes every child job's
+  committed memory plus its own process, so nested `capm` ceilings don't
+  reduce to a simple minimum). See README's "Chaining these tools together"
+  section for the full picture.
 
 ### Changed
 
-- Every launcher's embedded native-process primitive now checks `ResumeThread`/
-  `WaitForSingleObject`/`GetExitCodeProcess` return values instead of assuming
-  success, and `AllocHGlobal`/`FreeHGlobal` around each Job Object limit
-  struct is wrapped in `try`/`finally`. On a `ResumeThread` or
-  `WaitForSingleObject` failure, the launcher now attempts to terminate the
-  child instead of either waiting on a still-suspended process forever or
-  reporting failure while it may still be running unmanaged in the
-  background. Hardening for a class of rare Win32 failures - not a fix for
-  an observed regression.
+- `cap` renamed to `capc`; `pint` renamed to `capt` (breaking - the old names
+  no longer exist).
+- Every launcher's embedded native-process primitive now checks
+  `ResumeThread`/`WaitForSingleObject`/`GetExitCodeProcess`/`TerminateProcess`
+  return values instead of assuming success, and `AllocHGlobal`/`FreeHGlobal`
+  around each Job Object limit struct is wrapped in `try`/`finally`. On a
+  `ResumeThread`, `AssignProcessToJobObject`, or `WaitForSingleObject`
+  failure, the launcher now attempts to terminate the child instead of
+  either waiting on a still-suspended process forever or reporting failure
+  while it may still be running unmanaged in the background - and if that
+  best-effort kill itself also fails, the thrown error says so explicitly.
+  Hardening for a class of rare Win32 failures - not a fix for an observed
+  regression.
 
 ## [0.1.0] - 2026-09-02
 
@@ -68,6 +63,5 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Windows process/priority/Job-Object behavior).
 
 [Unreleased]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/PHPCraftdream/win-nice/compare/v0.1.1...v0.2.0
-[0.1.1]: https://github.com/PHPCraftdream/win-nice/compare/v0.1.0...v0.1.1
+[0.2.0]: https://github.com/PHPCraftdream/win-nice/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/PHPCraftdream/win-nice/releases/tag/v0.1.0
