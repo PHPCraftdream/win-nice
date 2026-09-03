@@ -25,6 +25,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # release-check's CHANGELOG compare-base check needs the full tag
+          # history - the default single-commit shallow checkout has no tags
+          # at all, so it would always fail that check on a real publish run.
+          fetch-depth: 0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:

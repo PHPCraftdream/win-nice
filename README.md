@@ -375,7 +375,12 @@ npx win-nice skill install     # add the win-nice reference skill
 npx win-nice skill uninstall   # remove it
 ```
 
-Separate, opt-in install step — not run automatically by `postinstall`. Copies
+Initial installation is a separate, opt-in step — `postinstall` never creates a
+skill copy for a user who hasn't run `skill install`. Once a copy exists,
+though, every subsequent ordinary package install/upgrade (including
+`postinstall`) automatically refreshes that *existing* marked copy to the new
+version's content, so it never goes stale after an upgrade. Explicit `skill
+install` copies
 [`skills/win-nice/SKILL.md`](skills/win-nice/SKILL.md) (documents every tool
 above except `cy`/`cx`) to `~/.claude/skills/win-nice/SKILL.md` and
 `~/.agents/skills/win-nice/SKILL.md` (Codex CLI's personal-skill location) —
@@ -421,18 +426,21 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 - `WIN_NICE_HOME` — overrides the install root (default
   `%LOCALAPPDATA%\win-nice`). Used by the test suite; also useful for a
   non-default install location.
-- `WIN_NICE_SKILL_HOME` — overrides the home directory `skill install`/
-  `skill uninstall` resolve `~/.claude/skills/...` and `~/.agents/skills/...`
-  against (default: the real user home). Mirrors `WIN_NICE_HOME`, for the
-  skill files instead of `bin/`.
+- `WIN_NICE_SKILL_HOME` — overrides the home directory `~/.claude/skills/...`
+  and `~/.agents/skills/...` are resolved against (default: the real user
+  home). Mirrors `WIN_NICE_HOME`, for the skill files instead of `bin/`.
+  Affects both the explicit `skill install`/`skill uninstall` commands and the
+  automatic postinstall/upgrade refresh of an already-installed copy described
+  above.
 - `WIN_NICE_NO_PATH` — if set (to anything), `install`/`uninstall`/
   `reinstall` skip the user `PATH` update/removal entirely, only managing
   files under the install directory.
 
 ## Testing
 
-From a source checkout (`test/` isn't part of the published npm package - the
-`test`/`test:elevated` scripts below only work when run from a git clone):
+From a source checkout (`test/` and `scripts/` aren't part of the published
+npm package - the `test`/`test:elevated`/`release-check` scripts below only
+work when run from a git clone, not against an installed package):
 
 ```
 npm test                                       # installer logic (fast; isolated scratch registry key, cleaned up automatically)
@@ -469,6 +477,14 @@ first group: one UAC prompt elevates the runner once, then the suite runs
 inside that elevated session, activating those 3 cases (and skipping the
 other 3). Neither a normal run nor an elevated run alone exercises every
 case - run both for full coverage.
+
+`npm run release-check` (`scripts/release-check.js`) is a maintainer-only,
+source-checkout-only command that packs the actual npm tarball, installs it
+into an isolated temp directory, and verifies the real installed artifact
+(launcher file set, manifest version, a `capc` exit-code smoke test, and
+CHANGELOG/tag consistency) - this is what `publish.yml` runs right before
+`npm publish`. It needs `scripts/` and git tag history, neither of which is
+part of the published package, so it can't run against an installed copy.
 
 ## License
 

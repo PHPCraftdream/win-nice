@@ -17,13 +17,22 @@ const pkg = require(path.join(repoRoot, 'package.json'));
 // npm resolves to npm.cmd on Windows. execFileSync can't launch it without a
 // shell (ENOENT - unlike a real .exe such as git), and naming npm.cmd
 // explicitly instead fails with EINVAL (a known Node/libuv quirk spawning
-// batch files directly on Windows) - shell:true is the one combination that
-// actually works. Node warns that shell:true concatenates args unescaped,
-// which matters for untrusted input; every argument passed through
-// npmExec below is either a fixed literal or a path this script generated
-// itself via fs.mkdtempSync/npm's own --json output, never external input.
+// batch files directly on Windows). shell:true "worked" but concatenates the
+// args array unescaped (Node's own DEP0190 warning) - repoRoot and
+// os.tmpdir() both come from the ambient environment and can contain spaces
+// (e.g. "C:\Users\Jane Doe\...") or shell metacharacters, which silently
+// truncated/broke the command. Bypass the shell entirely instead: run node
+// directly against npm's own JS entrypoint (process.env.npm_execpath), which
+// `npm run` always sets.
 function npmExec(args, options) {
-  return execFileSync('npm', args, { ...options, shell: true });
+  const npmExecPath = process.env.npm_execpath;
+  if (!npmExecPath) {
+    console.error(
+      'release-check: npm_execpath is not set - run this via "npm run release-check", not "node scripts/release-check.js" directly.'
+    );
+    process.exit(1);
+  }
+  return execFileSync(process.execPath, [npmExecPath, ...args], options);
 }
 
 function ok(msg) {
@@ -47,11 +56,17 @@ ok(`packed ${packInfo.filename} (${packInfo.entryCount} files, ${packInfo.size} 
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-release-check-home-'));
 const installPrefix = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-release-check-npm-'));
+// The tarball's postinstall calls install(), which also calls
+// updateInstalledSkill() - that resolves its targets via the SEPARATE
+// WIN_NICE_SKILL_HOME env var, not WIN_NICE_HOME. Without this, the tarball
+// install below is free to rewrite the real ~/.claude/skills and
+// ~/.agents/skills (confirmed: it did, before this temp dir was added).
+const skillHome = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-release-check-skillhome-'));
 
 try {
   npmExec(['install', tarballPath, '--no-save', '--prefix', installPrefix], {
     cwd: repoRoot,
-    env: { ...process.env, WIN_NICE_HOME: home, WIN_NICE_NO_PATH: '1' },
+    env: { ...process.env, WIN_NICE_HOME: home, WIN_NICE_SKILL_HOME: skillHome, WIN_NICE_NO_PATH: '1' },
     stdio: 'inherit',
   });
 
@@ -66,15 +81,28 @@ try {
       ok(`installed manifest version matches package.json (${pkg.version})`);
     }
 
+    // Full contract: each of the 12 tools ships exactly 3 entry points
+    // (extensionless Git Bash shim, .bat, .ps1) - 36 files total - and the 6
+    // pre-rename legacy names (cap/pint, renamed to capc/capt) must never
+    // reappear in a real install.
     const expectedTools = [
       'idle', 'belownormal', 'abovenormal', 'high', 'realtime',
       'capc', 'capt', 'capm', 'admin', 'uiup', 'cy', 'cx',
     ];
-    const missing = expectedTools.filter((t) => !manifest.files.includes(`${t}.ps1`));
-    if (missing.length) {
-      fail(`expected launcher(s) missing from the installed manifest: ${missing.join(', ')}`);
+    const expectedFiles = expectedTools.flatMap((t) => [t, `${t}.bat`, `${t}.ps1`]);
+    const legacyNames = ['cap', 'cap.bat', 'cap.ps1', 'pint', 'pint.bat', 'pint.ps1'];
+    const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
+    const missing = expectedFiles.filter((f) => !manifestFiles.includes(f));
+    const extra = manifestFiles.filter((f) => !expectedFiles.includes(f) && !legacyNames.includes(f));
+    const forbidden = legacyNames.filter((f) => manifestFiles.includes(f));
+    if (missing.length || extra.length || forbidden.length) {
+      const parts = [];
+      if (missing.length) parts.push(`missing: ${missing.join(', ')}`);
+      if (extra.length) parts.push(`extra: ${extra.join(', ')}`);
+      if (forbidden.length) parts.push(`forbidden legacy name(s) present: ${forbidden.join(', ')}`);
+      fail(`installed manifest does not match the exact 36-file launcher contract (${parts.join('; ')})`);
     } else {
-      ok(`all ${expectedTools.length} expected launchers present in the installed manifest`);
+      ok(`all ${expectedFiles.length} expected launcher files present (12 tools x 3 variants), no legacy names`);
     }
   }
 
@@ -98,6 +126,7 @@ try {
 } finally {
   fs.rmSync(home, { recursive: true, force: true });
   fs.rmSync(installPrefix, { recursive: true, force: true });
+  fs.rmSync(skillHome, { recursive: true, force: true });
   fs.rmSync(tarballPath, { force: true });
 }
 

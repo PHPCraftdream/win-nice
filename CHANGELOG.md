@@ -4,7 +4,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-02
+## [0.2.0] - 2026-09-03
 
 The first release since `0.1.0` - `0.1.1` was never tagged or published;
 everything below shipped together as `0.2.0`.
@@ -39,6 +39,11 @@ everything below shipped together as `0.2.0`.
   best-effort kill itself also fails, the thrown error says so explicitly.
   Hardening for a class of rare Win32 failures - not a fix for an observed
   regression.
+- A plain `install`/upgrade (including `postinstall`) now also refreshes an
+  already-installed, still-marked `win-nice skill install` copy
+  (`~/.claude/skills/win-nice/SKILL.md`, `~/.agents/skills/win-nice/SKILL.md`)
+  to the new version's content. Initial skill installation is still opt-in -
+  this only ever touches a copy that's already there.
 
 ## [0.1.0] - 2026-09-02
 
