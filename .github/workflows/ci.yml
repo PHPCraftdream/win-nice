@@ -18,7 +18,12 @@ jobs:
         # engines.node in package.json says >=18 - test the floor, not just latest.
         node-version: [18, 20, 22, 24]
     steps:
+      # fetch-depth: 0 (full history + tags) - only release-check.js (below)
+      # actually needs it, but the checkout step is shared across the whole
+      # matrix and this is cheap.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -47,3 +52,13 @@ jobs:
           Import-Module Pester -MaximumVersion 3.99
           $result = Invoke-Pester -Path test\win-nice.Tests.ps1 -PassThru
           if ($result.FailedCount -gt 0) { exit 1 }
+
+      - name: Verify the actual packed artifact (scripts/release-check.js)
+        # Only one matrix leg needs to run this - it's a gate on the tarball
+        # itself, not on any given Node version, and running it 4x buys
+        # nothing. A break here (as in review rounds 12-13: shallow checkout,
+        # shell:true) would otherwise only surface in the tag-triggered
+        # publish job, after a tag already exists.
+        if: matrix.node-version == 24
+        shell: bash
+        run: npm run release-check

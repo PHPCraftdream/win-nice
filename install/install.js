@@ -15,13 +15,6 @@ function listSourceFiles() {
   return fs.readdirSync(SOURCE_BIN).filter((f) => f.endsWith('.bat') || f.endsWith('.ps1') || !f.includes('.'));
 }
 
-// Guards against `npm install`/`npm test` inside a source checkout silently
-// touching the real system PATH - only a genuine package install (running from
-// inside someone's node_modules) or an explicit WIN_NICE_HOME override proceeds.
-function isSourceCheckout() {
-  return fs.existsSync(path.join(__dirname, '..', '.git'));
-}
-
 // `npm install -g win-nice@newer` only runs postinstall (this function) - unlike
 // `win-nice reinstall`, which does uninstall()+install(), it never diffs against
 // what a previous version left behind. Without this, a tool dropped in a newer
@@ -53,7 +46,7 @@ function cleanupStaleFiles(dir, currentFiles) {
 }
 
 function install({ updatePath = true } = {}) {
-  if (!process.env.WIN_NICE_HOME && isSourceCheckout()) {
+  if (!process.env.WIN_NICE_HOME && paths.isSourceCheckout()) {
     console.log(
       'Running from a source checkout - skipping real install. ' +
         'Set WIN_NICE_HOME to force a target directory, or install the published package.'
@@ -98,4 +91,4 @@ function install({ updatePath = true } = {}) {
   return { dir, files };
 }
 
-module.exports = { install, listSourceFiles, isSourceCheckout };
+module.exports = { install, listSourceFiles, isSourceCheckout: paths.isSourceCheckout };

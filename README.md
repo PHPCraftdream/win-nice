@@ -470,21 +470,22 @@ tests use `WIN_NICE_HOME` to redirect installs into a temp directory instead.
 3 of its cases only exercise `admin.ps1`'s already-elevated branch, which
 needs the whole test-runner process to already be elevated (not just
 `admin.ps1` itself) - a normal, unelevated run reports them `Skipped`, which
-is expected, not a failure. A separate, disjoint set of 3 cases only makes
+is expected, not a failure. A separate, disjoint set of 4 cases only makes
 sense when NOT elevated, and `Skip`s under elevation instead. `npm run
 test:elevated` (`test/run-elevated.ps1`) is a single entry point for the
 first group: one UAC prompt elevates the runner once, then the suite runs
 inside that elevated session, activating those 3 cases (and skipping the
-other 3). Neither a normal run nor an elevated run alone exercises every
+other 4). Neither a normal run nor an elevated run alone exercises every
 case - run both for full coverage.
 
 `npm run release-check` (`scripts/release-check.js`) is a maintainer-only,
 source-checkout-only command that packs the actual npm tarball, installs it
 into an isolated temp directory, and verifies the real installed artifact
-(launcher file set, manifest version, a `capc` exit-code smoke test, and
-CHANGELOG/tag consistency) - this is what `publish.yml` runs right before
-`npm publish`. It needs `scripts/` and git tag history, neither of which is
-part of the published package, so it can't run against an installed copy.
+(launcher file set, manifest version, `capc`/`capt`/`capm` exit-code smoke
+tests, and CHANGELOG/tag consistency) - this is what `publish.yml` runs right
+before `npm publish`. It needs `scripts/` and git tag history, neither of
+which is part of the published package, so it can't run against an installed
+copy.
 
 ## License
 

@@ -3,7 +3,7 @@
 # Single entry point for the "already elevated" portion of the Pester suite.
 # win-nice.Tests.ps1 has 3 admin.ps1 cases gated by
 # -Skip:(-not $script:isAdminRunner) (only pass when the WHOLE test-runner
-# process, not just admin.ps1 itself, is already elevated) and 3 different
+# process, not just admin.ps1 itself, is already elevated) and 4 different
 # cases gated by -Skip:$script:isAdminRunner (only meaningful when it is NOT
 # elevated). Running this script asks for elevation exactly once (same
 # self-elevation pattern as bin/uiup.ps1's -SelfElevated), then runs the suite
@@ -68,7 +68,7 @@ if ($isAdmin) {
     exit ([int]($result.FailedCount -gt 0))
 }
 
-Write-Host "Not elevated - one UAC prompt will run the suite (activating the 3 admin.ps1 already-elevated cases, and Skipping 3 different non-elevated-only cases) in a separate elevated window. Output is relayed back here once it finishes. Run this suite normally (without elevation) too for full coverage."
+Write-Host "Not elevated - one UAC prompt will run the suite (activating the 3 admin.ps1 already-elevated cases, and Skipping 4 different non-elevated-only cases) in a separate elevated window. Output is relayed back here once it finishes. Run this suite normally (without elevation) too for full coverage."
 $logFile = [System.IO.Path]::GetTempFileName()
 try {
     $p = Start-Process powershell -Verb RunAs -ArgumentList @(

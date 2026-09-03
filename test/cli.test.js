@@ -214,3 +214,56 @@ test('regression: install() must never fall through to the ambient home when WIN
     }
   });
 });
+
+// Regression for the P2 finding: install() refuses to touch a real system
+// install from a source checkout (no WIN_NICE_HOME), but uninstall()/
+// reinstall() lacked that same guard - `win-nice reinstall` run from inside a
+// git clone would delete a real prior install and PATH entry via LOCALAPPDATA
+// resolution, then silently skip reinstalling it. Reproduced here without
+// ever touching the real LOCALAPPDATA: seed a "real-looking" install (with
+// WIN_NICE_HOME set, bypassing the guard on purpose), then run
+// reinstall/uninstall with WIN_NICE_HOME unset and LOCALAPPDATA pointed at
+// the same seeded location - a buggy uninstall/reinstall would resolve to it
+// and wipe it out.
+test('cli uninstall/reinstall from a source checkout (no WIN_NICE_HOME) refuse to touch a real-looking install', () => {
+  const fakeLocalAppData = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-fake-localappdata-'));
+  const skillHome = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-cli-skillhome-'));
+  try {
+    const seeded = spawnSync(process.execPath, [CLI, 'install'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        WIN_NICE_HOME: path.join(fakeLocalAppData, 'win-nice'),
+        WIN_NICE_SKILL_HOME: skillHome,
+        WIN_NICE_NO_PATH: '1',
+      },
+    });
+    assert.equal(seeded.status, 0, seeded.stderr);
+    const binDir = path.join(fakeLocalAppData, 'win-nice', 'bin');
+    assert.ok(fs.readdirSync(binDir).length > 0);
+
+    const envWithoutHome = { ...process.env };
+    delete envWithoutHome.WIN_NICE_HOME;
+    for (const cmd of ['reinstall', 'uninstall']) {
+      const res = spawnSync(process.execPath, [CLI, cmd], {
+        encoding: 'utf8',
+        env: {
+          ...envWithoutHome,
+          LOCALAPPDATA: fakeLocalAppData,
+          WIN_NICE_SKILL_HOME: skillHome,
+          WIN_NICE_NO_PATH: '1',
+        },
+      });
+      assert.equal(res.status, 0, res.stderr);
+      assert.match(res.stdout, /source checkout/);
+      assert.ok(fs.existsSync(binDir), `${cmd} must not remove a real-looking install without WIN_NICE_HOME`);
+      assert.ok(
+        fs.readdirSync(binDir).length > 0,
+        `${cmd} must not empty a real-looking install without WIN_NICE_HOME`
+      );
+    }
+  } finally {
+    fs.rmSync(fakeLocalAppData, { recursive: true, force: true });
+    fs.rmSync(skillHome, { recursive: true, force: true });
+  }
+});

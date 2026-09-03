@@ -25,6 +25,17 @@ function removeManagedFile(filePath, expectedDir, { requireMarker }) {
 }
 
 function uninstall({ updatePath = true } = {}) {
+  // Mirrors install()'s own guard: without it, `win-nice reinstall`/`uninstall`
+  // run from inside a git clone (no WIN_NICE_HOME) would delete a real prior
+  // install and PATH entry, then (for reinstall) silently skip reinstalling it.
+  if (!process.env.WIN_NICE_HOME && paths.isSourceCheckout()) {
+    console.log(
+      'Running from a source checkout - skipping real uninstall. ' +
+        'Set WIN_NICE_HOME to force a target directory, or uninstall the published package.'
+    );
+    return [];
+  }
+
   const dir = paths.binDir();
   const manifestFile = paths.manifestPath();
   const data = manifest.read(manifestFile);

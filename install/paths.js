@@ -1,7 +1,16 @@
 'use strict';
+const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
+
+// Guards mutating commands (install/uninstall/reinstall) against touching the
+// real system PATH/install dir when run from inside a git clone - only a
+// genuine package install (running from inside someone's node_modules) or an
+// explicit WIN_NICE_HOME override proceeds.
+function isSourceCheckout() {
+  return fs.existsSync(path.join(__dirname, '..', '.git'));
+}
 
 // WIN_NICE_HOME overrides the install root - used by tests and by anyone who
 // wants a non-default location. Real installs default to %LOCALAPPDATA%\win-nice.
@@ -129,6 +138,7 @@ function writeUserPath(newPath) {
 }
 
 module.exports = {
+  isSourceCheckout,
   installRoot,
   binDir,
   manifestPath,

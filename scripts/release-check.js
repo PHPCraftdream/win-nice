@@ -130,14 +130,24 @@ try {
         continue;
       }
       let status = null;
+      let stderr = '';
       try {
-        execFileSync('powershell', ['-NoProfile', '-File', ps1, arg, 'cmd.exe', '/c', 'exit', '7'], { stdio: 'ignore' });
+        // Match the -ExecutionPolicy Bypass every .bat/shim wrapper already
+        // passes: without it, a default Restricted client policy makes the
+        // .ps1 itself refuse to run, and stdio:'ignore' used to hide that
+        // entirely behind a bare "exited 1, expected 7".
+        execFileSync(
+          'powershell',
+          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1, arg, 'cmd.exe', '/c', 'exit', '7'],
+          { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' }
+        );
         status = 0;
       } catch (err) {
         status = err.status;
+        stderr = err.stderr ? err.stderr.trim() : '';
       }
       if (status !== 7) {
-        fail(`smoke test: "${tool} ${arg} cmd.exe /c exit 7" exited ${status}, expected 7`);
+        fail(`smoke test: "${tool} ${arg} cmd.exe /c exit 7" exited ${status}, expected 7${stderr ? ` (stderr: ${stderr})` : ''}`);
       } else {
         ok(`smoke test: ${tool} (installed from the tarball) propagates the wrapped exit code`);
       }
