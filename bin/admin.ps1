@@ -242,11 +242,21 @@ if ($isAdmin) {
 # aliases/functions (dir, echo, start) are invisible to it, which routes them to the
 # fallback, while real executables resolve. Standalone function so the routing
 # decision is testable without ever reaching -Verb RunAs (a real UAC prompt).
+# The resolver also records the path used by the direct route. Keep the routing
+# function self-contained: the test suite AST-extracts it without the rest of this
+# script, so it must not depend on a second helper function.
+$script:AdminLaunchPath = $null
 function Get-AdminLaunchRoute {
     param([Parameter(Mandatory = $true)][string]$Target)
+    $script:AdminLaunchPath = $null
     if ($Target -match '\.(bat|cmd)$') { return 'CmdFallback' }
     $resolved = Get-Command -Name ([System.Management.Automation.WildcardPattern]::Escape($Target)) -CommandType Application -ErrorAction SilentlyContinue
-    if ($resolved -and $resolved.Path -and $resolved.Path -notmatch '\.(bat|cmd)$') { return 'Direct' }
+    if ($resolved -and $resolved.Path -and $resolved.Path -notmatch '\.(bat|cmd)$') {
+        # ShellExecute must receive the resolved absolute path. Passing a bare name
+        # here lets the elevated process search the current directory first.
+        $script:AdminLaunchPath = [System.IO.Path]::GetFullPath($resolved.Path)
+        return 'Direct'
+    }
     return 'CmdFallback'
 }
 
@@ -265,10 +275,11 @@ try {
     if ($route -eq 'CmdFallback') {
         # Same /d /s /v:off + outer-quote-wrap fix as AdminLauncher.Run's cmd.exe
         # fallback, and for the same reason: cmd.exe's /C quote-stripping.
-        $p = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d', '/s', '/v:off', '/c', ('"' + $commandLine + '"')) -Verb RunAs -Wait -PassThru
+        $cmdExePath = [Environment]::SystemDirectory + '\cmd.exe'
+        $p = Start-Process -FilePath $cmdExePath -ArgumentList @('/d', '/s', '/v:off', '/c', ('"' + $commandLine + '"')) -Verb RunAs -Wait -PassThru
     } else {
         $startArgs = @{
-            FilePath = $Command[0]
+            FilePath = $script:AdminLaunchPath
             Verb = 'RunAs'
             Wait = $true
             PassThru = $true

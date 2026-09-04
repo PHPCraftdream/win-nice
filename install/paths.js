@@ -66,10 +66,25 @@ function removeFromPathString(currentPath, dir) {
   return parts.filter((p) => comparisonForm(p) !== target).join(';');
 }
 
+// Windows PowerShell is a fixed system dependency. Passing only its bare
+// name to CreateProcess lets libuv search the current directory before PATH,
+// so a powershell.exe planted next to `npm install` could run during the
+// installer's registry update. Keep the path construction injectable through
+// the env argument for unit tests, but never resolve the Windows executable
+// through PATH in production.
+function powershellPath(env = process.env) {
+  const systemRoot = env.SystemRoot || env.WINDIR;
+  if (!systemRoot || !path.win32.isAbsolute(systemRoot)) {
+    throw new Error('SystemRoot must be an absolute Windows path');
+  }
+  return path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+}
+
 function runPowershell(script, extraEnv) {
-  return execFileSync('powershell', ['-NoProfile', '-Command', script], {
+  const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
+  return execFileSync(powershellPath(env), ['-NoProfile', '-Command', script], {
     encoding: 'utf8',
-    env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
+    env,
   });
 }
 
@@ -144,6 +159,7 @@ module.exports = {
   manifestPath,
   addToPathString,
   removeFromPathString,
+  powershellPath,
   readUserPath,
   writeUserPath,
   readRegistryString,

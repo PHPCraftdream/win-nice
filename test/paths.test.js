@@ -1,6 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const paths = require('../install/paths');
 
@@ -44,4 +45,25 @@ test('binDir/manifestPath honor the WIN_NICE_HOME override', () => {
     if (prev === undefined) delete process.env.WIN_NICE_HOME;
     else process.env.WIN_NICE_HOME = prev;
   }
+});
+
+test('powershellPath resolves Windows PowerShell from an absolute system path', () => {
+  const systemRoot = 'D:\\Windows';
+  assert.equal(
+    paths.powershellPath({ SystemRoot: systemRoot }),
+    path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  );
+});
+
+test('powershellPath rejects a relative system root instead of falling back to PATH', () => {
+  assert.throws(
+    () => paths.powershellPath({ SystemRoot: 'Windows' }),
+    /SystemRoot must be an absolute Windows path/
+  );
+});
+
+test('registry PowerShell runner does not use a bare executable name', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'install', 'paths.js'), 'utf8');
+  assert.match(source, /execFileSync\(powershellPath\(env\),/);
+  assert.doesNotMatch(source, /execFileSync\(\s*['"]powershell(?:\.exe)?['"]/);
 });

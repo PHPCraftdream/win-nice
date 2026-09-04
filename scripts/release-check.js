@@ -14,6 +14,30 @@ const { execFileSync } = require('child_process');
 const repoRoot = path.join(__dirname, '..');
 const pkg = require(path.join(repoRoot, 'package.json'));
 
+// Fixed Windows dependencies must never be resolved through CreateProcess's
+// current-directory/PATH search. Keep the construction injectable so the
+// release-check contract can be regression-tested on non-Windows hosts too.
+// SystemDirectory mirrors [Environment]::SystemDirectory when it is supplied
+// by a caller; otherwise use the conventional SystemRoot\System32 location.
+function systemExecutablePath(relativePath, env = process.env) {
+  const systemRoot = env.SystemRoot || env.WINDIR;
+  const systemDirectory = env.SystemDirectory || (
+    systemRoot ? path.win32.join(systemRoot, 'System32') : undefined
+  );
+  if (!systemDirectory || !path.win32.isAbsolute(systemDirectory)) {
+    throw new Error('SystemRoot/SystemDirectory must be an absolute Windows path');
+  }
+  return path.win32.join(systemDirectory, relativePath);
+}
+
+function powershellPath(env = process.env) {
+  return systemExecutablePath('WindowsPowerShell\\v1.0\\powershell.exe', env);
+}
+
+function cmdPath(env = process.env) {
+  return systemExecutablePath('cmd.exe', env);
+}
+
 // npm resolves to npm.cmd on Windows. execFileSync can't launch it without a
 // shell (ENOENT - unlike a real .exe such as git), and naming npm.cmd
 // explicitly instead fails with EINVAL (a known Node/libuv quirk spawning
@@ -84,6 +108,65 @@ const expectedNonBinPaths = [
 ];
 const expectedTarballPaths = [...expectedBinPaths, ...expectedNonBinPaths];
 
+const changelogVersionHeadingPattern = /^## \[(\d+\.\d+\.\d+)\] - (\d{4})-(\d{2})-(\d{2})$/;
+
+function isValidCalendarDate(year, month, day) {
+  if (year < 1 || month < 1 || month > 12 || day < 1) return false;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  return day <= daysInMonth;
+}
+
+// Return a structured result so the release gate and focused regression tests
+// share exactly the same parsing and calendar validation. The first heading
+// after an optional [Unreleased] entry is the release entry that must match.
+function validateLatestChangelogHeading(changelog, expectedVersion) {
+  const lines = String(changelog).split(/\r\n?|\n/);
+  const headingIndex = lines.findIndex((line) =>
+    /^## \[/.test(line) && !/^## \[Unreleased\](?:\s|$)/.test(line)
+  );
+  if (headingIndex === -1) {
+    return {
+      ok: false,
+      error: 'no release version heading found; expected exactly "## [X.Y.Z] - YYYY-MM-DD"',
+    };
+  }
+
+  const line = lines[headingIndex];
+  const match = changelogVersionHeadingPattern.exec(line);
+  if (!match) {
+    return {
+      ok: false,
+      error: `line ${headingIndex + 1} must exactly match "## [X.Y.Z] - YYYY-MM-DD" (found: ${line})`,
+    };
+  }
+
+  const version = match[1];
+  const year = Number(match[2]);
+  const month = Number(match[3]);
+  const day = Number(match[4]);
+  if (!isValidCalendarDate(year, month, day)) {
+    return {
+      ok: false,
+      error: `line ${headingIndex + 1} has impossible calendar date ${match[2]}-${match[3]}-${match[4]}`,
+    };
+  }
+
+  if (expectedVersion !== undefined && version !== expectedVersion) {
+    return {
+      ok: false,
+      error: `latest heading is [${version}], but package.json version is ${expectedVersion}`,
+    };
+  }
+
+  return {
+    ok: true,
+    version,
+    date: `${match[2]}-${match[3]}-${match[4]}`,
+    line: headingIndex + 1,
+  };
+}
+
 function diffTarballPaths(packedPaths) {
   return {
     missing: expectedTarballPaths.filter((p) => !packedPaths.includes(p)),
@@ -96,7 +179,14 @@ function diffTarballPaths(packedPaths) {
 // return is valid CommonJS; executed directly (npm run release-check),
 // execution falls through to the gate below.
 if (require.main !== module) {
-  module.exports = { expectedTarballPaths, diffTarballPaths };
+  module.exports = {
+    expectedTarballPaths,
+    diffTarballPaths,
+    validateLatestChangelogHeading,
+    systemExecutablePath,
+    powershellPath,
+    cmdPath,
+  };
   return;
 }
 
@@ -224,8 +314,8 @@ try {
         // .ps1 itself refuse to run, and stdio:'ignore' used to hide that
         // entirely behind a bare "exited 1, expected 7".
         execFileSync(
-          'powershell',
-          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1, arg, 'cmd.exe', '/c', 'exit', '7'],
+          powershellPath(),
+          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1, arg, cmdPath(), '/c', 'exit', '7'],
           { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' }
         );
         status = 0;
@@ -251,7 +341,7 @@ try {
       let status = null;
       let stderr = '';
       try {
-        execFileSync('cmd.exe', ['/d', '/c', bat, 'cmd.exe', '/c', 'exit', '7'], {
+        execFileSync(cmdPath(), ['/d', '/c', bat, cmdPath(), '/c', 'exit', '7'], {
           stdio: ['ignore', 'ignore', 'pipe'],
           encoding: 'utf8',
         });
@@ -289,7 +379,7 @@ try {
       let status = null;
       let stderr = '';
       try {
-        execFileSync('bash', [shim, 'cmd.exe', '/c', 'exit', '7'], {
+        execFileSync('bash', [shim, cmdPath(), '/c', 'exit', '7'], {
           stdio: ['ignore', 'ignore', 'pipe'],
           encoding: 'utf8',
         });
@@ -318,13 +408,11 @@ try {
 // (a CHANGELOG entry for a version that was never tagged or published).
 const changelogPath = path.join(repoRoot, 'CHANGELOG.md');
 const changelog = fs.readFileSync(changelogPath, 'utf8');
-const headingMatch = changelog.match(/^## \[(\d+\.\d+\.\d+)\]/m);
-if (!headingMatch) {
-  fail('CHANGELOG.md: no "## [X.Y.Z]" version heading found');
-} else if (headingMatch[1] !== pkg.version) {
-  fail(`CHANGELOG.md's latest heading is [${headingMatch[1]}], but package.json version is ${pkg.version}`);
+const headingValidation = validateLatestChangelogHeading(changelog, pkg.version);
+if (!headingValidation.ok) {
+  fail(`CHANGELOG.md: ${headingValidation.error}`);
 } else {
-  ok(`CHANGELOG.md's latest heading matches package.json (${pkg.version})`);
+  ok(`CHANGELOG.md's latest heading matches package.json (${pkg.version}) and has a real calendar date (${headingValidation.date})`);
 }
 
 const escapedVersion = pkg.version.replace(/\./g, '\\.');

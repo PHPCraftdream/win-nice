@@ -5,6 +5,13 @@
 $root = Split-Path -Parent $PSScriptRoot
 $bin = Join-Path $root 'bin'
 
+# Every PowerShell process started by this harness is a fixed host, not the
+# command-under-test. Resolve it once from the Windows system directory so a
+# hostile working directory or PATH entry cannot redirect a test subprocess.
+$script:powerShellPath = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
+$script:previousPowerShellPath = [Environment]::GetEnvironmentVariable('WIN_NICE_POWERSHELL_PATH', 'Process')
+$env:WIN_NICE_POWERSHELL_PATH = $script:powerShellPath
+
 # -Verb RunAs (admin.ps1's not-elevated branch) needs an interactive UAC click and
 # can't be exercised in an automated test. Tests that need real elevation are
 # -Skip:(-not $script:isAdminRunner) rather than silently `return`-ing, so a
@@ -50,7 +57,7 @@ function Get-ForwardedArgs {
     $prefixText = ($Prefix | ForEach-Object { & $quoted $_ }) -join ' '
     $argsText = ($ProbeArgs | ForEach-Object { & $quoted $_ }) -join ' '
     $driver = (New-TempScript).Replace('.ps1', '.bat')
-    Set-Content -Path $driver -Value ("@echo off`r`nset WIN_NICE_TEST_OUT=$out`r`n`"$Exe`" $prefixText powershell -NoProfile -File `"$probeFile`" $argsText`r`n")
+    Set-Content -Path $driver -Value ("@echo off`r`nset WIN_NICE_TEST_OUT=$out`r`n`"$Exe`" $prefixText `"$script:powerShellPath`" -NoProfile -File `"$probeFile`" $argsText`r`n")
     & $driver | Out-Null
     $exitCode = $LASTEXITCODE
     $result = if (Test-Path $out) { (Get-Content $out).Trim() } else { $null }
@@ -71,12 +78,77 @@ function Get-DirectForwardedArgs {
     $probeFile = New-TempScript
     Set-Content -Path $probeFile -Value $probe
     $env:WIN_NICE_TEST_OUT = $out
-    & powershell -NoProfile -File $Ps1 @Prefix powershell -NoProfile -File $probeFile @ProbeArgs
+    & $script:powerShellPath -NoProfile -File $Ps1 @Prefix $script:powerShellPath -NoProfile -File $probeFile @ProbeArgs
     $exitCode = $LASTEXITCODE
     Remove-Item Env:\WIN_NICE_TEST_OUT -ErrorAction SilentlyContinue
     $result = if (Test-Path $out) { (Get-Content $out).Trim() } else { $null }
     Remove-Item $out, $probeFile -ErrorAction SilentlyContinue
     return [PSCustomObject]@{ Output = $result; ExitCode = $exitCode }
+}
+
+Describe 'PowerShell batch-wrapper launch contract' {
+    # These wrappers are managed files: resolving PowerShell by a bare name lets
+    # an executable in the caller's working directory win the launch search. cx
+    # and cy are intentionally different - they delegate to external CLIs and
+    # must not be included in this PowerShell-wrapper contract.
+    $powerShellWrappers = @(
+        'abovenormal', 'admin', 'belownormal', 'capc', 'capm', 'capn',
+        'caps', 'capt', 'high', 'idle', 'realtime', 'uiup'
+    )
+    $directCliWrappers = @(
+        @{ Name = 'cx'; Command = 'codex' }
+        @{ Name = 'cy'; Command = 'claude' }
+    )
+
+    It 'uses the fully-qualified SystemRoot WindowsPowerShell path for every PowerShell wrapper' {
+        foreach ($name in $powerShellWrappers) {
+            $source = Get-Content (Join-Path $bin ($name + '.bat')) -Raw
+            $path = '"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"'
+            ([regex]::Matches($source, [regex]::Escape($path))).Count | Should Be 1
+            $source | Should Match ([regex]::Escape($path + ' -NoProfile -ExecutionPolicy Bypass -File'))
+        }
+    }
+
+    It 'keeps the external CLI wrappers outside the PowerShell-wrapper contract' {
+        foreach ($wrapper in $directCliWrappers) {
+            $source = Get-Content (Join-Path $bin ($wrapper.Name + '.bat')) -Raw
+            $source | Should Not Match 'SystemRoot\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe'
+            $source | Should Match ('(?im)^' + $wrapper.Command + '\s+--')
+        }
+    }
+
+    It 'does not execute a hostile powershell.cmd from the wrapper working directory' {
+        # This is a real process-resolution regression, not just a source-shape
+        # assertion: before the wrappers used an absolute host path, cmd.exe's
+        # current-directory search could select this powershell.cmd before PATH.
+        # idle.bat is representative of the managed .bat shims and never asks for
+        # elevation, so the test cannot open a UAC prompt.
+        $hostileCwd = Join-Path $script:testRoot ('hostile-cwd-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $hostileCwd | Out-Null
+        $marker = Join-Path $hostileCwd 'uac-or-cwd-hijack.marker'
+        $fakePowerShell = Join-Path $hostileCwd 'powershell.cmd'
+        Set-Content -Path $fakePowerShell -Value "@echo off`r`necho hijacked>`"$marker`"`r`nexit /b 97`r`n"
+
+        $driver = (New-TempScript).Replace('.ps1', '.bat')
+        $idleBat = Join-Path $bin 'idle.bat'
+        Set-Content -Path $driver -Value "@echo off`r`ncall `"$idleBat`" cmd /c exit 0`r`nexit /b %errorlevel%`r`n"
+
+        $cmdPath = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $cmdPath
+        $psi.Arguments = '/d /c "' + $driver + '"'
+        $psi.WorkingDirectory = $hostileCwd
+        $psi.UseShellExecute = $false
+        $process = [System.Diagnostics.Process]::Start($psi)
+        try {
+            $process.WaitForExit(10000) | Should Be $true
+            $process.ExitCode | Should Be 0
+            Test-Path -LiteralPath $marker | Should Be $false
+        } finally {
+            if ($process -and -not $process.HasExited) { $process.Kill() }
+            Remove-Item $driver, $hostileCwd -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 Describe 'idle.bat' {
@@ -87,7 +159,7 @@ Describe 'idle.bat' {
 
     It 'runs the given command at Idle priority' {
         $out = New-TempFile
-        & (Join-Path $bin 'idle.bat') powershell -NoProfile -Command "(Get-Process -Id `$PID).PriorityClass | Out-File -FilePath '$out'"
+        & (Join-Path $bin 'idle.bat') $script:powerShellPath -NoProfile -Command "(Get-Process -Id `$PID).PriorityClass | Out-File -FilePath '$out'"
         (Get-Content $out).Trim() | Should Be 'Idle'
         Remove-Item $out -ErrorAction SilentlyContinue
     }
@@ -109,7 +181,7 @@ try {{
 '@ -f $out
         $scriptFile = New-TempScript
         Set-Content -Path $scriptFile -Value $script
-        & (Join-Path $bin 'idle.bat') powershell -NoProfile -File $scriptFile
+        & (Join-Path $bin 'idle.bat') $script:powerShellPath -NoProfile -File $scriptFile
         (Get-Content $out).Trim() | Should Be 'Idle'
         Remove-Item $out, $scriptFile -ErrorAction SilentlyContinue
     }
@@ -132,7 +204,7 @@ Set-Content -Path '{0}' -Value ($a -join '|SEP|')
         Set-Content -Path $probeFile -Value $probe
         $idleBat = Join-Path $bin 'idle.bat'
         $driver = (New-TempScript).Replace('.ps1', '.bat')
-        Set-Content -Path $driver -Value "@echo off`r`n`"$idleBat`" powershell -NoProfile -File `"$probeFile`" `"A&B`" `"A|B`" `"A<B>C`" `"A^B`"`r`n"
+        Set-Content -Path $driver -Value "@echo off`r`n`"$idleBat`" `"$script:powerShellPath`" -NoProfile -File `"$probeFile`" `"A&B`" `"A|B`" `"A<B>C`" `"A^B`"`r`n"
         & $driver
         $LASTEXITCODE | Should Be 0
         (Get-Content $out).Trim() | Should Be 'A&B|SEP|A|B|SEP|A<B>C|SEP|A^B'
@@ -151,7 +223,7 @@ Set-Content -Path '{0}' -Value ($a -join '|SEP|')
 Describe 'idle.ps1' {
     It 'runs the given command at Idle priority' {
         $out = New-TempFile
-        & powershell -NoProfile -File (Join-Path $bin 'idle.ps1') powershell -NoProfile -Command "(Get-Process -Id `$PID).PriorityClass | Out-File -FilePath '$out'"
+        & $script:powerShellPath -NoProfile -File (Join-Path $bin 'idle.ps1') $script:powerShellPath -NoProfile -Command "(Get-Process -Id `$PID).PriorityClass | Out-File -FilePath '$out'"
         (Get-Content $out).Trim() | Should Be 'Idle'
         Remove-Item $out -ErrorAction SilentlyContinue
     }
@@ -171,7 +243,7 @@ Describe 'belownormal.bat' {
 
     It 'runs the given command at BelowNormal priority' {
         $out = New-TempFile
-        & (Join-Path $bin 'belownormal.bat') powershell -NoProfile -Command "(Get-Process -Id `$PID).PriorityClass | Out-File -FilePath '$out'"
+        & (Join-Path $bin 'belownormal.bat') $script:powerShellPath -NoProfile -Command "(Get-Process -Id `$PID).PriorityClass | Out-File -FilePath '$out'"
         (Get-Content $out).Trim() | Should Be 'BelowNormal'
         Remove-Item $out -ErrorAction SilentlyContinue
     }
@@ -180,7 +252,7 @@ Describe 'belownormal.bat' {
 Describe 'belownormal.ps1' {
     It 'runs the given command at BelowNormal priority' {
         $out = New-TempFile
-        & powershell -NoProfile -File (Join-Path $bin 'belownormal.ps1') powershell -NoProfile -Command "(Get-Process -Id `$PID).PriorityClass | Out-File -FilePath '$out'"
+        & $script:powerShellPath -NoProfile -File (Join-Path $bin 'belownormal.ps1') $script:powerShellPath -NoProfile -Command "(Get-Process -Id `$PID).PriorityClass | Out-File -FilePath '$out'"
         (Get-Content $out).Trim() | Should Be 'BelowNormal'
         Remove-Item $out -ErrorAction SilentlyContinue
     }
@@ -228,7 +300,7 @@ Describe 'idle.bat / belownormal.bat / abovenormal.bat / high.bat / realtime.bat
         param($Name, $Expected)
         $out = New-TempFile
         try {
-            & (Join-Path $bin "$Name.bat") powershell -NoProfile -Command "(Get-Process -Id `$PID).PriorityClass | Out-File -FilePath '$out'"
+            & (Join-Path $bin "$Name.bat") $script:powerShellPath -NoProfile -Command "(Get-Process -Id `$PID).PriorityClass | Out-File -FilePath '$out'"
             (Get-Content $out).Trim() | Should Be $Expected
         } finally {
             Remove-Item $out -ErrorAction SilentlyContinue
@@ -246,7 +318,7 @@ Describe 'abovenormal.ps1 / high.ps1 / realtime.ps1' {
     It 'runs the given command at the expected priority (<Name> -> <Expected>)' -TestCases $priorityTools {
         param($Name, $Expected)
         $out = New-TempFile
-        & powershell -NoProfile -File (Join-Path $bin "$Name.ps1") powershell -NoProfile -Command "(Get-Process -Id `$PID).PriorityClass | Out-File -FilePath '$out'"
+        & $script:powerShellPath -NoProfile -File (Join-Path $bin "$Name.ps1") $script:powerShellPath -NoProfile -Command "(Get-Process -Id `$PID).PriorityClass | Out-File -FilePath '$out'"
         (Get-Content $out).Trim() | Should Be $Expected
         Remove-Item $out -ErrorAction SilentlyContinue
     }
@@ -269,7 +341,7 @@ try {{
 '@ -f $out
         $scriptFile = New-TempScript
         Set-Content -Path $scriptFile -Value $script
-        & powershell -NoProfile -File (Join-Path $bin "$Name.ps1") powershell -NoProfile -File $scriptFile
+        & $script:powerShellPath -NoProfile -File (Join-Path $bin "$Name.ps1") $script:powerShellPath -NoProfile -File $scriptFile
         (Get-Content $out).Trim() | Should Be 'Normal'
         Remove-Item $out, $scriptFile -ErrorAction SilentlyContinue
     }
@@ -334,7 +406,7 @@ Set-Content -Path '{0}' -Value ($a.Count.ToString() + "|" + ($a -join ","))
         Set-Content -Path $probeFile -Value $probe
         $capcBat = Join-Path $bin 'capc.bat'
         $driver = (New-TempScript).Replace('.ps1', '.bat')
-        Set-Content -Path $driver -Value "@echo off`r`n`"$capcBat`" 50 powershell -NoProfile -File `"$probeFile`" AAA `"`" BBB`r`n"
+        Set-Content -Path $driver -Value "@echo off`r`n`"$capcBat`" 50 `"$script:powerShellPath`" -NoProfile -File `"$probeFile`" AAA `"`" BBB`r`n"
         & $driver
         (Get-Content $out).Trim() | Should Be '3|AAA,,BBB'
         Remove-Item $out, $probeFile, $driver -ErrorAction SilentlyContinue
@@ -352,7 +424,7 @@ Set-Content -Path '{0}' -Value ($a -join '|SEP|')
         Set-Content -Path $probeFile -Value $probe
         $capcBat = Join-Path $bin 'capc.bat'
         $driver = (New-TempScript).Replace('.ps1', '.bat')
-        Set-Content -Path $driver -Value "@echo off`r`n`"$capcBat`" 50 powershell -NoProfile -File `"$probeFile`" `"A&B`" `"A|B`" `"A<B>C`" `"A^B`"`r`n"
+        Set-Content -Path $driver -Value "@echo off`r`n`"$capcBat`" 50 `"$script:powerShellPath`" -NoProfile -File `"$probeFile`" `"A&B`" `"A|B`" `"A<B>C`" `"A^B`"`r`n"
         & $driver
         $LASTEXITCODE | Should Be 0
         (Get-Content $out).Trim() | Should Be 'A&B|SEP|A|B|SEP|A<B>C|SEP|A^B'
@@ -373,7 +445,7 @@ Set-Content -Path $env:WIN_NICE_TEST_OUT -Value ($args -join '|SEP|')
         Set-Content -Path $probeFile -Value $probe
         $capcBat = Join-Path $bin 'capc.bat'
         $driver = (New-TempScript).Replace('.ps1', '.bat')
-        Set-Content -Path $driver -Value "@echo off`r`nset WIN_NICE_TEST_OUT=$out`r`n`"$capcBat`" 50 powershell -NoProfile -File `"$probeFile`" -e 0 -Verbose`r`n"
+        Set-Content -Path $driver -Value "@echo off`r`nset WIN_NICE_TEST_OUT=$out`r`n`"$capcBat`" 50 `"$script:powerShellPath`" -NoProfile -File `"$probeFile`" -e 0 -Verbose`r`n"
         & $driver
         $LASTEXITCODE | Should Be 0
         (Get-Content $out).Trim() | Should Be '-e|SEP|0|SEP|-Verbose'
@@ -467,8 +539,8 @@ Write-Output ("{0:N1}" -f $pct)
         $lastBaseline = $null
         $lastCapped = $null
         for ($attempt = 1; $attempt -le 10 -and -not $passed; $attempt++) {
-            $baseline = [double](powershell -NoProfile -File $burnFile $threads $seconds)
-            $cappedOut = & (Join-Path $bin 'capc.bat') $cap powershell -NoProfile -File $burnFile $threads $seconds
+            $baseline = [double](& $script:powerShellPath -NoProfile -File $burnFile $threads $seconds)
+            $cappedOut = & (Join-Path $bin 'capc.bat') $cap $script:powerShellPath -NoProfile -File $burnFile $threads $seconds
             $capped = [double]($cappedOut | Select-Object -Last 1)
             $lastBaseline = $baseline
             $lastCapped = $capped
@@ -518,7 +590,7 @@ Describe '%-fail-closed on the cmd.exe fallback path' {
         $targetBat = $targetBat.Replace('.ps1', '.bat')
         Set-Content -Path $targetBat -Value "@echo off`r`n(echo ran)>`"$marker`"`r`n"
         $ps1 = Join-Path $bin "$Name.ps1"
-        $stderr = & powershell -NoProfile -File $ps1 @Prefix $targetBat '100%OFF' 2>&1
+        $stderr = & $script:powerShellPath -NoProfile -File $ps1 @Prefix $targetBat '100%OFF' 2>&1
         $exitCode = $LASTEXITCODE
         $exitCode | Should Be 1
         # The child powershell wraps Write-Error text at the console buffer width
@@ -551,7 +623,7 @@ function Test-SpacedTargetFallback {
     $targetBat = Join-Path $spacedDir 't.bat'
     Set-Content -Path $targetBat -Value "@echo off`r`necho BATOUT=%*`r`n"
     try {
-        $stdout = & powershell -NoProfile -File $Ps1 @Prefix $targetBat 'A&B' 'plain'
+        $stdout = & $script:powerShellPath -NoProfile -File $Ps1 @Prefix $targetBat 'A&B' 'plain'
         $exitCode = $LASTEXITCODE
         return [PSCustomObject]@{ Output = ($stdout | Select-Object -Last 1); ExitCode = $exitCode }
     } finally {
@@ -611,28 +683,50 @@ Describe 'capt.ps1 argument validation' {
         $LASTEXITCODE | Should Be 1
     }
 
-    It 'caps the accepted thread count at the process pointer width under 32-bit PowerShell (unit-tested via Get-CaptAffinityBitLimit)' {
-        # The real 32-bit path can't run end-to-end here: the suite executes
-        # the 64-bit Windows PowerShell host, where [UIntPtr]::Size is 8 and
-        # the guard's error branch is unreachable (maxCount is 63 < 64). The
-        # guard is a single comparison against Get-CaptAffinityBitLimit, so
-        # extract that exact function from capt.ps1's own source and drive
-        # its pointer-width input directly (release review round-20 P3-4).
+    It 'rejects counts above the 32-bit pointer-width limit with the production validation result' {
+        # The suite normally runs under 64-bit Windows PowerShell, so the
+        # production script's 32-bit branch is unreachable on a <=63-core host.
+        # Extract the production validation functions and inject the 32-bit
+        # pointer width. This exercises the same result object that the script
+        # converts into Write-Error + exit, including its message and exit code.
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
             (Join-Path $bin 'capt.ps1'), [ref]$null, [ref]$null)
-        $fnNode = $ast.Find({
+        $fnNodes = $ast.FindAll({
             param($a)
-            $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $a.Name -eq 'Get-CaptAffinityBitLimit'
+            $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -in @(
+                'Get-CaptAffinityBitLimit', 'Get-CaptThreadCountValidation'
+            )
         }, $true)
-        $fnNode | Should Not Be $null
-        Invoke-Expression $fnNode.Extent.Text
+        $fnNodes.Count | Should Be 2
+        foreach ($fnNode in $fnNodes) { Invoke-Expression $fnNode.Extent.Text }
+
         Get-CaptAffinityBitLimit -UIntPtrSize 4 | Should Be 32
         Get-CaptAffinityBitLimit -UIntPtrSize 8 | Should Be 64
-        # And capt.ps1 must actually gate on the helper, not on a stale
-        # inline copy of the bound.
-        $captSrc = Get-Content (Join-Path $bin 'capt.ps1') -Raw
-        $captSrc | Should Match ([regex]::Escape('if ($countValue -gt (Get-CaptAffinityBitLimit))'))
+        $rejected = Get-CaptThreadCountValidation -Count 33 -MaxCount 63 `
+            -AffinityBitLimit (Get-CaptAffinityBitLimit -UIntPtrSize 4) -ProcessBitWidth 32
+        $rejected.IsValid | Should Be $false
+        $rejected.ExitCode | Should Be 1
+        $rejected.Message | Should Match '33.*32 affinity bits, 32-bit'
+        $rejected.Message | Should Match 'use 64-bit PowerShell'
+
+        $accepted = Get-CaptThreadCountValidation -Count 32 -MaxCount 63 `
+            -AffinityBitLimit (Get-CaptAffinityBitLimit -UIntPtrSize 4) -ProcessBitWidth 32
+        $accepted.IsValid | Should Be $true
+        $accepted.ExitCode | Should Be 0
+        $accepted.Message | Should Be $null
+    }
+
+    # The helper test above is mandatory everywhere. This second check runs the
+    # shipped script under the real 32-bit Windows PowerShell host when the
+    # machine has enough logical processors for count 33 to reach that branch.
+    # On smaller hosts, or on 32-bit Windows without a SysWOW64 host, Pester
+    # reports an explicit skip instead of silently losing this coverage.
+    $capt32PowerShellPath = Join-Path $env:SystemRoot 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
+    It 'rejects count 33 through the real 32-bit PowerShell host on a >32-processor machine' -Skip:([Environment]::ProcessorCount -le 32 -or -not (Test-Path -LiteralPath $capt32PowerShellPath -PathType Leaf)) {
+        $stderr = & $capt32PowerShellPath -NoProfile -File (Join-Path $bin 'capt.ps1') 33 $env:ComSpec /c exit 0 2>&1
+        $LASTEXITCODE | Should Be 1
+        (($stderr | Out-String) -replace '\s+', ' ') | Should Match '33.*32 affinity bits, 32-bit'
+        (($stderr | Out-String) -replace '\s+', ' ') | Should Match 'use 64-bit PowerShell'
     }
 
     It 'rejects a missing command' {
@@ -683,7 +777,7 @@ Describe 'capt.ps1 behavior' {
         $probe = "Set-Content -Path '$out' -Value ('0x' + (Get-Process -Id `$PID).ProcessorAffinity.ToString('X'))"
         $probeFile = New-TempScript
         Set-Content -Path $probeFile -Value $probe
-        & (Join-Path $bin 'capt.bat') $n powershell -NoProfile -File $probeFile
+        & (Join-Path $bin 'capt.bat') $n $script:powerShellPath -NoProfile -File $probeFile
         (Get-Content $out).Trim() | Should Be $expectedMask
         Remove-Item $out, $probeFile -ErrorAction SilentlyContinue
     }
@@ -707,7 +801,7 @@ try {{
 '@ -f $out
         $scriptFile = New-TempScript
         Set-Content -Path $scriptFile -Value $script
-        & (Join-Path $bin 'capt.bat') $n powershell -NoProfile -File $scriptFile
+        & (Join-Path $bin 'capt.bat') $n $script:powerShellPath -NoProfile -File $scriptFile
         (Get-Content $out).Trim() | Should Be $expectedMask
         Remove-Item $out, $scriptFile -ErrorAction SilentlyContinue
     }
@@ -847,7 +941,7 @@ try {
         $probeFile = New-TempScript
         Set-Content -Path $probeFile -Value ($allocProbeTemplate -replace '__SIZE_MB__', '200')
 
-        $tight = & powershell -NoProfile -File (Join-Path $bin 'capm.ps1') 100m powershell -NoProfile -File $probeFile
+        $tight = & $script:powerShellPath -NoProfile -File (Join-Path $bin 'capm.ps1') 100m $script:powerShellPath -NoProfile -File $probeFile
         $tightExit = $LASTEXITCODE
         $tightExit | Should Be 0
         ($tight | Select-Object -Last 1) | Should Match '^FAILED:'
@@ -860,7 +954,7 @@ try {
         # any real machine and the allocation would fail instead.
         $probeFile2 = New-TempScript
         Set-Content -Path $probeFile2 -Value ($allocProbeTemplate -replace '__SIZE_MB__', '200')
-        $roomy = & powershell -NoProfile -File (Join-Path $bin 'capm.ps1') 100 powershell -NoProfile -File $probeFile2
+        $roomy = & $script:powerShellPath -NoProfile -File (Join-Path $bin 'capm.ps1') 100 $script:powerShellPath -NoProfile -File $probeFile2
         $roomyExit = $LASTEXITCODE
         $roomyExit | Should Be 0
         ($roomy | Select-Object -Last 1) | Should Be 'ALLOCATED'
@@ -893,13 +987,13 @@ try {
         Set-Content -Path $grandchildFile -Value $grandchildProbe
 
         $outerScript = @"
-`$c = Start-Process powershell -ArgumentList @('-NoProfile', '-File', '$grandchildFile') -WindowStyle Hidden -PassThru -RedirectStandardOutput '$out'
+`$c = Start-Process -FilePath `$env:WIN_NICE_POWERSHELL_PATH -ArgumentList @('-NoProfile', '-File', '$grandchildFile') -WindowStyle Hidden -PassThru -RedirectStandardOutput '$out'
 if (-not `$c.WaitForExit(15000)) { `$c.Kill() }
 "@
         $outerFile = New-TempScript
         Set-Content -Path $outerFile -Value $outerScript
 
-        & (Join-Path $bin 'capm.bat') 400m powershell -NoProfile -File $outerFile
+        & (Join-Path $bin 'capm.bat') 400m $script:powerShellPath -NoProfile -File $outerFile
         (Get-Content $out -ErrorAction SilentlyContinue | Select-Object -Last 1) | Should Match '^FAILED:'
         Remove-Item $out, $grandchildFile, $outerFile -ErrorAction SilentlyContinue
     }
@@ -920,7 +1014,7 @@ Describe 'chained tool invocation (bare tool names resolved via PATH, cmd.exe PA
         $prevPath = $env:PATH
         $env:PATH = $chainPath
         try {
-            & powershell -NoProfile -File (Join-Path $bin 'capc.ps1') 50 idle cmd.exe /c exit 8
+            & $script:powerShellPath -NoProfile -File (Join-Path $bin 'capc.ps1') 50 idle cmd.exe /c exit 8
             $LASTEXITCODE | Should Be 8
         } finally {
             $env:PATH = $prevPath
@@ -941,7 +1035,7 @@ Describe 'chained tool invocation (bare tool names resolved via PATH, cmd.exe PA
             $probe = "(Get-Process -Id `$PID).PriorityClass | Out-File -FilePath '$out'; exit 8"
             $probeFile = New-TempScript
             Set-Content -Path $probeFile -Value $probe
-            & powershell -NoProfile -File (Join-Path $bin 'capm.ps1') 100 capc 50 idle powershell -NoProfile -File $probeFile
+            & $script:powerShellPath -NoProfile -File (Join-Path $bin 'capm.ps1') 100 capc 50 idle $script:powerShellPath -NoProfile -File $probeFile
             $LASTEXITCODE | Should Be 8
             (Get-Content $out).Trim() | Should Be 'Idle'
             Remove-Item $out, $probeFile -ErrorAction SilentlyContinue
@@ -962,7 +1056,7 @@ Describe 'chained tool invocation (bare tool names resolved via PATH, cmd.exe PA
         $prevPath = $env:PATH
         $env:PATH = $chainPath
         try {
-            & powershell -NoProfile -File (Join-Path $bin 'capc.ps1') 50 capm 50 cmd.exe /c exit 8
+            & $script:powerShellPath -NoProfile -File (Join-Path $bin 'capc.ps1') 50 capm 50 cmd.exe /c exit 8
             $LASTEXITCODE | Should Be 8
         } finally {
             $env:PATH = $prevPath
@@ -1001,14 +1095,14 @@ try {
         try {
             $probeFile = New-TempScript
             Set-Content -Path $probeFile -Value $localAllocProbe
-            $tight = & powershell -NoProfile -File (Join-Path $bin 'capm.ps1') 400m capc 50 powershell -NoProfile -File $probeFile
+            $tight = & $script:powerShellPath -NoProfile -File (Join-Path $bin 'capm.ps1') 400m capc 50 $script:powerShellPath -NoProfile -File $probeFile
             $LASTEXITCODE | Should Be 0
             ($tight | Select-Object -Last 1) | Should Match '^FAILED:'
             Remove-Item $probeFile -ErrorAction SilentlyContinue
 
             $probeFile2 = New-TempScript
             Set-Content -Path $probeFile2 -Value $localAllocProbe
-            $roomy = & powershell -NoProfile -File (Join-Path $bin 'capm.ps1') 100 capc 50 powershell -NoProfile -File $probeFile2
+            $roomy = & $script:powerShellPath -NoProfile -File (Join-Path $bin 'capm.ps1') 100 capc 50 $script:powerShellPath -NoProfile -File $probeFile2
             $LASTEXITCODE | Should Be 0
             ($roomy | Select-Object -Last 1) | Should Be 'ALLOCATED'
             Remove-Item $probeFile2 -ErrorAction SilentlyContinue
@@ -1058,9 +1152,9 @@ Write-Output ("{0:N1}" -f $pct)
             $lastSingle = $null
             $lastNested = $null
             for ($attempt = 1; $attempt -le 3 -and -not $passed; $attempt++) {
-                $singleOut = & (Join-Path $bin 'capc.bat') $cap powershell -NoProfile -File $burnFile $threads $seconds
+                $singleOut = & (Join-Path $bin 'capc.bat') $cap $script:powerShellPath -NoProfile -File $burnFile $threads $seconds
                 $single = [double]($singleOut | Select-Object -Last 1)
-                $nestedOut = & powershell -NoProfile -File (Join-Path $bin 'capc.ps1') $cap capc $cap powershell -NoProfile -File $burnFile $threads $seconds
+                $nestedOut = & $script:powerShellPath -NoProfile -File (Join-Path $bin 'capc.ps1') $cap capc $cap $script:powerShellPath -NoProfile -File $burnFile $threads $seconds
                 $nested = [double]($nestedOut | Select-Object -Last 1)
                 $lastSingle = $single
                 $lastNested = $nested
@@ -1108,7 +1202,7 @@ Write-Output ("{0:N1}" -f $pct)
             $probe = "(Get-Process -Id `$PID).ProcessorAffinity.ToString('X') | Out-File -FilePath '$out'; exit 8"
             $probeFile = New-TempScript
             Set-Content -Path $probeFile -Value $probe
-            & powershell -NoProfile -File (Join-Path $bin 'capt.ps1') 1 capt 2 powershell -NoProfile -File $probeFile
+            & $script:powerShellPath -NoProfile -File (Join-Path $bin 'capt.ps1') 1 capt 2 $script:powerShellPath -NoProfile -File $probeFile
             $LASTEXITCODE | Should Be 8
             ('0x' + (Get-Content $out).Trim()) | Should Be '0x1'
             Remove-Item $out, $probeFile -ErrorAction SilentlyContinue
@@ -1159,7 +1253,7 @@ Describe 'admin.bat' {
         # This check runs directly in PowerShell before Start-Process -Verb RunAs is
         # ever called (see admin.ps1), so no UAC consent prompt is at risk here - if
         # this ever hangs, the check moved past the RunAs call and needs investigating.
-        $stderr = & powershell -NoProfile -File (Join-Path $bin 'admin.ps1') 'somebatch.bat' /c '100%OFF' 2>&1
+        $stderr = & $script:powerShellPath -NoProfile -File (Join-Path $bin 'admin.ps1') 'somebatch.bat' /c '100%OFF' 2>&1
         $exitCode = $LASTEXITCODE
         $exitCode | Should Be 1
         (($stderr | Out-String) -replace '\s+', ' ') | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
@@ -1179,7 +1273,7 @@ Describe 'admin.bat' {
         $adminPs1 = Join-Path $bin 'admin.ps1'
         $driverScript = New-TempScript
         Set-Content -Path $driverScript -Value "& '$adminPs1' 'somebatch.bat' (5) '100%OFF'`r`nexit `$LASTEXITCODE`r`n"
-        $stderr = & powershell -NoProfile -File $driverScript 2>&1 | Out-String
+        $stderr = & $script:powerShellPath -NoProfile -File $driverScript 2>&1 | Out-String
         $exitCode = $LASTEXITCODE
         $exitCode | Should Be 1
         $stderr | Should Not Match 'does not contain a method'
@@ -1238,6 +1332,14 @@ Describe 'admin.ps1 launch routing (not-yet-elevated branch)' {
         Get-AdminLaunchRoute -Target $Target | Should Be 'Direct'
     }
 
+    It 'records an absolute executable path for the direct elevated launch' {
+        Get-AdminLaunchRoute -Target 'cmd' | Should Be 'Direct'
+        $script:AdminLaunchPath | Should Not Be $null
+        [System.IO.Path]::IsPathRooted($script:AdminLaunchPath) | Should Be $true
+        [System.IO.Path]::GetFullPath($script:AdminLaunchPath) | Should Be $script:AdminLaunchPath
+        Test-Path -LiteralPath $script:AdminLaunchPath -PathType Leaf | Should Be $true
+    }
+
     It 'routes a .bat target to the cmd.exe fallback even though Get-Command resolves it' {
         $bat = Join-Path $script:testRoot 'routing-probe.bat'
         Set-Content -Path $bat -Value "@echo off`r`nexit /b 0`r`n"
@@ -1253,12 +1355,29 @@ Describe 'admin.ps1 launch routing (not-yet-elevated branch)' {
         # AdminLauncher.Run's own fallback check instead, so the not-yet-elevated
         # routing under test wouldn't be exercised (same message, wrong branch).
         foreach ($target in @('ver', 'set')) {
-            $stderr = & powershell -NoProfile -File $adminPs1ForRouting $target '100%OFF' 2>&1
+            $stderr = & $script:powerShellPath -NoProfile -File $adminPs1ForRouting $target '100%OFF' 2>&1
             $exitCode = $LASTEXITCODE
             $exitCode | Should Be 1
             (($stderr | Out-String) -replace '\s+', ' ') | Should Match ([regex]::Escape("Refusing to run: argument contains '%'"))
             (($stderr | Out-String) -replace '\s+', ' ') | Should Not Match 'cannot\s+find\s+the\s+file'
         }
+    }
+}
+
+Describe 'elevated launcher executable-path contract' {
+    It 'does not pass bare executable names to admin.ps1 elevation' {
+        $source = Get-Content $adminPs1ForRouting -Raw
+        $source | Should Match ([regex]::Escape("[Environment]::SystemDirectory + '\cmd.exe'"))
+        $source | Should Match ([regex]::Escape('FilePath = $script:AdminLaunchPath'))
+        $source | Should Not Match "Start-Process\s+-FilePath\s+'cmd\.exe'"
+        $source | Should Not Match 'FilePath\s*=\s*\$Command\[0\]'
+    }
+
+    It 'uses the system PowerShell path for uiup.ps1 elevation' {
+        $source = Get-Content (Join-Path $bin 'uiup.ps1') -Raw
+        $source | Should Match ([regex]::Escape("[Environment]::SystemDirectory + '\WindowsPowerShell\v1.0\powershell.exe'"))
+        $source | Should Match ([regex]::Escape('Start-Process -FilePath $powershellPath -Verb RunAs'))
+        $source | Should Not Match 'Start-Process\s+powershell\s+-Verb\s+RunAs'
     }
 }
 
@@ -1290,7 +1409,7 @@ function Test-FakeLauncher {
     # PATH order or cmd.exe's current-directory-first search quirk.
     $env:PATH = "$fakeDir;$env:SystemRoot\System32;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
     try {
-        $stderr = & powershell -NoProfile -File $Ps1 @ExtraArgs 2>&1 | Out-String
+        $stderr = & $script:powerShellPath -NoProfile -File $Ps1 @ExtraArgs 2>&1 | Out-String
         $exitCode = $LASTEXITCODE
     } finally {
         $env:PATH = $prevPath
@@ -1353,11 +1472,11 @@ Describe 'cy.ps1 / cx.ps1 PATH isolation' {
         $isolatedPath = "$fakeDir;$env:SystemRoot\System32;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
         $ps1Path = Join-Path $bin $Ps1
         $job = Start-Job -ScriptBlock {
-            param($Ps1Path, $Path)
+            param($Ps1Path, $Path, $PowerShellPath)
             $env:PATH = $Path
-            $out = & powershell -NoProfile -File $Ps1Path 2>&1 | Out-String
+            $out = & $PowerShellPath -NoProfile -File $Ps1Path 2>&1 | Out-String
             [PSCustomObject]@{ Out = $out; ExitCode = $LASTEXITCODE }
-        } -ArgumentList $ps1Path, $isolatedPath
+        } -ArgumentList $ps1Path, $isolatedPath, $script:powerShellPath
         $done = Wait-Job $job -Timeout 20
         if (-not $done) {
             Stop-Job $job
@@ -2172,7 +2291,7 @@ while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
 "@
         $outerFile = New-TempScript
         Set-Content -Path $outerFile -Value @"
-`$grandchild = Start-Process powershell -ArgumentList @('-NoProfile', '-File', '$grandchildFile') -WindowStyle Hidden -PassThru
+`$grandchild = Start-Process -FilePath `$env:WIN_NICE_POWERSHELL_PATH -ArgumentList @('-NoProfile', '-File', '$grandchildFile') -WindowStyle Hidden -PassThru
 Set-Content -Path '$grandchildPidFile' -Value `$grandchild.Id
 "@
         $t = $script:allLauncherProbes['caps']
@@ -2182,7 +2301,7 @@ Set-Content -Path '$grandchildPidFile' -Value `$grandchild.Id
         $message = $null
         try {
             try {
-                Invoke-LauncherProbe -Case @{ HasPriorityFlag = $null; JobArg = 30000; Name = 'caps' } -Argv @('powershell', '-NoProfile', '-File', $outerFile) -CmdLine 'x' | Out-Null
+                Invoke-LauncherProbe -Case @{ HasPriorityFlag = $null; JobArg = 30000; Name = 'caps' } -Argv @($script:powerShellPath, '-NoProfile', '-File', $outerFile) -CmdLine 'x' | Out-Null
             } catch {
                 $message = $_.Exception.InnerException.Message
             }
@@ -2234,7 +2353,7 @@ Set-Content -Path '$grandchildPidFile' -Value `$grandchild.Id
         $t::ForceBothSignaledThenReturnProcess = $true
         $threw = $null
         try {
-            Invoke-LauncherProbe -Case @{ HasPriorityFlag = $null; JobArg = 600; Name = 'caps' } -Argv @('powershell', '-NoProfile', '-Command', 'Start-Sleep -Milliseconds 1500') -CmdLine 'x' | Out-Null
+            Invoke-LauncherProbe -Case @{ HasPriorityFlag = $null; JobArg = 600; Name = 'caps' } -Argv @($script:powerShellPath, '-NoProfile', '-Command', 'Start-Sleep -Milliseconds 1500') -CmdLine 'x' | Out-Null
         } catch {
             $threw = $_.Exception
         }
@@ -2351,10 +2470,10 @@ while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
         $outerFile = New-TempScript
         Set-Content -Path $outerFile -Value @"
 Set-Content -Path '$childPidFile' -Value `$PID
-Start-Process powershell -ArgumentList @('-NoProfile', '-File', '$grandchildFile') -WindowStyle Hidden | Out-Null
+Start-Process -FilePath `$env:WIN_NICE_POWERSHELL_PATH -ArgumentList @('-NoProfile', '-File', '$grandchildFile') -WindowStyle Hidden | Out-Null
 Start-Sleep -Seconds 60
 "@
-        $launcher = Start-Process powershell -ArgumentList @('-NoProfile', '-File', (Join-Path $bin 'capc.ps1'), '50', 'powershell', '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
+        $launcher = Start-Process -FilePath $script:powerShellPath -ArgumentList @('-NoProfile', '-File', (Join-Path $bin 'capc.ps1'), '50', $script:powerShellPath, '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
         $childPid = 0
         $grandchildPid = 0
         try {
@@ -2453,10 +2572,10 @@ while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
         $outerFile = New-TempScript
         Set-Content -Path $outerFile -Value @"
 Set-Content -Path '$childPidFile' -Value `$PID
-Start-Process powershell -ArgumentList @('-NoProfile', '-File', '$daemonFile') -WindowStyle Hidden | Out-Null
+Start-Process -FilePath `$env:WIN_NICE_POWERSHELL_PATH -ArgumentList @('-NoProfile', '-File', '$daemonFile') -WindowStyle Hidden | Out-Null
 exit 0
 "@
-        $launcher = Start-Process powershell -ArgumentList @('-NoProfile', '-File', (Join-Path $bin "$Name.ps1"), $ToolArg, 'powershell', '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
+        $launcher = Start-Process -FilePath $script:powerShellPath -ArgumentList @('-NoProfile', '-File', (Join-Path $bin "$Name.ps1"), $ToolArg, $script:powerShellPath, '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
         $childPid = 0
         $daemonPid = 0
         try {
@@ -2568,12 +2687,12 @@ while (-not (Test-Path '$goFile') -and [DateTime]::UtcNow -lt `$deadline) { Star
 `$spawn1Ok = `$false
 `$spawn2Failed = `$false
 try {
-    `$p1 = Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 10') -WindowStyle Hidden -PassThru
+    `$p1 = Start-Process -FilePath `$env:WIN_NICE_POWERSHELL_PATH -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 10') -WindowStyle Hidden -PassThru
     `$kids += `$p1
     `$spawn1Ok = `$true
     Start-Sleep -Milliseconds 500
     try {
-        `$p2 = Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 10') -WindowStyle Hidden -PassThru
+    `$p2 = Start-Process -FilePath `$env:WIN_NICE_POWERSHELL_PATH -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 10') -WindowStyle Hidden -PassThru
         `$kids += `$p2
     } catch {
         `$spawn2Failed = `$true
@@ -2589,10 +2708,10 @@ while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
         $outerFile = New-TempScript
         Set-Content -Path $outerFile -Value @"
 Set-Content -Path '$childPidFile' -Value `$PID
-Start-Process powershell -ArgumentList @('-NoProfile', '-File', '$daemonFile') -WindowStyle Hidden | Out-Null
+Start-Process -FilePath `$env:WIN_NICE_POWERSHELL_PATH -ArgumentList @('-NoProfile', '-File', '$daemonFile') -WindowStyle Hidden | Out-Null
 exit 0
 "@
-        $launcher = Start-Process powershell -ArgumentList @('-NoProfile', '-File', (Join-Path $bin 'capn.ps1'), '2', 'powershell', '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
+        $launcher = Start-Process -FilePath $script:powerShellPath -ArgumentList @('-NoProfile', '-File', (Join-Path $bin 'capn.ps1'), '2', $script:powerShellPath, '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
         $childPid = 0
         $daemonPid = 0
         try {
@@ -2697,10 +2816,10 @@ while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
         $outerFile = New-TempScript
         Set-Content -Path $outerFile -Value @"
 Set-Content -Path '$childPidFile' -Value `$PID
-Start-Process powershell -ArgumentList @('-NoProfile', '-File', '$daemonFile') -WindowStyle Hidden | Out-Null
+Start-Process -FilePath `$env:WIN_NICE_POWERSHELL_PATH -ArgumentList @('-NoProfile', '-File', '$daemonFile') -WindowStyle Hidden | Out-Null
 exit 0
 "@
-        $launcher = Start-Process powershell -ArgumentList @('-NoProfile', '-File', (Join-Path $bin 'capm.ps1'), '2g', 'powershell', '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
+        $launcher = Start-Process -FilePath $script:powerShellPath -ArgumentList @('-NoProfile', '-File', (Join-Path $bin 'capm.ps1'), '2g', $script:powerShellPath, '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
         $childPid = 0
         $daemonPid = 0
         try {
@@ -2820,7 +2939,7 @@ Set-Content -Path '$childPidFile' -Value `$PID
 while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
 "@
         try {
-            $stderr = & powershell -NoProfile -File (Join-Path $bin 'caps.ps1') 2 powershell -NoProfile -File $hungFile 2>&1
+            $stderr = & $script:powerShellPath -NoProfile -File (Join-Path $bin 'caps.ps1') 2 $script:powerShellPath -NoProfile -File $hungFile 2>&1
             $exitCode = $LASTEXITCODE
             $exitCode | Should Be 124
             # The console word-wraps Write-Error text (same technique as the
@@ -2860,10 +2979,10 @@ while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
         $outerFile = New-TempScript
         Set-Content -Path $outerFile -Value @"
 Set-Content -Path '$childPidFile' -Value `$PID
-Start-Process powershell -ArgumentList @('-NoProfile', '-File', '$grandchildFile') -WindowStyle Hidden | Out-Null
+Start-Process -FilePath `$env:WIN_NICE_POWERSHELL_PATH -ArgumentList @('-NoProfile', '-File', '$grandchildFile') -WindowStyle Hidden | Out-Null
 Start-Sleep -Seconds 60
 "@
-        $launcher = Start-Process powershell -ArgumentList @('-NoProfile', '-File', (Join-Path $bin 'caps.ps1'), '5', 'powershell', '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
+        $launcher = Start-Process -FilePath $script:powerShellPath -ArgumentList @('-NoProfile', '-File', (Join-Path $bin 'caps.ps1'), '5', $script:powerShellPath, '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
         $childPid = 0
         $grandchildPid = 0
         try {
@@ -2930,7 +3049,7 @@ while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
 "@
         try {
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            & powershell -NoProfile -File (Join-Path $bin 'caps.ps1') 3 powershell -NoProfile -File $hungFile 2>&1 | Out-Null
+            & $script:powerShellPath -NoProfile -File (Join-Path $bin 'caps.ps1') 3 $script:powerShellPath -NoProfile -File $hungFile 2>&1 | Out-Null
             $sw.Stop()
             $LASTEXITCODE | Should Be 124
             # The timer's ABSOLUTE due time fires at the deadline regardless of
@@ -3063,8 +3182,8 @@ Describe 'capn.ps1 behavior' {
         $out = New-TempFile
         $script = @'
 $ErrorActionPreference = 'Stop'
-$p1 = Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 10') -WindowStyle Hidden -PassThru
-$p2 = Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 10') -WindowStyle Hidden -PassThru
+$p1 = Start-Process -FilePath $env:WIN_NICE_POWERSHELL_PATH -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 10') -WindowStyle Hidden -PassThru
+$p2 = Start-Process -FilePath $env:WIN_NICE_POWERSHELL_PATH -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 10') -WindowStyle Hidden -PassThru
 try {{
     Start-Sleep -Seconds 2
     $a1 = $null -ne (Get-Process -Id $p1.Id -ErrorAction SilentlyContinue)
@@ -3077,7 +3196,7 @@ exit 0
 '@ -f $out
         $scriptFile = New-TempScript
         Set-Content -Path $scriptFile -Value $script
-        & (Join-Path $bin 'capn.bat') 3 powershell -NoProfile -File $scriptFile
+        & (Join-Path $bin 'capn.bat') 3 $script:powerShellPath -NoProfile -File $scriptFile
         $LASTEXITCODE | Should Be 0
         (Get-Content $out).Trim() | Should Be 'CHILD1-ALIVE=True CHILD2-ALIVE=True'
         Remove-Item $out, $scriptFile -ErrorAction SilentlyContinue
@@ -3097,7 +3216,7 @@ exit 0
 $ErrorActionPreference = 'Stop'
 $spawnFailed = $false
 try {{
-    Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 10') -WindowStyle Hidden | Out-Null
+    Start-Process -FilePath $env:WIN_NICE_POWERSHELL_PATH -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 10') -WindowStyle Hidden | Out-Null
 }} catch {{
     $spawnFailed = $true
 }}
@@ -3108,7 +3227,7 @@ exit 0
 '@ -f $out
         $scriptFile = New-TempScript
         Set-Content -Path $scriptFile -Value $script
-        & (Join-Path $bin 'capn.bat') 1 powershell -NoProfile -File $scriptFile
+        & (Join-Path $bin 'capn.bat') 1 $script:powerShellPath -NoProfile -File $scriptFile
         $LASTEXITCODE | Should Be 0
         (Get-Content $out).Trim() | Should Match 'SPAWN-FAILED=True PARENT-STILL-RUNNING=\d+'
         Remove-Item $out, $scriptFile -ErrorAction SilentlyContinue
@@ -3141,10 +3260,10 @@ while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
         $outerFile = New-TempScript
         Set-Content -Path $outerFile -Value @"
 Set-Content -Path '$childPidFile' -Value `$PID
-Start-Process powershell -ArgumentList @('-NoProfile', '-File', '$grandchildFile') -WindowStyle Hidden | Out-Null
+Start-Process -FilePath `$env:WIN_NICE_POWERSHELL_PATH -ArgumentList @('-NoProfile', '-File', '$grandchildFile') -WindowStyle Hidden | Out-Null
 Start-Sleep -Seconds 60
 "@
-        $launcher = Start-Process powershell -ArgumentList @('-NoProfile', '-File', (Join-Path $bin 'capn.ps1'), '10', 'powershell', '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
+        $launcher = Start-Process -FilePath $script:powerShellPath -ArgumentList @('-NoProfile', '-File', (Join-Path $bin 'capn.ps1'), '10', $script:powerShellPath, '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
         $childPid = 0
         $grandchildPid = 0
         try {
@@ -3213,19 +3332,20 @@ Describe 'sequential invocation in one PowerShell session' {
         $script = @"
 `$env:WIN_NICE_TEST_OUT = '$out'
 `$env:PATH = '$fakeDir;$env:SystemRoot\System32;$env:SystemRoot\System32\WindowsPowerShell\v1.0'
+`$env:WIN_NICE_POWERSHELL_PATH = '$script:powerShellPath'
 foreach (`$name in @('idle', 'belownormal', 'abovenormal', 'high', 'realtime')) {
-    & (Join-Path '$bin' "`$name.ps1") powershell -NoProfile -File '$probeFile'
+    & (Join-Path '$bin' "`$name.ps1") `$env:WIN_NICE_POWERSHELL_PATH -NoProfile -File '$probeFile'
     if (`$LASTEXITCODE -ne 0) { throw "`$name failed with exit `$LASTEXITCODE" }
 }
-& (Join-Path '$bin' 'capc.ps1') 50 powershell -NoProfile -File '$probeFile'
+& (Join-Path '$bin' 'capc.ps1') 50 `$env:WIN_NICE_POWERSHELL_PATH -NoProfile -File '$probeFile'
 if (`$LASTEXITCODE -ne 0) { throw "capc failed with exit `$LASTEXITCODE" }
-& (Join-Path '$bin' 'capt.ps1') 1 powershell -NoProfile -File '$probeFile'
+& (Join-Path '$bin' 'capt.ps1') 1 `$env:WIN_NICE_POWERSHELL_PATH -NoProfile -File '$probeFile'
 if (`$LASTEXITCODE -ne 0) { throw "capt failed with exit `$LASTEXITCODE" }
-& (Join-Path '$bin' 'capm.ps1') 90 powershell -NoProfile -File '$probeFile'
+& (Join-Path '$bin' 'capm.ps1') 90 `$env:WIN_NICE_POWERSHELL_PATH -NoProfile -File '$probeFile'
 if (`$LASTEXITCODE -ne 0) { throw "capm failed with exit `$LASTEXITCODE" }
-& (Join-Path '$bin' 'caps.ps1') 30 powershell -NoProfile -File '$probeFile'
+& (Join-Path '$bin' 'caps.ps1') 30 `$env:WIN_NICE_POWERSHELL_PATH -NoProfile -File '$probeFile'
 if (`$LASTEXITCODE -ne 0) { throw "caps failed with exit `$LASTEXITCODE" }
-& (Join-Path '$bin' 'capn.ps1') 10 powershell -NoProfile -File '$probeFile'
+& (Join-Path '$bin' 'capn.ps1') 10 `$env:WIN_NICE_POWERSHELL_PATH -NoProfile -File '$probeFile'
 if (`$LASTEXITCODE -ne 0) { throw "capn failed with exit `$LASTEXITCODE" }
 & (Join-Path '$bin' 'cy.ps1')
 if (`$LASTEXITCODE -ne 0) { throw "cy failed with exit `$LASTEXITCODE" }
@@ -3239,7 +3359,7 @@ exit 0
 "@
         $sessionScript = New-TempScript
         Set-Content -Path $sessionScript -Value $script
-        $errorOutput = & powershell -NoProfile -File $sessionScript 2>&1
+        $errorOutput = & $script:powerShellPath -NoProfile -File $sessionScript 2>&1
         $LASTEXITCODE | Should Be 0
         ($errorOutput -join "`n") | Should Not Match 'already exists'
 
@@ -3275,8 +3395,21 @@ Describe 'test/run-elevated.ps1' {
         { Get-Command (Join-Path $PSScriptRoot 'run-elevated.ps1') -ErrorAction Stop } | Should Not Throw
     }
 
+    It 'uses the fully-qualified Windows PowerShell path for the npm first hop and UAC relaunch' {
+        # Keep this regression check static: invoking test:elevated would open a
+        # real UAC prompt, while the security contract is visible in both launch
+        # sites without executing either one.
+        $runner = Get-Content (Join-Path $PSScriptRoot 'run-elevated.ps1') -Raw
+        $runner | Should Match ([regex]::Escape("[Environment]::SystemDirectory + '\WindowsPowerShell\v1.0\powershell.exe'"))
+        $runner | Should Match ([regex]::Escape('Start-Process -FilePath $powershellPath -Verb RunAs'))
+        $runner | Should Not Match 'Start-Process\s+powershell(?:\.exe)?\s+-Verb\s+RunAs'
+
+        $package = Get-Content (Join-Path $PSScriptRoot '..\package.json') -Raw | ConvertFrom-Json
+        $package.scripts.'test:elevated' | Should Be '"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File test\run-elevated.ps1'
+    }
+
     It 'refuses -SelfElevated without -LogPath (internal flag - not meant to be passed by hand)' {
-        $errOut = & powershell -NoProfile -File (Join-Path $PSScriptRoot 'run-elevated.ps1') -SelfElevated 2>&1
+        $errOut = & $script:powerShellPath -NoProfile -File (Join-Path $PSScriptRoot 'run-elevated.ps1') -SelfElevated 2>&1
         $LASTEXITCODE | Should Be 1
         # PowerShell's default error-view word-wraps Write-Error text to the
         # console width, which can split "requires -LogPath" across a line
@@ -3294,7 +3427,7 @@ Describe 'test/run-elevated.ps1' {
     # honored and this would instead recurse into a real (nested) Pester run.
     It 'refuses to run the suite when -SelfElevated is passed but the process is not actually elevated (guards a false elevated-coverage result)' -Skip:$script:isAdminRunner {
         $log = New-TempFile
-        $errOut = & powershell -NoProfile -File (Join-Path $PSScriptRoot 'run-elevated.ps1') -SelfElevated -LogPath $log 2>&1
+        $errOut = & $script:powerShellPath -NoProfile -File (Join-Path $PSScriptRoot 'run-elevated.ps1') -SelfElevated -LogPath $log 2>&1
         $LASTEXITCODE | Should Be 1
         # PowerShell's default error-view word-wraps Write-Error text to the
         # console width, which can split "not actually elevated" across a
@@ -3316,3 +3449,9 @@ Describe 'test/run-elevated.ps1' {
 # executes top to bottom, so this statement runs after every Describe above has
 # finished.
 Remove-Item $script:testRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+if ($null -eq $script:previousPowerShellPath) {
+    Remove-Item Env:\WIN_NICE_POWERSHELL_PATH -ErrorAction SilentlyContinue
+} else {
+    $env:WIN_NICE_POWERSHELL_PATH = $script:previousPowerShellPath
+}

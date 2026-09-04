@@ -11,7 +11,7 @@ if ($args.Count -lt 2) {
     exit 1
 }
 $countValue = 0
-if (-not [int]::TryParse($args[0], [ref]$countValue) -or $countValue -lt 1 -or $countValue -gt $maxCount) {
+if (-not [int]::TryParse($args[0], [ref]$countValue)) {
     Write-Error "usage: capt <thread-count 1-$maxCount> <command> [args...]"
     exit 1
 }
@@ -21,21 +21,53 @@ if (-not [int]::TryParse($args[0], [ref]$countValue) -or $countValue -lt 1 -or $
 # bits. A <thread-count> of 33-63 on a many-core machine passes the machine
 # range check above, then dies inside Run()'s struct initializer with a raw
 # "Arithmetic operation resulted in an overflow." instead of an actionable
-# usage error. Reject it here, capm-style. A helper function rather than an
-# inline literal so the Pester suite can unit-test the 32-bit decision on a
-# 64-bit process.
+# usage error. Reject it here, capm-style. Pure helper functions rather than
+# inline checks let the Pester suite drive the exact production validation with
+# an injected 32-bit pointer width from a 64-bit process.
 function Get-CaptAffinityBitLimit {
     param([int]$UIntPtrSize = [UIntPtr]::Size)
     return $UIntPtrSize * 8
 }
 
-if ($countValue -gt (Get-CaptAffinityBitLimit)) {
-    $affinityBits = Get-CaptAffinityBitLimit
-    Write-Error ("capt: <thread-count> ($countValue) exceeds the addressable limit " +
-        "for this PowerShell process ($affinityBits affinity bits, $([UIntPtr]::Size * 8)-bit) - " +
-        "use 64-bit PowerShell for counts above $affinityBits, or lower <thread-count>. " +
-        "usage: capt <thread-count 1-$maxCount> <command> [args...]")
-    exit 1
+function Get-CaptThreadCountValidation {
+    param(
+        [int]$Count,
+        [int]$MaxCount,
+        [int]$AffinityBitLimit,
+        [int]$ProcessBitWidth = ([UIntPtr]::Size * 8)
+    )
+
+    if ($Count -lt 1 -or $Count -gt $MaxCount) {
+        return [PSCustomObject]@{
+            IsValid = $false
+            ExitCode = 1
+            Message = "usage: capt <thread-count 1-$MaxCount> <command> [args...]"
+        }
+    }
+
+    if ($Count -gt $AffinityBitLimit) {
+        return [PSCustomObject]@{
+            IsValid = $false
+            ExitCode = 1
+            Message = ("capt: <thread-count> ($Count) exceeds the addressable limit " +
+                "for this PowerShell process ($AffinityBitLimit affinity bits, $ProcessBitWidth-bit) - " +
+                "use 64-bit PowerShell for counts above $AffinityBitLimit, or lower <thread-count>. " +
+                "usage: capt <thread-count 1-$MaxCount> <command> [args...]")
+        }
+    }
+
+    return [PSCustomObject]@{
+        IsValid = $true
+        ExitCode = 0
+        Message = $null
+    }
+}
+
+$validation = Get-CaptThreadCountValidation -Count $countValue -MaxCount $maxCount `
+    -AffinityBitLimit (Get-CaptAffinityBitLimit)
+if (-not $validation.IsValid) {
+    Write-Error $validation.Message
+    exit $validation.ExitCode
 }
 $Command = @($args[1..($args.Count - 1)])
 

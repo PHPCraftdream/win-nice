@@ -8,7 +8,8 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
 if (-not $isAdmin) {
     Write-Host "Not elevated - requesting admin rights (dwm/sihost run under a different account)..."
     try {
-        $p = Start-Process powershell -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-SelfElevated') -Wait -PassThru
+        $powershellPath = [Environment]::SystemDirectory + '\WindowsPowerShell\v1.0\powershell.exe'
+        $p = Start-Process -FilePath $powershellPath -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-SelfElevated') -Wait -PassThru
         exit $p.ExitCode
     } catch {
         Write-Error "Elevation was cancelled or failed: $($_.Exception.Message)"

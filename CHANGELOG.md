@@ -4,7 +4,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-03
+## [0.2.0] - 2026-09-04
 
 The first release since `0.1.0` - `0.1.1` was never tagged or published;
 everything below shipped together as `0.2.0`.
@@ -86,6 +86,17 @@ everything below shipped together as `0.2.0`.
 
 ### Fixed
 
+- Fixed executable search-order hardening for Windows system helpers: all
+  PowerShell-delegating `.bat` wrappers, the installer, and the `admin`/`uiup`
+  UAC paths now launch Windows PowerShell or `cmd.exe` by an absolute system
+  path. `admin` also carries the absolute path returned by `Get-Command` into
+  its direct elevated launch instead of resolving the original bare name a
+  second time through ShellExecute. This prevents a same-named executable in
+  the caller's current directory from replacing the intended process,
+  including at the elevation boundary.
+- `capt` under 32-bit Windows PowerShell now rejects thread counts above the
+  32-bit affinity-mask width with an actionable usage error instead of
+  reaching a `UIntPtr` conversion and reporting a raw overflow exception.
 - `uninstall` and `reinstall` run from a source checkout of this repository
   without an explicit `WIN_NICE_HOME` set now refuse to run, matching what
   `install` already did - previously they deleted a real

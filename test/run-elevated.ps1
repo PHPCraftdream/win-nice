@@ -22,6 +22,10 @@ param(
 )
 
 $testPath = Join-Path $PSScriptRoot 'win-nice.Tests.ps1'
+# This is a managed maintainer entry point. Resolve the Windows PowerShell
+# host from the system directory before the UAC hop; a bare executable name
+# would let CreateProcess/ShellExecute search the working directory or PATH.
+$powershellPath = [Environment]::SystemDirectory + '\WindowsPowerShell\v1.0\powershell.exe'
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if ($SelfElevated) {
@@ -71,7 +75,7 @@ if ($isAdmin) {
 Write-Host "Not elevated - one UAC prompt will run the suite (activating the 3 admin.ps1 already-elevated cases, and Skipping 4 different non-elevated-only cases) in a separate elevated window. Output is relayed back here once it finishes. Run this suite normally (without elevation) too for full coverage."
 $logFile = [System.IO.Path]::GetTempFileName()
 try {
-    $p = Start-Process powershell -Verb RunAs -ArgumentList @(
+    $p = Start-Process -FilePath $powershellPath -Verb RunAs -ArgumentList @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-SelfElevated', '-LogPath', "`"$logFile`""
     ) -Wait -PassThru
 } catch {
