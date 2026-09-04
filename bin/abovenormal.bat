@@ -10,4 +10,4 @@ if "%~1"=="" (
 :: cmd.exe metacharacter (&|<>^) survives this hop untouched. Invoking
 :: "abovenormal" bare from an actual PowerShell session skips this file
 :: (abovenormal.ps1 preferred).
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0abovenormal.ps1" %*
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0abovenormal.ps1" %*

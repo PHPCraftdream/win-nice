@@ -13,8 +13,8 @@
 # nothing survives it" true for the whole spawned tree.
 $usage = "usage: caps <seconds> <command> [args...]  (seconds: positive whole or " +
     "decimal number, e.g. 2 or 2.5 - converted to whole milliseconds; minimum " +
-    "1 ms, maximum 4294967294 ms (~49.7 days), because 0xFFFFFFFF is the " +
-    "wait-forever sentinel, not a deadline)"
+    "1 ms, maximum 4294967294 ms (~49.7 days) - a deliberate ceiling, " +
+    "not an API limit)"
 
 if ($args.Count -lt 2) {
     Write-Error $usage
@@ -39,12 +39,13 @@ if (-not $numOk -or [double]::IsNaN($secondsNum) -or [double]::IsInfinity($secon
     Write-Error "caps: <seconds> is out of range. $usage"
     exit 1
 }
-# WaitForMultipleObjects' dwMilliseconds is a uint32 whose 0xFFFFFFFF value is
-# reserved as INFINITE - so this tool's deadline cap is 0xFFFFFFFE ms (~49.7
-# days). Anything larger would silently wrap/truncate into a different
-# deadline or collide with the wait-forever sentinel; reject it as the usage
-# error it is instead. Floor to whole milliseconds so a sub-millisecond value
-# can neither round up nor truncate to a meaningless 0 unnoticed.
+# The upper bound is a deliberate usage ceiling, not an API limit: the deadline
+# is an absolute 64-bit FILETIME armed via SetWaitableTimer, and the wait below
+# passes dwMilliseconds = INFINITE unconditionally, so no uint32 boundary
+# applies to it. ~49.7 days comfortably covers any real use; anything larger is
+# rejected as the usage error it is instead, never silently truncated. Floor to
+# whole milliseconds so a sub-millisecond value can neither round up nor
+# truncate to a meaningless 0 unnoticed.
 $timeoutMsDouble = $secondsNum * 1000.0
 if ($timeoutMsDouble -lt 1 -or $timeoutMsDouble -gt 4294967294) {
     Write-Error "caps: <seconds> is out of range. $usage"
@@ -245,36 +246,6 @@ public static class CapsLauncher
         return string.Join(" ", parts);
     }
 
-    // Test hook for the sleep-safe deadline, exposing the EXACT production
-    // primitive: create a one-shot MANUAL-RESET waitable timer, arm it with an
-    // ABSOLUTE due time (positive FILETIME from ToFileTimeUtc, fResume false),
-    // and wait on it alone through WaitForMultipleObjects - same function, same
-    // marshaling, same flags Run() uses, just a one-element handle array.
-    // Public so the Pester suite can compile-call it on the fault-probe copy:
-    // with a due time already in the past this is mechanically identical to a
-    // deadline that passed while the machine was asleep, because in both cases
-    // the timer's signaled state is a property of the absolute clock. Returns
-    // the raw WaitForMultipleObjects result - WAIT_OBJECT_0 (0) when the timer
-    // was already signaled, WAIT_TIMEOUT (0x102) if it never signaled within
-    // timeoutMs (the control case proving the probe can't return 0 spuriously).
-    public static uint ProbePastDueTimerWait(DateTime dueTimeUtc, uint timeoutMs)
-    {
-        IntPtr hTimer = CreateWaitableTimer(IntPtr.Zero, true, null);
-        if (hTimer == IntPtr.Zero)
-            throw new InvalidOperationException("CreateWaitableTimer failed: " + Marshal.GetLastWin32Error());
-        try
-        {
-            long dueTime = dueTimeUtc.ToFileTimeUtc();
-            if (!SetWaitableTimer(hTimer, ref dueTime, 0, IntPtr.Zero, IntPtr.Zero, false))
-                throw new InvalidOperationException("SetWaitableTimer failed: " + Marshal.GetLastWin32Error());
-            return WaitForMultipleObjects(1, new IntPtr[] { hTimer }, false, timeoutMs);
-        }
-        finally
-        {
-            CloseHandle(hTimer);
-        }
-    }
-
     public static int Run(uint timeoutMs, string[] argv, string cmdExeCommandLine)
     {
         IntPtr hJob = CreateJobObject(IntPtr.Zero, null);
@@ -418,8 +389,9 @@ public static class CapsLauncher
 
             // caps' one behavioral difference from every other launcher in this
             // repo: the wait is bounded. The PowerShell side validated the
-            // deadline into [1, 0xFFFFFFFE] ms before the cast, so the value can
-            // never collide with the 0xFFFFFFFF INFINITE sentinel below.
+            // deadline into [1, 0xFFFFFFFE] ms - a deliberate usage ceiling -
+            // before the cast; the INFINITE below is passed unconditionally
+            // (the timer's absolute due time is what actually bounds the wait).
             //
             // The deadline is computed once as an ABSOLUTE UTC timestamp, armed
             // into a one-shot waitable timer, and waited on TOGETHER with the

@@ -15,6 +15,28 @@ if (-not [int]::TryParse($args[0], [ref]$countValue) -or $countValue -lt 1 -or $
     Write-Error "usage: capt <thread-count 1-$maxCount> <command> [args...]"
     exit 1
 }
+
+# JOBOBJECT_BASIC_LIMIT_INFORMATION.Affinity is a UIntPtr (SIZE_T): it is
+# process-width, so a 32-bit PowerShell process can only express 32 affinity
+# bits. A <thread-count> of 33-63 on a many-core machine passes the machine
+# range check above, then dies inside Run()'s struct initializer with a raw
+# "Arithmetic operation resulted in an overflow." instead of an actionable
+# usage error. Reject it here, capm-style. A helper function rather than an
+# inline literal so the Pester suite can unit-test the 32-bit decision on a
+# 64-bit process.
+function Get-CaptAffinityBitLimit {
+    param([int]$UIntPtrSize = [UIntPtr]::Size)
+    return $UIntPtrSize * 8
+}
+
+if ($countValue -gt (Get-CaptAffinityBitLimit)) {
+    $affinityBits = Get-CaptAffinityBitLimit
+    Write-Error ("capt: <thread-count> ($countValue) exceeds the addressable limit " +
+        "for this PowerShell process ($affinityBits affinity bits, $([UIntPtr]::Size * 8)-bit) - " +
+        "use 64-bit PowerShell for counts above $affinityBits, or lower <thread-count>. " +
+        "usage: capt <thread-count 1-$maxCount> <command> [args...]")
+    exit 1
+}
 $Command = @($args[1..($args.Count - 1)])
 
 # Fallback command line for when the target isn't a directly-launchable .exe (see

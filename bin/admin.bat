@@ -9,4 +9,4 @@ if "%~1"=="" (
 :: cmd.exe batch-parameter quirk, not fixable from inside a .bat). Every other
 :: cmd.exe metacharacter (&|<>^) survives this hop untouched. Invoking "admin"
 :: bare from an actual PowerShell session skips this file (admin.ps1 preferred).
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0admin.ps1" %*
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0admin.ps1" %*

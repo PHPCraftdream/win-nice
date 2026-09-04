@@ -53,6 +53,16 @@ invocation resolves to depends on the calling shell:
 | cmd.exe, or PATHEXT-based resolution (e.g. Node's `child_process`, which doesn't include `.PS1` in `PATHEXT` by default) | `name.bat` | corrupted before `.ps1` ever runs (see below) |
 | POSIX shell (Git Bash only — ignores `PATHEXT`/bare-name extension resolution entirely) | `name` (no extension) | full argument safety — the shim `exec`s straight into `name.ps1` via `powershell -File`, the same direct-to-`.ps1` path PowerShell itself uses, with MSYS argument conversion disabled so slash-style switches (`/c`, `/d`) and Windows paths arrive untouched; no `.bat`/cmd.exe hop involved |
 
+Known limitation of the extensionless shims: the `MSYS2_ARG_CONV_EXCL='*'`
+they set to keep their own arguments intact is inherited by the wrapped
+command and its whole process tree, so an MSYS program spawned *inside* the
+wrapped command (an inner `bash`/`sh`, a `#!/bin/sh` git hook — not a native
+program like `node.exe` or `cmd.exe`) inherits it too and stops converting
+POSIX-style paths in its own children's arguments — e.g.
+`caps 600 bash -c 'node /c/proj/run.js'` fails with `Cannot find module`
+where the same command without the shim works. The shim's own documented
+argument guarantee (its arguments arrive untouched) is unaffected.
+
 The extensionless shims are Git Bash-specific; WSL is not supported — WSL has
 no bare `powershell` (only `powershell.exe`), Windows PowerShell can't resolve
 the `/mnt/...` script path such a shim would pass to `-File`, and a WSL-side
@@ -157,7 +167,12 @@ physical cores. On a machine with Hyper-Threading/SMT, `capt 4` pins to 4
 physical cores or 4 half-used ones; the affinity API has no concept of "whole
 core" grouping on its own. `<thread-count>` must be between 1 and the number
 of logical processors on the machine (`[Environment]::ProcessorCount`, capped
-at 63 — a single affinity mask can't address more).
+at 63 — a single affinity mask can't address more). Under 32-bit Windows
+PowerShell (the `SysWOW64` host) the effective cap is additionally 32: the
+affinity mask is a pointer-sized `UIntPtr`, so a 32-bit process can only
+address 32 logical processors — counts of 33-63 are rejected up front with a
+usage error naming 64-bit PowerShell (the same process-width limit `capm`
+enforces on its memory cap).
 
 ```
 capt 4 npm run build
@@ -256,9 +271,11 @@ own non-cooperative death, never on an ordinary successful exit.
 
 `<seconds>` accepts a positive whole or decimal number (`2`, `2.5`), converted
 to whole milliseconds (floored; minimum 1 ms). The maximum is 4294967294 ms
-(~49.7 days) because `WaitForMultipleObjects`' `dwMilliseconds` is a uint32 whose
-`0xFFFFFFFF` value is reserved as the wait-forever sentinel — anything larger
-is rejected as a usage error (exit 1), never silently truncated into a
+(~49.7 days) — a deliberate usage ceiling, not a Win32 API limit: the deadline
+is an absolute 64-bit `FILETIME` armed into a waitable timer, and the
+`WaitForMultipleObjects` wait itself always passes `INFINITE` (the timer is
+what bounds it). Anything larger is rejected as a usage error (exit 1), never
+silently truncated into a
 different deadline.
 
 **`caps` sets no resource limit of any kind** — no CPU, memory, priority, or

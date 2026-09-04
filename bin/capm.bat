@@ -9,4 +9,4 @@
 :: this file entirely (PowerShell prefers capm.ps1) and has no "%" problem at all.
 :: A lone trailing "%" in the <size> argument itself (e.g. "20%") survives this
 :: hop - only %...%/%x-style pairs elsewhere on the line get corrupted.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0capm.ps1" %*
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0capm.ps1" %*

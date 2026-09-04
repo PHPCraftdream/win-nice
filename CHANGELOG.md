@@ -21,8 +21,9 @@ everything below shipped together as `0.2.0`.
   inside the deadline: the wrapped exit code propagates like every other
   launcher. `<seconds>` accepts a positive whole or decimal number (e.g. `2`
   or `2.5`), converted to whole milliseconds, minimum 1 ms, maximum
-  `4294967294` ms (~49.7 days) because `WaitForMultipleObjects` reserves
-  `0xFFFFFFFF` ms as INFINITE - anything larger is a usage error, not a
+  `4294967294` ms (~49.7 days) - a deliberate usage ceiling, not an API limit
+  (the deadline is an absolute 64-bit FILETIME, so no uint32 boundary applies)
+  - anything larger is a usage error, not a
   silently truncated deadline. The deadline is absolute, not a relative wait:
   it is computed from `DateTime.UtcNow`, armed as the absolute due time of a
   one-shot waitable timer, and waited on together with the process handle via

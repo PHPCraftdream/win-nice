@@ -55,7 +55,10 @@ processes brought up through an external broker/service (e.g. WMI's
   (`JOB_OBJECT_LIMIT_AFFINITY`). Threads, not physical cores — on
   Hyper-Threading/SMT hardware, N logical processors can be fewer physical
   cores. `<thread-count>` must be between 1 and
-  `min([Environment]::ProcessorCount, 63)`. Example: `capt 4 npm run build`.
+  `min([Environment]::ProcessorCount, 63)` — under 32-bit PowerShell the cap
+  is additionally 32 (the affinity mask is a pointer-sized `UIntPtr`), and
+  counts above it are rejected with a usage error naming 64-bit PowerShell.
+  Example: `capt 4 npm run build`.
 - `capm <size> <command> [args...]` — hard memory ceiling
   (`JOB_OBJECT_LIMIT_JOB_MEMORY`), aggregate across the whole tree, not
   per-process. `<size>`: bare integer `1`-`100` = percent of total physical RAM
@@ -86,10 +89,10 @@ processes brought up through an external broker/service (e.g. WMI's
   before a normal inside-the-deadline exit, so a daemon the command legitimately
   left running survives. `<seconds>`:
   positive whole or decimal (`2`, `2.5`), converted to whole milliseconds
-  (min 1 ms); max 4294967294 ms (~49.7 days) since `WaitForMultipleObjects`'
-  `dwMilliseconds` is a uint32 with `0xFFFFFFFF` reserved as INFINITE — larger
-  values are a usage error, never silently truncated. Finishing in time
-  propagates the exit code like every other launcher.
+  (min 1 ms); max 4294967294 ms (~49.7 days) — a deliberate usage ceiling,
+  not a uint32 limit (the deadline is an absolute FILETIME and the wait
+  itself is INFINITE) — larger values are a usage error, never silently
+  truncated. Finishing in time propagates the exit code like every other launcher.
   Example: `caps 300 npm test`.
 - `capn <count> <command> [args...]` — hard ceiling on the number of
   simultaneously active processes in the whole tree
@@ -187,6 +190,14 @@ depends on the calling shell:
 | PowerShell | `name.ps1` | full argument safety (see above) |
 | cmd.exe, or PATHEXT-based resolution (e.g. Node's `child_process` — `PATHEXT` doesn't include `.PS1` by default) | `name.bat` | corrupted before `.ps1` ever runs |
 | POSIX shell (Git Bash only — ignores `PATHEXT`; WSL not supported) | `name` (extensionless shim) | full argument safety — `exec`s straight into `name.ps1` with MSYS argument conversion disabled, same as PowerShell |
+
+Known limitation: the shims' `MSYS2_ARG_CONV_EXCL='*'` (what keeps their own
+arguments intact) is inherited by the wrapped command tree, so an MSYS
+program run *inside* the wrapped command (an inner `bash`/`sh` or a
+`#!/bin/sh` git hook — not a native program) stops converting POSIX paths in
+its own children's arguments (`caps 600 bash -c 'node /c/proj/run.js'` fails
+to find the module). The shim's own arguments and native wrapped commands are
+unaffected.
 
 The `.bat` file corrupts any literal `%` in its arguments before the command,
 and before `.ps1` (and its fail-closed `%` check), ever runs at all

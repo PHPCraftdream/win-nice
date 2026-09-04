@@ -5,4 +5,4 @@
 :: cmd.exe batch-parameter quirk, not fixable from inside a .bat). Every other
 :: cmd.exe metacharacter (&|<>^) survives this hop untouched. Invoking "capt"
 :: bare from an actual PowerShell session skips this file (capt.ps1 preferred).
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0capt.ps1" %*
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0capt.ps1" %*

@@ -611,6 +611,30 @@ Describe 'capt.ps1 argument validation' {
         $LASTEXITCODE | Should Be 1
     }
 
+    It 'caps the accepted thread count at the process pointer width under 32-bit PowerShell (unit-tested via Get-CaptAffinityBitLimit)' {
+        # The real 32-bit path can't run end-to-end here: the suite executes
+        # the 64-bit Windows PowerShell host, where [UIntPtr]::Size is 8 and
+        # the guard's error branch is unreachable (maxCount is 63 < 64). The
+        # guard is a single comparison against Get-CaptAffinityBitLimit, so
+        # extract that exact function from capt.ps1's own source and drive
+        # its pointer-width input directly (release review round-20 P3-4).
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $bin 'capt.ps1'), [ref]$null, [ref]$null)
+        $fnNode = $ast.Find({
+            param($a)
+            $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $a.Name -eq 'Get-CaptAffinityBitLimit'
+        }, $true)
+        $fnNode | Should Not Be $null
+        Invoke-Expression $fnNode.Extent.Text
+        Get-CaptAffinityBitLimit -UIntPtrSize 4 | Should Be 32
+        Get-CaptAffinityBitLimit -UIntPtrSize 8 | Should Be 64
+        # And capt.ps1 must actually gate on the helper, not on a stale
+        # inline copy of the bound.
+        $captSrc = Get-Content (Join-Path $bin 'capt.ps1') -Raw
+        $captSrc | Should Match ([regex]::Escape('if ($countValue -gt (Get-CaptAffinityBitLimit))'))
+    }
+
     It 'rejects a missing command' {
         & (Join-Path $bin 'capt.bat') 1 2>&1 | Out-Null
         $LASTEXITCODE | Should Be 1
@@ -1589,6 +1613,53 @@ function New-LauncherFaultProbe {
 '@ 'GetProcessTimes'
     }
 
+    # caps-only, test-only (round-20 P3-5): the past-due-timer probe must not
+    # exist in shipped bin/caps.ps1, so the compiled probe copy gets it
+    # injected here, immediately before Run(). Same conditional-anchor pattern
+    # as the timer/tie-break stubs above - the Run(uint timeoutMs, ...)
+    # signature exists in no launcher but caps, so the anchor is implicitly
+    # caps-specific.
+    $probeMethodAnchor = @'
+    public static int Run(uint timeoutMs, string[] argv, string cmdExeCommandLine)
+'@
+    if ($src.Contains(($probeMethodAnchor -replace "`r`n", "`n"))) {
+        $src = Edit-SourceOnce $src $probeMethodAnchor @'
+    // Test-only probe for the sleep-safe deadline, injected into this compiled
+    // fault-probe copy by the harness (release review round-20 P3-5) - it does
+    // NOT exist in shipped bin/caps.ps1. It exposes the EXACT production
+    // primitive: create a one-shot MANUAL-RESET waitable timer, arm it with an
+    // ABSOLUTE due time (positive FILETIME from ToFileTimeUtc, fResume false),
+    // and wait on it alone through WaitForMultipleObjects - same function,
+    // same marshaling, same flags Run() uses, just a one-element handle array.
+    // Public so the Pester suite can compile-call it on the fault-probe copy:
+    // with a due time already in the past this is mechanically identical to a
+    // deadline that passed while the machine was asleep, because in both cases
+    // the timer's signaled state is a property of the absolute clock. Returns
+    // the raw WaitForMultipleObjects result - WAIT_OBJECT_0 (0) when the timer
+    // was already signaled, WAIT_TIMEOUT (0x102) if it never signaled within
+    // timeoutMs (the control case proving the probe can't return 0 spuriously).
+    public static uint ProbePastDueTimerWait(DateTime dueTimeUtc, uint timeoutMs)
+    {
+        IntPtr hTimer = CreateWaitableTimer(IntPtr.Zero, true, null);
+        if (hTimer == IntPtr.Zero)
+            throw new InvalidOperationException("CreateWaitableTimer failed: " + Marshal.GetLastWin32Error());
+        try
+        {
+            long dueTime = dueTimeUtc.ToFileTimeUtc();
+            if (!SetWaitableTimer(hTimer, ref dueTime, 0, IntPtr.Zero, IntPtr.Zero, false))
+                throw new InvalidOperationException("SetWaitableTimer failed: " + Marshal.GetLastWin32Error());
+            return WaitForMultipleObjects(1, new IntPtr[] { hTimer }, false, timeoutMs);
+        }
+        finally
+        {
+            CloseHandle(hTimer);
+        }
+    }
+
+    public static int Run(uint timeoutMs, string[] argv, string cmdExeCommandLine)
+'@ 'ProbePastDueTimerWait'
+    }
+
     $src = Edit-SourceOnce $src @'
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
@@ -2234,9 +2305,9 @@ Describe 'embedded launcher C# keeps the single-owner cleanup shape (<Name>)' {
         # all inside the single ownership finally. Any per-branch CloseHandle
         # coming back bumps this count. The [DllImport] declaration itself
         # lives outside Run() (asserted separately below), so it is not part
-        # of this count. (caps ProbePastDueTimerWait test hook has its own
-        # separate finally with a CloseHandle - deliberately scoped out: it
-        # is not the ownership pattern this guard protects.)
+        # of this count. (caps' old ProbePastDueTimerWait test hook no longer
+        # exists in production source at all: New-LauncherFaultProbe injects
+        # it into the compiled probe copy only, never into bin/caps.ps1.)
         $runSrc = $src.Substring($src.IndexOf('public static int Run('))
         $expected = 2
         if ($Shape -eq 'Job') { $expected = 3 }
@@ -2249,6 +2320,9 @@ Describe 'embedded launcher C# keeps the single-owner cleanup shape (<Name>)' {
             # caps waits via WaitForMultipleObjects on {process, timer} (round-17
             # waitable-timer fix) and declares no WaitForSingleObject at all.
             $src | Should Match ([regex]::Escape('static extern uint WaitForMultipleObjects(uint nCount, IntPtr[] lpHandles, bool bWaitAll, uint dwMilliseconds);'))
+            # round-20 P3-5: the past-due-timer probe is injected into the
+            # compiled test copy only - it must never reappear in shipped source.
+            $src | Should Not Match 'ProbePastDueTimerWait'
         } else {
             $src | Should Match ([regex]::Escape('static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);'))
         }
@@ -2703,9 +2777,10 @@ Describe 'caps.ps1 argument validation' {
         @{ Seconds = '4294967.3' }
     ) {
         param($Seconds)
-        # 0xFFFFFFFF ms is WaitForMultipleObjects' wait-forever sentinel, not a
-        # deadline - anything converting to more than 0xFFFFFFFE ms must be the
-        # clean usage error. The decimal case is the same guard for a fractional
+        # 4294967294 ms is a deliberate usage ceiling, not an API limit (the
+        # deadline is an absolute FILETIME; the wait itself passes INFINITE) -
+        # anything converting to more than 0xFFFFFFFE ms must be the clean
+        # usage error. The decimal case is the same guard for a fractional
         # seconds value whose *1000 conversion crosses the boundary (a value
         # that looks small in seconds but overflows in milliseconds).
         & (Join-Path $bin 'caps.bat') $Seconds cmd /c "echo hi" 2>&1 | Out-Null

@@ -7,4 +7,4 @@
 :: for this from inside a .bat). Every other cmd.exe metacharacter (&|<>^) survives
 :: this hop untouched. Invoking "caps" bare from an actual PowerShell session skips
 :: this file entirely (PowerShell prefers caps.ps1) and has no "%" problem at all.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0caps.ps1" %*
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0caps.ps1" %*
