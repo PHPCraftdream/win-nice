@@ -216,8 +216,8 @@ accept that the limit is now effectively attached to the daemon until it's
 killed.
 
 ### `caps <seconds> <command> [args...]`
-Runs the command with a hard wall-clock deadline: if it hasn't exited within
-`<seconds>`, it is force-killed and `caps` exits with code **124** (the unix
+Runs the command with a wall-clock deadline: if it's still running when
+`<seconds>` have passed, it is force-killed and `caps` exits with code **124** (the unix
 `timeout(1)` convention), printing
 `caps: timed out after <seconds>s - job and every process in it were force-killed`
 to stderr. If the command finishes in time, `caps` propagates its exit code
@@ -235,7 +235,11 @@ wait does not count sleep time on Windows 8+ and keeps counting its pre-sleep
 remainder after the wake). If the two signals race - a child exiting right
 around the deadline - `caps` asks the kernel for the process's real exit time
 (`GetProcessTimes`) and only accepts it as on-time if it actually finished at
-or before the deadline.
+or before the deadline. Because that due time is a value on the system clock,
+a manual or service-driven system-clock adjustment during the wait moves it
+with the clock: the actual wait can come out shorter or longer than the
+requested `<seconds>` (sleep/suspend still counts correctly - only clock
+adjustments shift the deadline).
 
 The same "covers the whole subtree from the first instruction" guarantee
 applies: same suspend-then-assign-then-resume Job Object mechanism as
@@ -261,8 +265,8 @@ different deadline.
 affinity limit. It is not a quota tool: `capc`/`capt`/`capm` deliberately
 impose no timeout (a quota tool shouldn't unilaterally decide a legitimate long
 build is stuck — same precedent as `nice`/`cpulimit`); `caps` is the
-complement, for when *you* have already decided that N seconds is the hard
-limit, no matter what.
+complement, for when *you* have already decided that N seconds is the limit
+(see the system-clock caveat above).
 
 ```
 caps 300 npm test

@@ -1433,6 +1433,7 @@ function New-LauncherFaultProbe {
     public static int SetInfoFailOnCall;
     public static bool FailCreateTimer;
     public static bool FailSetTimer;
+    public static bool FailGetProcessTimes;
     public static bool ForceBothSignaledThenReturnProcess;
     public static System.Collections.Generic.List<IntPtr> ClosedHandles = new System.Collections.Generic.List<IntPtr>();
 
@@ -1442,7 +1443,7 @@ function New-LauncherFaultProbe {
         FailSetInfo = false; FailGetExitCode = false; FailTerminate = false;
         TerminateCalls = 0; CloseHandleFailures = 0; LastProcessId = 0;
         SetInfoCalls = 0; SetInfoFailOnCall = 0;
-        FailCreateTimer = false; FailSetTimer = false; ForceBothSignaledThenReturnProcess = false;
+        FailCreateTimer = false; FailSetTimer = false; FailGetProcessTimes = false; ForceBothSignaledThenReturnProcess = false;
         ClosedHandles.Clear();
     }
 
@@ -1562,6 +1563,32 @@ function New-LauncherFaultProbe {
 '@ 'SetWaitableTimer'
     }
 
+    # caps-only tie-break instrumentation (GetProcessTimes is declared nowhere
+    # else). Same conditional-anchor pattern as the wait/timer stubs above.
+    $getProcessTimesAnchor = @'
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetProcessTimes(IntPtr hProcess, out FILETIME lpCreationTime,
+        out FILETIME lpExitTime, out FILETIME lpKernelTime, out FILETIME lpUserTime);
+'@
+    if ($src.Contains(($getProcessTimesAnchor -replace "`r`n", "`n"))) {
+        $src = Edit-SourceOnce $src $getProcessTimesAnchor @'
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "GetProcessTimes")]
+    static extern bool GetProcessTimesReal(IntPtr hProcess, out FILETIME lpCreationTime,
+        out FILETIME lpExitTime, out FILETIME lpKernelTime, out FILETIME lpUserTime);
+
+    static bool GetProcessTimes(IntPtr hProcess, out FILETIME lpCreationTime,
+        out FILETIME lpExitTime, out FILETIME lpKernelTime, out FILETIME lpUserTime)
+    {
+        lpCreationTime = default(FILETIME);
+        lpExitTime = default(FILETIME);
+        lpKernelTime = default(FILETIME);
+        lpUserTime = default(FILETIME);
+        if (FailGetProcessTimes) { SetLastError(6); return false; }
+        return GetProcessTimesReal(hProcess, out lpCreationTime, out lpExitTime, out lpKernelTime, out lpUserTime);
+    }
+'@ 'GetProcessTimes'
+    }
+
     $src = Edit-SourceOnce $src @'
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
@@ -1663,8 +1690,12 @@ function New-LauncherFaultProbe {
 # deadline branch the others don't have; capn's first Run() argument is an
 # active-process count whose distinguishing struct field is ActiveProcessLimit
 # (uint), not Affinity (UIntPtr)), which is exactly why they get their own
-# compiled probe entries below. These two probes are still enough to cover
-# every FAILURE branch in detail. But a byte-identical body is only a claim
+# compiled probe entries below. Their injected tests cover every FAILURE
+# branch the harness injects in detail - caps's timer and GetProcessTimes
+# paths included - rather than every error literal in the embedded C#:
+# CreateProcess's own failure branch is exercised end-to-end by the
+# missing-binary integration tests above, and TerminateJobObject's has no
+# injected probe. But a byte-identical body is only a claim
 # about SOURCE TEXT - the source-shape guard below checks it textually, and
 # neither that nor these two probes ever actually RUNS
 # admin/cy/cx/capt/capm/caps/capn's own compiled Run(). $script:allLauncherProbes
@@ -2046,6 +2077,72 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
         Wait-ProbeChildGone -ProcessId $t::LastProcessId | Should Be $true
         Remove-ProbeChild -ProcessId $t::LastProcessId
         $t::ResetProbe()
+    }
+
+    # caps-only GetProcessTimes failure (round-19 P3-1): the call sits on the
+    # process-signaled path, so unlike the timer failures above the child has
+    # ALREADY exited (quickly, well inside the deadline) when the fault fires -
+    # the direct child is gone by design. The fail-closed question is whether
+    # the descendant it left in the job dies when the finally closes hJob with
+    # KILL_ON_JOB_CLOSE still armed.
+    It 'reports the error, closes all four handles, and lets the armed job guard kill the leftover descendant when GetProcessTimes fails (caps)' {
+        # Nested scripts in temp FILES, never inline -Command strings (same
+        # rule as every other multi-hop test in this file). The child records
+        # the grandchild's PID ITSELF, via -PassThru, BEFORE exiting - the
+        # process handle that triggers the GetProcessTimes call signals on
+        # that very exit, so the PID file is guaranteed complete once Run()
+        # returns, with no race against the finally's hJob close.
+        $grandchildPidFile = New-TempFile
+        $grandchildFile = New-TempScript
+        Set-Content -Path $grandchildFile -Value @"
+`$deadline = [DateTime]::UtcNow.AddSeconds(60)
+Set-Content -Path '$grandchildPidFile' -Value `$PID
+while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
+"@
+        $outerFile = New-TempScript
+        Set-Content -Path $outerFile -Value @"
+`$grandchild = Start-Process powershell -ArgumentList @('-NoProfile', '-File', '$grandchildFile') -WindowStyle Hidden -PassThru
+Set-Content -Path '$grandchildPidFile' -Value `$grandchild.Id
+"@
+        $t = $script:allLauncherProbes['caps']
+        $t::ResetProbe()
+        $t::FailGetProcessTimes = $true
+        $grandchildPid = 0
+        $message = $null
+        try {
+            try {
+                Invoke-LauncherProbe -Case @{ HasPriorityFlag = $null; JobArg = 30000; Name = 'caps' } -Argv @('powershell', '-NoProfile', '-File', $outerFile) -CmdLine 'x' | Out-Null
+            } catch {
+                $message = $_.Exception.InnerException.Message
+            }
+            # Exactly the injected message with the injected Win32 code - and
+            # no false success: Run() threw instead of returning the child's
+            # exit code.
+            $message | Should Be 'GetProcessTimes failed: 6'
+            # No explicit kill on this path: the child already exited on its
+            # own (that is what signaled the process handle); the descendant
+            # below is dealt with by the armed job guard, not a kill call.
+            $t::TerminateCalls | Should Be 0
+            # All four owned handles (hThread/hProcess/hJob/hTimer) close
+            # exactly once, every close succeeding.
+            $t::ClosedHandles.Count | Should Be 4
+            (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 4
+            $t::CloseHandleFailures | Should Be 0
+            # Fail-closed descendant death: the long-sleeping grandchild was
+            # spawned inside the job and must be gone once the finally's hJob
+            # close fired the still-armed KILL_ON_JOB_CLOSE backstop (bounded
+            # poll - job termination completes asynchronously).
+            $grandchildPid = [int](Get-Content $grandchildPidFile | Select-Object -First 1)
+            $grandchildPid | Should Not Be 0
+            (Wait-ProbeChildGone -ProcessId $grandchildPid -TimeoutMs 15000) | Should Be $true
+        } finally {
+            # Best-effort cleanup on every path (the generated scripts also
+            # self-terminate within 60s as a backstop).
+            Remove-ProbeChild -ProcessId $t::LastProcessId
+            if ($grandchildPid -gt 0) { Remove-ProbeChild -ProcessId $grandchildPid }
+            Remove-Item $grandchildPidFile, $grandchildFile, $outerFile -ErrorAction SilentlyContinue
+            $t::ResetProbe()
+        }
     }
 
     # Round-18 P2 regression: WaitForMultipleObjects reports the LOWEST

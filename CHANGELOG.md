@@ -30,7 +30,9 @@ everything below shipped together as `0.2.0`.
   only won the simultaneous-signal race after the deadline), so time spent in
   sleep/suspend counts against it and the timeout fires on wake if the
   deadline passed during sleep (a relative wait doesn't count sleep time on
-  Windows 8+). Unlike
+  Windows 8+). The due time is a system-clock value, so a manual or
+  service-driven system-clock adjustment during the wait can shorten or
+  lengthen the actual wait relative to `<seconds>`. Unlike
   `capc`/`capt`/`capm` it sets no resource
   limit - the Job Object (with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so a
   non-cooperatively killed wrapper still takes the tree down) exists purely to

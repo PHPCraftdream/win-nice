@@ -66,8 +66,8 @@ processes brought up through an external broker/service (e.g. WMI's
   usually crashes the wrapped program since most don't handle that
   gracefully; set it too low and even the wrapped runtime can fail to start.
   Example: `capm 512m npm run build`.
-- `caps <seconds> <command> [args...]` — hard wall-clock timeout for the whole
-  process tree: if the command hasn't exited within `<seconds>`, one
+- `caps <seconds> <command> [args...]` — wall-clock timeout for the whole
+  process tree: if the command is still running when `<seconds>` have passed, one
   `TerminateJobObject` kernel call force-kills everything still in the Job
   Object (the whole subtree, from the first instruction via the same
   suspend-then-assign-then-resume mechanism as `capc`/`capt`/`capm`), and
@@ -77,7 +77,10 @@ processes brought up through an external broker/service (e.g. WMI's
   (`WaitForMultipleObjects`, with a `GetProcessTimes` check rejecting an exit
   that only won the simultaneous-signal race after the deadline) — so time
   the machine spends asleep/suspended counts against it, and it fires
-  immediately on wake if it passed during sleep. The job carries
+  immediately on wake if it passed during sleep; the due time is a
+  system-clock (FILETIME) value, so a manual or service-driven clock
+  adjustment during the wait can shorten or lengthen the actual wait relative
+  to `<seconds>`. The job carries
   only `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` — no resource limit — which is also
   the backstop if the `caps` wrapper itself dies non-cooperatively; released
   before a normal inside-the-deadline exit, so a daemon the command legitimately
