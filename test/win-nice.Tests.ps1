@@ -1352,8 +1352,8 @@ Describe 'cy.ps1 / cx.ps1 PATH isolation' {
 # ---------------------------------------------------------------------------
 # Fault-injection harness. bin/ is NOT modified by any of this.
 #
-# ResumeThread / WaitForSingleObject / GetExitCodeProcess /
-# AssignProcessToJobObject only ever fail on handles the launcher itself just
+# ResumeThread / WaitForSingleObject / WaitForMultipleObjects / the timer
+# APIs / GetExitCodeProcess / AssignProcessToJobObject only ever fail on handles the launcher itself just
 # created, so no command line can reach those branches - the integration tests
 # above can only ever exercise the success paths. Instead of adding a toggle to
 # production code, these tests take the SAME embedded C# out of the .ps1 (via
@@ -1429,6 +1429,11 @@ function New-LauncherFaultProbe {
     public static int TerminateCalls;
     public static int CloseHandleFailures;
     public static int LastProcessId;
+    public static int SetInfoCalls;
+    public static int SetInfoFailOnCall;
+    public static bool FailCreateTimer;
+    public static bool FailSetTimer;
+    public static bool ForceBothSignaledThenReturnProcess;
     public static System.Collections.Generic.List<IntPtr> ClosedHandles = new System.Collections.Generic.List<IntPtr>();
 
     public static void ResetProbe()
@@ -1436,6 +1441,8 @@ function New-LauncherFaultProbe {
         FailWait = false; FailResume = false; FailAssign = false;
         FailSetInfo = false; FailGetExitCode = false; FailTerminate = false;
         TerminateCalls = 0; CloseHandleFailures = 0; LastProcessId = 0;
+        SetInfoCalls = 0; SetInfoFailOnCall = 0;
+        FailCreateTimer = false; FailSetTimer = false; ForceBothSignaledThenReturnProcess = false;
         ClosedHandles.Clear();
     }
 
@@ -1466,10 +1473,19 @@ function New-LauncherFaultProbe {
     # ERROR_INVALID_HANDLE (6) via a real SetLastError P/Invoke, so
     # Marshal.GetLastWin32Error() returns a deterministic value - asserting on
     # it proves the launcher captures the error BEFORE calling TerminateProcess.
-    $src = Edit-SourceOnce $src @'
+    # Not every launcher declares WaitForSingleObject anymore: since the
+    # round-17 waitable-timer fix, caps waits via WaitForMultipleObjects on
+    # {process, timer} and has no WaitForSingleObject at all. Instrument
+    # whichever wait function the launcher actually declares, and give FailWait
+    # the same uniform meaning on both ("make the deadline wait fail"), so the
+    # table-driven tests below only need the function name for their expected
+    # message (WaitFn in $launcherExecCases).
+    $waitSingleAnchor = @'
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
-'@ @'
+'@
+    if ($src.Contains(($waitSingleAnchor -replace "`r`n", "`n"))) {
+        $src = Edit-SourceOnce $src $waitSingleAnchor @'
     [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "WaitForSingleObject")]
     static extern uint WaitForSingleObjectReal(IntPtr hHandle, uint dwMilliseconds);
 
@@ -1479,6 +1495,72 @@ function New-LauncherFaultProbe {
         return WaitForSingleObjectReal(hHandle, dwMilliseconds);
     }
 '@ 'WaitForSingleObject'
+    }
+
+    $waitMultiAnchor = @'
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern uint WaitForMultipleObjects(uint nCount, IntPtr[] lpHandles, bool bWaitAll, uint dwMilliseconds);
+'@
+    if ($src.Contains(($waitMultiAnchor -replace "`r`n", "`n"))) {
+        $src = Edit-SourceOnce $src $waitMultiAnchor @'
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "WaitForMultipleObjects")]
+    static extern uint WaitForMultipleObjectsReal(uint nCount, IntPtr[] lpHandles, bool bWaitAll, uint dwMilliseconds);
+
+    static uint WaitForMultipleObjects(uint nCount, IntPtr[] lpHandles, bool bWaitAll, uint dwMilliseconds)
+    {
+        if (FailWait) { SetLastError(6); return 0xFFFFFFFF; }
+        if (ForceBothSignaledThenReturnProcess)
+        {
+            // Tie-break regression driver: block until BOTH handles are
+            // really signaled (child exited AND deadline timer due), then
+            // report ONLY the process index - the exact lowest-index state
+            // production must disambiguate with the process's real exit time.
+            WaitForMultipleObjectsReal(nCount, lpHandles, true, dwMilliseconds);
+            return 0;
+        }
+        return WaitForMultipleObjectsReal(nCount, lpHandles, bWaitAll, dwMilliseconds);
+    }
+'@ 'WaitForMultipleObjects'
+    }
+
+    # caps-only timer instrumentation (the timer declarations exist nowhere
+    # else). Same conditional-anchor pattern as the wait functions above.
+    $createTimerAnchor = @'
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr CreateWaitableTimer(IntPtr lpTimerAttributes, bool bManualReset, string lpTimerName);
+'@
+    if ($src.Contains(($createTimerAnchor -replace "`r`n", "`n"))) {
+        $src = Edit-SourceOnce $src $createTimerAnchor @'
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "CreateWaitableTimer")]
+    static extern IntPtr CreateWaitableTimerReal(IntPtr lpTimerAttributes, bool bManualReset, string lpTimerName);
+
+    static IntPtr CreateWaitableTimer(IntPtr lpTimerAttributes, bool bManualReset, string lpTimerName)
+    {
+        if (FailCreateTimer) { SetLastError(5); return IntPtr.Zero; }
+        return CreateWaitableTimerReal(lpTimerAttributes, bManualReset, lpTimerName);
+    }
+'@ 'CreateWaitableTimer'
+    }
+
+    $setTimerAnchor = @'
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetWaitableTimer(IntPtr hTimer, ref long pDueTime, int lPeriod,
+        IntPtr pfnCompletionRoutine, IntPtr lpArgToCompletionRoutine, bool fResume);
+'@
+    if ($src.Contains(($setTimerAnchor -replace "`r`n", "`n"))) {
+        $src = Edit-SourceOnce $src $setTimerAnchor @'
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "SetWaitableTimer")]
+    static extern bool SetWaitableTimerReal(IntPtr hTimer, ref long pDueTime, int lPeriod,
+        IntPtr pfnCompletionRoutine, IntPtr lpArgToCompletionRoutine, bool fResume);
+
+    static bool SetWaitableTimer(IntPtr hTimer, ref long pDueTime, int lPeriod,
+        IntPtr pfnCompletionRoutine, IntPtr lpArgToCompletionRoutine, bool fResume)
+    {
+        if (FailSetTimer) { SetLastError(5); return false; }
+        return SetWaitableTimerReal(hTimer, ref pDueTime, lPeriod, pfnCompletionRoutine, lpArgToCompletionRoutine, fResume);
+    }
+'@ 'SetWaitableTimer'
+    }
 
     $src = Edit-SourceOnce $src @'
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -1560,7 +1642,8 @@ function New-LauncherFaultProbe {
 
     static bool SetInformationJobObject(IntPtr hJob, int JobObjectInfoClass, IntPtr lpJobObjectInfo, uint cbJobObjectInfoLength)
     {
-        if (FailSetInfo) { SetLastError(87); return false; }
+        SetInfoCalls++;
+        if (FailSetInfo || (SetInfoFailOnCall > 0 && SetInfoCalls == SetInfoFailOnCall)) { SetLastError(87); return false; }
         return SetInformationJobObjectReal(hJob, JobObjectInfoClass, lpJobObjectInfo, cbJobObjectInfoLength);
     }
 '@ 'SetInformationJobObject'
@@ -1576,8 +1659,8 @@ function New-LauncherFaultProbe {
 # The 8 non-Job launchers share a byte-identical Run() body (verified), and so
 # do 2 of 3 original Job-Object ones - but caps's and capn's Run() bodies
 # are NOT byte-identical to the other Job launchers (caps's first Run()
-# argument is a timeout in ms that bounds WaitForSingleObject, plus a
-# WAIT_TIMEOUT branch the others don't have; capn's first Run() argument is an
+# argument is a timeout in ms that sets its deadline timer's absolute due time, plus a
+# deadline branch the others don't have; capn's first Run() argument is an
 # active-process count whose distinguishing struct field is ActiveProcessLimit
 # (uint), not Affinity (UIntPtr)), which is exactly why they get their own
 # compiled probe entries below. These two probes are still enough to cover
@@ -1637,8 +1720,7 @@ function Wait-ProbeChildGone {
 # C# signature differs by shape (see docs/plans/2026-09-02-safehandle-fault-
 # injection-plan.md section 1.1): JobArg is non-null only for the 5 Job Object
 # launchers (percent/affinity-mask/memory-bytes/timeout-ms/active-process-count
-# as their first argument - caps's JobArg is its timeout in ms, which bounds its
-# WaitForSingleObject; capn's is its active-process count; neither ever makes a
+# as their first argument - caps's JobArg is its timeout in ms, which sets its deadline timer's absolute due time; capn's is its active-process count; neither ever makes a
 # test slow, since the smoke child exits instantly and every fault case either
 # fails before the wait or makes the wait fail immediately),
 # HasPriorityFlag is true only for the 5 launchers that take a raw
@@ -1647,20 +1729,28 @@ function Wait-ProbeChildGone {
 # success run - 2 for non-Job (hThread/hProcess), 3 for Job (+hJob). Shared by
 # every Describe below so a failure case and a success case for the same
 # launcher can never silently disagree on how to invoke it.
+# HandlesAtWait is the handle count on any failure AT or AFTER the deadline
+# wait (FailWait / FailGetExitCode): caps also owns the deadline waitable timer
+# by then (hThread/hProcess/hJob/hTimer = 4), every other launcher matches
+# ExpectedHandles - pre-wait failures (ResumeThread/AssignProcessToJobObject)
+# happen before caps's timer exists, so they close ExpectedHandles. WaitFn is
+# the name of the wait function the launcher declares (caps has no
+# WaitForSingleObject since the round-17 timer fix), used for FailWait's
+# expected error message.
 $launcherExecCases = @(
-    @{ Name = 'idle';        HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
-    @{ Name = 'belownormal'; HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
-    @{ Name = 'abovenormal'; HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
-    @{ Name = 'high';        HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
-    @{ Name = 'realtime';    HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2 }
-    @{ Name = 'cy';          HasPriorityFlag = $false; JobArg = $null;      ExpectedHandles = 2 }
-    @{ Name = 'cx';          HasPriorityFlag = $false; JobArg = $null;      ExpectedHandles = 2 }
-    @{ Name = 'admin';       HasPriorityFlag = $false; JobArg = $null;      ExpectedHandles = 2 }
-    @{ Name = 'capc';        HasPriorityFlag = $null;  JobArg = 50;         ExpectedHandles = 3 }
-    @{ Name = 'capt';        HasPriorityFlag = $null;  JobArg = 1;          ExpectedHandles = 3 }
-    @{ Name = 'capm';        HasPriorityFlag = $null;  JobArg = 209715200;  ExpectedHandles = 3 }
-    @{ Name = 'caps';        HasPriorityFlag = $null;  JobArg = 10000;      ExpectedHandles = 3 }
-    @{ Name = 'capn';        HasPriorityFlag = $null;  JobArg = 10;         ExpectedHandles = 3 }
+    @{ Name = 'idle';        HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2; HandlesAtWait = 2; WaitFn = 'WaitForSingleObject' }
+    @{ Name = 'belownormal'; HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2; HandlesAtWait = 2; WaitFn = 'WaitForSingleObject' }
+    @{ Name = 'abovenormal'; HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2; HandlesAtWait = 2; WaitFn = 'WaitForSingleObject' }
+    @{ Name = 'high';        HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2; HandlesAtWait = 2; WaitFn = 'WaitForSingleObject' }
+    @{ Name = 'realtime';    HasPriorityFlag = $true;  JobArg = $null;      ExpectedHandles = 2; HandlesAtWait = 2; WaitFn = 'WaitForSingleObject' }
+    @{ Name = 'cy';          HasPriorityFlag = $false; JobArg = $null;      ExpectedHandles = 2; HandlesAtWait = 2; WaitFn = 'WaitForSingleObject' }
+    @{ Name = 'cx';          HasPriorityFlag = $false; JobArg = $null;      ExpectedHandles = 2; HandlesAtWait = 2; WaitFn = 'WaitForSingleObject' }
+    @{ Name = 'admin';       HasPriorityFlag = $false; JobArg = $null;      ExpectedHandles = 2; HandlesAtWait = 2; WaitFn = 'WaitForSingleObject' }
+    @{ Name = 'capc';        HasPriorityFlag = $null;  JobArg = 50;         ExpectedHandles = 3; HandlesAtWait = 3; WaitFn = 'WaitForSingleObject' }
+    @{ Name = 'capt';        HasPriorityFlag = $null;  JobArg = 1;          ExpectedHandles = 3; HandlesAtWait = 3; WaitFn = 'WaitForSingleObject' }
+    @{ Name = 'capm';        HasPriorityFlag = $null;  JobArg = 209715200;  ExpectedHandles = 3; HandlesAtWait = 3; WaitFn = 'WaitForSingleObject' }
+    @{ Name = 'caps';        HasPriorityFlag = $null;  JobArg = 10000;      ExpectedHandles = 3; HandlesAtWait = 4; WaitFn = 'WaitForMultipleObjects' }
+    @{ Name = 'capn';        HasPriorityFlag = $null;  JobArg = 10;         ExpectedHandles = 3; HandlesAtWait = 3; WaitFn = 'WaitForSingleObject' }
 )
 # Just the 5 Job Object launchers, for fault cases that only exist on that
 # shape (ResumeThread/AssignProcessToJobObject/SetInformationJobObject).
@@ -1679,8 +1769,8 @@ function Invoke-LauncherProbe {
 }
 
 Describe 'native failure branches (fault-injected copy of the embedded C#)' {
-    It 'kills the child, reports the wait error, and closes every handle exactly once when WaitForSingleObject fails (<Name>)' -TestCases $launcherExecCases {
-        param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles)
+    It 'kills the child, reports the wait error, and closes every handle exactly once when the deadline wait fails (<Name>)' -TestCases $launcherExecCases {
+        param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles, $HandlesAtWait, $WaitFn)
         $t = $script:allLauncherProbes[$Name]
         $t::ResetProbe()
         $t::FailWait = $true
@@ -1692,12 +1782,12 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
         }
         # "failed: 6" (not 0) proves the Win32 error is captured BEFORE the
         # TerminateProcess call, which would otherwise overwrite it.
-        $message | Should Be 'WaitForSingleObject failed: 6'
+        $message | Should Be ($WaitFn + ' failed: 6')
         $t::TerminateCalls | Should Be 1
         # Every owned handle closed once, each close succeeded (a double close
         # would return false and bump CloseHandleFailures).
-        $t::ClosedHandles.Count | Should Be $ExpectedHandles
-        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be $ExpectedHandles
+        $t::ClosedHandles.Count | Should Be $HandlesAtWait
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be $HandlesAtWait
         $t::CloseHandleFailures | Should Be 0
         # Fail-closed: the wrapper reported failure, so the child must not still
         # be running in the background.
@@ -1707,7 +1797,7 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
     }
 
     It 'reports the TerminateProcess failure alongside the original error when the best-effort kill itself fails (<Name>)' -TestCases $launcherExecCases {
-        param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles)
+        param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles, $HandlesAtWait, $WaitFn)
         $t = $script:allLauncherProbes[$Name]
         $t::ResetProbe()
         $t::FailWait = $true
@@ -1718,10 +1808,10 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
         } catch {
             $message = $_.Exception.InnerException.Message
         }
-        $message | Should Be 'WaitForSingleObject failed: 6; TerminateProcess also failed: 5'
+        $message | Should Be ($WaitFn + ' failed: 6; TerminateProcess also failed: 5')
         $t::TerminateCalls | Should Be 1
-        $t::ClosedHandles.Count | Should Be $ExpectedHandles
-        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be $ExpectedHandles
+        $t::ClosedHandles.Count | Should Be $HandlesAtWait
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be $HandlesAtWait
         $t::CloseHandleFailures | Should Be 0
         # The probe's TerminateProcess never called through to the real one -
         # proving the message above isn't silently overclaiming a kill that
@@ -1833,7 +1923,7 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
     }
 
     It 'reports the exit-code error and still closes every handle when GetExitCodeProcess fails (<Name>)' -TestCases $launcherExecCases {
-        param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles)
+        param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles, $HandlesAtWait, $WaitFn)
         $t = $script:allLauncherProbes[$Name]
         $t::ResetProbe()
         $t::FailGetExitCode = $true
@@ -1847,8 +1937,150 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
         # The real wait already succeeded (the child ran to completion) - only
         # the exit-code fetch was faked, so nothing needed killing.
         $t::TerminateCalls | Should Be 0
-        $t::ClosedHandles.Count | Should Be $ExpectedHandles
-        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be $ExpectedHandles
+        $t::ClosedHandles.Count | Should Be $HandlesAtWait
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be $HandlesAtWait
+        $t::CloseHandleFailures | Should Be 0
+        Remove-ProbeChild -ProcessId $t::LastProcessId
+        $t::ResetProbe()
+    }
+
+    # Release-call-specific failure (round-17 P3-2): plain FailSetInfo can only
+    # fail EVERY SetInformationJobObject call - which for every Job launcher
+    # happens during setup, before the child exists - so the success-path
+    # release call was unreachable by fault injection. SetInfoFailOnCall
+    # instead fails only call N: the release call is the 2nd in
+    # capt/capm/caps/capn (setup, release) and the 3rd in capc (cpu-rate
+    # setup, kill-on-close setup, release). This pins all three release-path
+    # guarantees: the real exit code survives, the warning hits stderr WITH
+    # the Win32 code, and every handle (hJob included) is still closed exactly
+    # once - fail-closed for any surviving descendant, since the failed
+    # release leaves KILL_ON_JOB_CLOSE armed.
+    $jobReleaseCases = @(
+        @{ Name = 'capc'; JobArg = 50;        ReleaseCall = 3; Handles = 3 }
+        @{ Name = 'capt'; JobArg = 1;         ReleaseCall = 2; Handles = 3 }
+        @{ Name = 'capm'; JobArg = 209715200; ReleaseCall = 2; Handles = 3 }
+        @{ Name = 'caps'; JobArg = 10000;     ReleaseCall = 2; Handles = 4 }
+        @{ Name = 'capn'; JobArg = 10;        ReleaseCall = 2; Handles = 3 }
+    )
+
+    It 'preserves the exit code, warns on stderr with the Win32 code, and closes every handle when only the release SetInformationJobObject call fails (<Name>)' -TestCases $jobReleaseCases {
+        param($Name, $JobArg, $ReleaseCall, $Handles)
+        $t = $script:allLauncherProbes[$Name]
+        $t::ResetProbe()
+        $t::SetInfoFailOnCall = $ReleaseCall
+        $stderrWriter = New-Object System.IO.StringWriter
+        $oldError = [Console]::Error
+        [Console]::SetError($stderrWriter)
+        $result = $null
+        try {
+            $result = Invoke-LauncherProbe -Case @{ HasPriorityFlag = $null; JobArg = $JobArg; Name = $Name } -Argv @('cmd', '/c', 'exit 7') -CmdLine 'cmd /c "exit 7"'
+        } finally {
+            [Console]::SetError($oldError)
+        }
+        # (a) The wrapped command's real exit code - not lost, not replaced.
+        $result | Should Be 7
+        # (b) The warning went to stderr (Console.Error, the exact sink the
+        # launchers write to) and carries the injected Win32 code (87).
+        $warning = $stderrWriter.ToString()
+        $warning | Should Match ([regex]::Escape("could not release the job's kill-on-close guard"))
+        $warning | Should Match ([regex]::Escape('SetInformationJobObject failed with Win32 error 87'))
+        # The failure landed exactly on the release call: setup call(s) passed,
+        # then one failed. (Also pins each launcher's total SetInfo call count
+        # on the happy path: 3 for capc, 2 for the rest.)
+        $t::SetInfoCalls | Should Be $ReleaseCall
+        # (c) Nothing failed fatally: no kill, and every owned handle - hJob
+        # included, which is what keeps a surviving descendant fail-closed
+        # here - closed exactly once.
+        $t::TerminateCalls | Should Be 0
+        $t::ClosedHandles.Count | Should Be $Handles
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be $Handles
+        $t::CloseHandleFailures | Should Be 0
+        Remove-ProbeChild -ProcessId $t::LastProcessId
+        $t::ResetProbe()
+    }
+
+    # caps-only timer failure paths (round-18 P3-2): both happen after the
+    # child is already running, so neither may leave it unmanaged. The child
+    # is killed not by an explicit kill but by the ownership finally closing
+    # hJob with KILL_ON_JOB_CLOSE still armed - the same fail-closed backstop
+    # as a non-cooperative wrapper death, which is why TerminateCalls stays 0.
+    It 'kills the running child via the job guard and reports the error when CreateWaitableTimer fails (caps)' {
+        $t = $script:allLauncherProbes['caps']
+        $t::ResetProbe()
+        $t::FailCreateTimer = $true
+        $message = $null
+        try {
+            Invoke-LauncherProbe -Case @{ HasPriorityFlag = $null; JobArg = 30000; Name = 'caps' } -Argv @('ping', '-n', '30', '127.0.0.1') -CmdLine 'ping -n 30 127.0.0.1' | Out-Null
+        } catch {
+            $message = $_.Exception.InnerException.Message
+        }
+        $message | Should Be 'CreateWaitableTimer failed: 5'
+        # No explicit kill: the armed kill-on-close guard firing on the
+        # finally's hJob close is what terminates the child.
+        $t::TerminateCalls | Should Be 0
+        # hTimer was never acquired - exactly the three other handles close, once each.
+        $t::ClosedHandles.Count | Should Be 3
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 3
+        $t::CloseHandleFailures | Should Be 0
+        Wait-ProbeChildGone -ProcessId $t::LastProcessId | Should Be $true
+        Remove-ProbeChild -ProcessId $t::LastProcessId
+        $t::ResetProbe()
+    }
+
+    It 'kills the running child via the job guard, reports the error, and closes all four handles when SetWaitableTimer fails (caps)' {
+        $t = $script:allLauncherProbes['caps']
+        $t::ResetProbe()
+        $t::FailSetTimer = $true
+        $message = $null
+        try {
+            Invoke-LauncherProbe -Case @{ HasPriorityFlag = $null; JobArg = 30000; Name = 'caps' } -Argv @('ping', '-n', '30', '127.0.0.1') -CmdLine 'ping -n 30 127.0.0.1' | Out-Null
+        } catch {
+            $message = $_.Exception.InnerException.Message
+        }
+        $message | Should Be 'SetWaitableTimer failed: 5'
+        $t::TerminateCalls | Should Be 0
+        # All four owned handles (hThread/hProcess/hJob/hTimer) close exactly once.
+        $t::ClosedHandles.Count | Should Be 4
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 4
+        $t::CloseHandleFailures | Should Be 0
+        Wait-ProbeChildGone -ProcessId $t::LastProcessId | Should Be $true
+        Remove-ProbeChild -ProcessId $t::LastProcessId
+        $t::ResetProbe()
+    }
+
+    # Round-18 P2 regression: WaitForMultipleObjects reports the LOWEST
+    # signaled index, so when BOTH handles are already signaled (deadline
+    # passed, child exited after it) the process "wins" the tie by array
+    # order alone. The stub below forces exactly that state deterministically:
+    # it blocks until both are really signaled (child exited AND timer due)
+    # and then reports only index 0. Production must then use the kernel's
+    # own exit timestamp (GetProcessTimes) to notice the exit happened after
+    # the 600 ms deadline and take the timeout path (124-style
+    # TimeoutException + job kill) instead of reporting the child's exit
+    # code 0 as an on-time success. A child sleeping 1500 ms cannot exit
+    # before a 600 ms deadline (startup only adds time), so this is
+    # deterministic, not probabilistic.
+    It 'rejects a post-deadline exit that won the lowest-index tie (GetProcessTimes tie-break, caps)' {
+        $t = $script:allLauncherProbes['caps']
+        $t::ResetProbe()
+        $t::ForceBothSignaledThenReturnProcess = $true
+        $threw = $null
+        try {
+            Invoke-LauncherProbe -Case @{ HasPriorityFlag = $null; JobArg = 600; Name = 'caps' } -Argv @('powershell', '-NoProfile', '-Command', 'Start-Sleep -Milliseconds 1500') -CmdLine 'x' | Out-Null
+        } catch {
+            $threw = $_.Exception
+        }
+        # The old code returned the child's exit code 0 here (false success).
+        $threw | Should Not Be $null
+        if ($threw.InnerException) { $ex = $threw.InnerException } else { $ex = $threw }
+        ($ex -is [System.TimeoutException]) | Should Be $true
+        $ex.Message | Should Match ([regex]::Escape('timed out after 600 ms'))
+        # Timeout path killed the job (TerminateJobObject - not the instrumented
+        # TerminateProcess, hence 0) and the child is really gone.
+        $t::TerminateCalls | Should Be 0
+        Wait-ProbeChildGone -ProcessId $t::LastProcessId | Should Be $true
+        $t::ClosedHandles.Count | Should Be 4
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be 4
         $t::CloseHandleFailures | Should Be 0
         Remove-ProbeChild -ProcessId $t::LastProcessId
         $t::ResetProbe()
@@ -1866,14 +2098,15 @@ Describe 'native failure branches (fault-injected copy of the embedded C#)' {
 # matches.
 Describe 'fault-injection probes actually execute all 13 launcher files (not just idle/capc)' {
     It 'runs Run() for real, propagates the exit code, and closes the expected handle count (<Name>)' -TestCases $launcherExecCases {
-        param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles)
+        param($Name, $HasPriorityFlag, $JobArg, $ExpectedHandles, $HandlesAtWait, $WaitFn)
         $t = $script:allLauncherProbes[$Name]
         $t::ResetProbe()
         $result = Invoke-LauncherProbe -Case @{ HasPriorityFlag = $HasPriorityFlag; JobArg = $JobArg; Name = $Name } -Argv @('cmd', '/c', 'exit 7') -CmdLine 'cmd /c "exit 7"'
         $result | Should Be 7
         $t::TerminateCalls | Should Be 0
-        $t::ClosedHandles.Count | Should Be $ExpectedHandles
-        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be $ExpectedHandles
+        # Success reaches the deadline wait, so caps's timer handle is included (HandlesAtWait).
+        $t::ClosedHandles.Count | Should Be $HandlesAtWait
+        (($t::ClosedHandles) | Select-Object -Unique).Count | Should Be $HandlesAtWait
         $t::CloseHandleFailures | Should Be 0
         Remove-ProbeChild -ProcessId $t::LastProcessId
         $t::ResetProbe()
@@ -1900,14 +2133,28 @@ Describe 'embedded launcher C# keeps the single-owner cleanup shape (<Name>)' {
     It 'closes each handle exactly once, only from the ownership finally (<Name>)' -TestCases $launcherSourceFiles {
         param($Name, $Shape)
         $src = Get-LauncherCSharp -Ps1Path (Join-Path $bin "$Name.ps1")
-        # 1 [DllImport] declaration + one close per owned handle, all inside the
-        # single finally. Any per-branch CloseHandle coming back bumps this count.
-        $expected = if ($Shape -eq 'Job') { 4 } else { 3 }
-        ([regex]::Matches($src, 'CloseHandle\(')).Count | Should Be $expected
+        # Count only the CLOSES inside Run() own body: one per owned handle,
+        # all inside the single ownership finally. Any per-branch CloseHandle
+        # coming back bumps this count. The [DllImport] declaration itself
+        # lives outside Run() (asserted separately below), so it is not part
+        # of this count. (caps ProbePastDueTimerWait test hook has its own
+        # separate finally with a CloseHandle - deliberately scoped out: it
+        # is not the ownership pattern this guard protects.)
+        $runSrc = $src.Substring($src.IndexOf('public static int Run('))
+        $expected = 2
+        if ($Shape -eq 'Job') { $expected = 3 }
+        if ($Name -eq 'caps') { $expected = 4 }
+        ([regex]::Matches($runSrc, 'CloseHandle\(')).Count | Should Be $expected
         # The probe transform in this file anchors on these exact declarations.
         $src | Should Match ([regex]::Escape('static extern bool CloseHandle(IntPtr hObject);'))
         $src | Should Match ([regex]::Escape('static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);'))
-        $src | Should Match ([regex]::Escape('static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);'))
+        if ($Name -eq 'caps') {
+            # caps waits via WaitForMultipleObjects on {process, timer} (round-17
+            # waitable-timer fix) and declares no WaitForSingleObject at all.
+            $src | Should Match ([regex]::Escape('static extern uint WaitForMultipleObjects(uint nCount, IntPtr[] lpHandles, bool bWaitAll, uint dwMilliseconds);'))
+        } else {
+            $src | Should Match ([regex]::Escape('static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);'))
+        }
     }
 }
 
@@ -2069,6 +2316,15 @@ exit 0
             # The opposite assertion of the cascade tests: nothing dies here.
             Start-Sleep -Seconds 3
             (Get-Process -Id $daemonPid -ErrorAction SilentlyContinue) | Should Not Be $null
+            # Round-17 P3-1 (preferred probe, capt only): survival alone doesn't
+            # prove the limit survived with it - check the surviving daemon's
+            # LIVE affinity mask. ToolArg '1' = first logical processor only,
+            # so the job's JOB_OBJECT_LIMIT_AFFINITY must still pin the daemon
+            # to mask 0x1 now that the wrapper's handle is long gone.
+            if ($Name -eq 'capt') {
+                $affinity = (Get-Process -Id $daemonPid -ErrorAction Stop).ProcessorAffinity
+                ([int64]$affinity) | Should Be 1
+            }
         } finally {
             # Best-effort cleanup on every path - a failed assertion above must
             # not leak the launcher, child, or daemon (the generated scripts
@@ -2080,23 +2336,233 @@ exit 0
         }
     }
 
-    It 'clears the kill-on-close guard on the success path of every Job-Object launcher (<Name>)' -TestCases @(
-        @{ Name = 'capc' }
-        @{ Name = 'capt' }
-        @{ Name = 'capm' }
-        @{ Name = 'caps' }
-        @{ Name = 'capn' }
+    It 'releases the kill-on-close guard AND re-applies the launcher own preserved limit in the release struct (<Name>)' -TestCases @(
+        @{ Name = 'capc'; Flags = 'LimitFlags = 0';                               Extra = $null }
+        @{ Name = 'capt'; Flags = 'LimitFlags = JOB_OBJECT_LIMIT_AFFINITY';       Extra = 'Affinity = (UIntPtr)affinityMask' }
+        @{ Name = 'capm'; Flags = 'LimitFlags = JOB_OBJECT_LIMIT_JOB_MEMORY';     Extra = 'JobMemoryLimit = (UIntPtr)memoryLimitBytes' }
+        @{ Name = 'caps'; Flags = 'LimitFlags = 0';                               Extra = $null }
+        @{ Name = 'capn'; Flags = 'LimitFlags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS'; Extra = 'ActiveProcessLimit = activeProcessLimit' }
     ) {
-        param($Name)
-        # Textual companion to the behavioral daemon-survival test above (same
-        # pattern as the cascade Describe's flag test): the release call AND its
-        # must-not-pass-silently warning must exist in all five files, so a
-        # future edit can't silently drop the success-path release from one of
-        # them while the behavioral test (which runs each launcher for real)
-        # is the runtime backstop.
+        param($Name, $Flags, $Extra)
+        # Round-17 P3-1 (minimum, all five): the release call must re-apply the
+        # launcher's OWN preserved limit, not just "some" SetInformationJobObject
+        # call - a future refactor that cleared the wrong limit (LimitFlags = 0
+        # in capt/capm/capn, or an accidental CPU-rate reset in capc) must fail
+        # here. Anchor on the release struct (var releaseInfo) so the SETUP
+        # struct's kill-on-close OR-assignment can't satisfy the match.
         $src = Get-LauncherCSharp -Ps1Path (Join-Path $bin "$Name.ps1")
-        $src | Should Match ([regex]::Escape('SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, releasePtr, (uint)releaseSize)'))
-        $src | Should Match ([regex]::Escape("could not release the job's kill-on-close guard"))
+        $idx = $src.IndexOf('var releaseInfo')
+        $idx | Should BeGreaterThan 0
+        $releaseBlock = $src.Substring($idx)
+        $releaseBlock | Should Match ([regex]::Escape('SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, releasePtr, (uint)releaseSize)'))
+        $releaseBlock | Should Match ([regex]::Escape("could not release the job's kill-on-close guard"))
+        $releaseBlock | Should Match ([regex]::Escape($Flags))
+        if ($Extra) { $releaseBlock | Should Match ([regex]::Escape($Extra)) }
+        if ($Name -eq 'capc') {
+            # capc's CPU-rate limit lives in a SEPARATE info class and must be
+            # untouched by the release path: the identifier legitimately
+            # appears twice in the whole file (constant declaration + setup
+            # call), but NEVER anywhere in the release block below
+            # 'var releaseInfo' - any occurrence there is a reset bug.
+            ([regex]::Matches($releaseBlock, 'JobObjectCpuRateControlInformation')).Count | Should Be 0
+        }
+    }
+
+    It 'still enforces the process-count ceiling on the surviving daemon after the wrapper exits (capn)' {
+        # Round-17 P3-1 (preferred probe): extends the daemon-survival scenario
+        # above with capn-specific behavior. Limit 2: the wrapped root (1 active)
+        # spawns the daemon (2) - allowed - then exits 0; the wrapper exits 0 and
+        # releases the kill-on-close guard. After the wrapper is gone, the
+        # surviving daemon attempts two spawns: the first must succeed (daemon +
+        # child = 2 <= 2), the second must still be refused (would be 3 > 2) -
+        # proving the kernel still enforces the ceiling on the live job, not
+        # just that the launcher's source struct mentions it. Same
+        # failure-detection pattern as capn's own over-limit test above:
+        # Start-Process throws when the job refuses the spawn.
+        $childPidFile = New-TempFile
+        $daemonPidFile = New-TempFile
+        $resultFile = New-TempFile
+        $goFile = New-TempFile
+        # The daemon waits for the test's go signal (written only after the
+        # wrapper has exited), then attempts the two spawns and records both
+        # outcomes. Children sleep bounded and are stopped by the daemon, so a
+        # failure path can't leak live processes (the daemon also self-terminates
+        # on its 60s deadline as a backstop).
+        $daemonFile = New-TempScript
+        Set-Content -Path $daemonFile -Value @"
+`$deadline = [DateTime]::UtcNow.AddSeconds(60)
+Set-Content -Path '$daemonPidFile' -Value `$PID
+while (-not (Test-Path '$goFile') -and [DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 100 }
+`$kids = @()
+`$spawn1Ok = `$false
+`$spawn2Failed = `$false
+try {
+    `$p1 = Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 10') -WindowStyle Hidden -PassThru
+    `$kids += `$p1
+    `$spawn1Ok = `$true
+    Start-Sleep -Milliseconds 500
+    try {
+        `$p2 = Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 10') -WindowStyle Hidden -PassThru
+        `$kids += `$p2
+    } catch {
+        `$spawn2Failed = `$true
+    }
+} catch {
+    # Spawn1 itself refused: the ceiling fired too early - record honestly
+    # (the assertion below fails on SPAWN1-OK=False rather than guessing).
+}
+Set-Content -Path '$resultFile' -Value "SPAWN1-OK=`$spawn1Ok SPAWN2-FAILED=`$spawn2Failed"
+foreach (`$k in `$kids) { Stop-Process -Id `$k.Id -Force -ErrorAction SilentlyContinue }
+while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
+"@
+        $outerFile = New-TempScript
+        Set-Content -Path $outerFile -Value @"
+Set-Content -Path '$childPidFile' -Value `$PID
+Start-Process powershell -ArgumentList @('-NoProfile', '-File', '$daemonFile') -WindowStyle Hidden | Out-Null
+exit 0
+"@
+        $launcher = Start-Process powershell -ArgumentList @('-NoProfile', '-File', (Join-Path $bin 'capn.ps1'), '2', 'powershell', '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
+        $childPid = 0
+        $daemonPid = 0
+        try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            while ([DateTime]::UtcNow -lt $deadline) {
+                if ($childPid -eq 0 -and (Test-Path $childPidFile)) {
+                    $childPid = [int](Get-Content $childPidFile | Select-Object -First 1)
+                }
+                if ($childPid -ne 0 -and $daemonPid -eq 0 -and (Test-Path $daemonPidFile)) {
+                    $daemonPid = [int](Get-Content $daemonPidFile | Select-Object -First 1)
+                }
+                if ($childPid -ne 0 -and $daemonPid -ne 0 -and $launcher.HasExited) { break }
+                Start-Sleep -Milliseconds 100
+            }
+            $childPid | Should Not Be 0
+            $daemonPid | Should Not Be 0
+            $launcher.HasExited | Should Be $true
+            $launcher.ExitCode | Should Be 0
+            (Wait-ProbeChildGone -ProcessId $childPid -TimeoutMs 15000) | Should Be $true
+            (Get-Process -Id $daemonPid -ErrorAction SilentlyContinue) | Should Not Be $null
+            # Wrapper is gone - let the daemon try its luck against the ceiling.
+            Set-Content -Path $goFile -Value 'go'
+            $resultDeadline = [DateTime]::UtcNow.AddSeconds(20)
+            while (-not (Test-Path $resultFile) -and [DateTime]::UtcNow -lt $resultDeadline) { Start-Sleep -Milliseconds 100 }
+            (Test-Path $resultFile) | Should Be $true
+            (Get-Content $resultFile).Trim() | Should Be 'SPAWN1-OK=True SPAWN2-FAILED=True'
+            (Get-Process -Id $daemonPid -ErrorAction SilentlyContinue) | Should Not Be $null
+        } finally {
+            if ($launcher -and -not $launcher.HasExited) { Stop-Process -Id $launcher.Id -Force -ErrorAction SilentlyContinue }
+            if ($childPid -gt 0) { Remove-ProbeChild -ProcessId $childPid }
+            if ($daemonPid -gt 0) { Remove-ProbeChild -ProcessId $daemonPid }
+            Remove-Item $childPidFile, $daemonPidFile, $daemonFile, $outerFile, $resultFile, $goFile -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'kernel-queries the surviving daemon job and confirms the memory ceiling is still set with kill-on-close released (capm)' {
+        # Round-17 P3-1 middle ground for capm: stronger than a source-struct
+        # assertion, without the cost/flakiness of a real allocation-past-
+        # ceiling. After the wrapper has exited, the surviving daemon queries
+        # its OWN job (QueryInformationJobObject with a NULL handle queries the
+        # caller's job) and reports the KERNEL's current limit state. capm 2g:
+        # LimitFlags must be exactly 0x200 (JOB_OBJECT_LIMIT_JOB_MEMORY) - the
+        # ceiling is still there AND kill-on-close (0x2000) is really gone from
+        # the kernel object, not just from the source - and JobMemoryLimit must
+        # still be 2 GB = 2147483648.
+        $childPidFile = New-TempFile
+        $daemonPidFile = New-TempFile
+        $resultFile = New-TempFile
+        $goFile = New-TempFile
+        $csFile = Join-Path $script:testRoot ('jobquery-' + [guid]::NewGuid().ToString('N') + '.cs')
+        Set-Content -Path $csFile -Value @'
+using System;
+using System.Runtime.InteropServices;
+public static class WinNiceDaemonJobQuery {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct IO_COUNTERS {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool QueryInformationJobObject(IntPtr hJob, int JobObjectInfoClass,
+        ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION lpJobObjectInfo, uint cbJobObjectInfoLength, out uint lpReturnLength);
+}
+'@
+        $daemonFile = New-TempScript
+        Set-Content -Path $daemonFile -Value @"
+`$deadline = [DateTime]::UtcNow.AddSeconds(60)
+Set-Content -Path '$daemonPidFile' -Value `$PID
+Add-Type -Path '$csFile'
+while (-not (Test-Path '$goFile') -and [DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 100 }
+`$info = New-Object WinNiceDaemonJobQuery+JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+`$returned = [uint32]0
+`$ok = [WinNiceDaemonJobQuery]::QueryInformationJobObject([IntPtr]::Zero, 9, [ref]`$info, [uint32][System.Runtime.InteropServices.Marshal]::SizeOf(`$info), [ref]`$returned)
+Set-Content -Path '$resultFile' -Value "OK=`$ok FLAGS=`$(`$info.BasicLimitInformation.LimitFlags) JOBMEM=`$(`$info.JobMemoryLimit)"
+while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
+"@
+        $outerFile = New-TempScript
+        Set-Content -Path $outerFile -Value @"
+Set-Content -Path '$childPidFile' -Value `$PID
+Start-Process powershell -ArgumentList @('-NoProfile', '-File', '$daemonFile') -WindowStyle Hidden | Out-Null
+exit 0
+"@
+        $launcher = Start-Process powershell -ArgumentList @('-NoProfile', '-File', (Join-Path $bin 'capm.ps1'), '2g', 'powershell', '-NoProfile', '-File', $outerFile) -WindowStyle Hidden -PassThru
+        $childPid = 0
+        $daemonPid = 0
+        try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            while ([DateTime]::UtcNow -lt $deadline) {
+                if ($childPid -eq 0 -and (Test-Path $childPidFile)) {
+                    $childPid = [int](Get-Content $childPidFile | Select-Object -First 1)
+                }
+                if ($childPid -ne 0 -and $daemonPid -eq 0 -and (Test-Path $daemonPidFile)) {
+                    $daemonPid = [int](Get-Content $daemonPidFile | Select-Object -First 1)
+                }
+                if ($childPid -ne 0 -and $daemonPid -ne 0 -and $launcher.HasExited) { break }
+                Start-Sleep -Milliseconds 100
+            }
+            $childPid | Should Not Be 0
+            $daemonPid | Should Not Be 0
+            $launcher.HasExited | Should Be $true
+            $launcher.ExitCode | Should Be 0
+            (Wait-ProbeChildGone -ProcessId $childPid -TimeoutMs 15000) | Should Be $true
+            (Get-Process -Id $daemonPid -ErrorAction SilentlyContinue) | Should Not Be $null
+            # Wrapper is gone - ask the KERNEL what the daemon's job looks like.
+            Set-Content -Path $goFile -Value 'go'
+            $resultDeadline = [DateTime]::UtcNow.AddSeconds(20)
+            while (-not (Test-Path $resultFile) -and [DateTime]::UtcNow -lt $resultDeadline) { Start-Sleep -Milliseconds 100 }
+            (Test-Path $resultFile) | Should Be $true
+            (Get-Content $resultFile).Trim() | Should Be 'OK=True FLAGS=512 JOBMEM=2147483648'
+            (Get-Process -Id $daemonPid -ErrorAction SilentlyContinue) | Should Not Be $null
+        } finally {
+            if ($launcher -and -not $launcher.HasExited) { Stop-Process -Id $launcher.Id -Force -ErrorAction SilentlyContinue }
+            if ($childPid -gt 0) { Remove-ProbeChild -ProcessId $childPid }
+            if ($daemonPid -gt 0) { Remove-ProbeChild -ProcessId $daemonPid }
+            Remove-Item $childPidFile, $daemonPidFile, $daemonFile, $outerFile, $resultFile, $goFile, $csFile -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -2140,7 +2606,7 @@ Describe 'caps.ps1 argument validation' {
         @{ Seconds = '4294967.3' }
     ) {
         param($Seconds)
-        # 0xFFFFFFFF ms is WaitForSingleObject's wait-forever sentinel, not a
+        # 0xFFFFFFFF ms is WaitForMultipleObjects' wait-forever sentinel, not a
         # deadline - anything converting to more than 0xFFFFFFFE ms must be the
         # clean usage error. The decimal case is the same guard for a fractional
         # seconds value whose *1000 conversion crosses the boundary (a value
@@ -2269,12 +2735,12 @@ Start-Sleep -Seconds 60
         }
     }
 
-    It 'returns promptly when the command finishes well inside the deadline (no full-poll-slice stall)' {
-        # The bounded polling loop (absolute UTC deadline, re-derived remaining
-        # time every slice) must never delay a fast command: the first
-        # WaitForSingleObject slice returns WAIT_OBJECT_0 the instant the child
-        # exits, so the wrapper completes in roughly its own startup runtime,
-        # nowhere near the 60s deadline it was given.
+    It 'returns promptly when the command finishes well inside the deadline (no deadline-stall)' {
+        # The wait is WaitForMultipleObjects on {process, timer}: the process
+        # handle is signaled the instant the child exits, so the wrapper
+        # completes in roughly its own startup runtime, nowhere near the 60s
+        # deadline it was given - and the timer adds no delay on this path
+        # either, since only the process handle going signaled ends the wait.
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         & (Join-Path $bin 'caps.bat') 60 cmd /c "exit 0"
         $sw.Stop()
@@ -2284,7 +2750,7 @@ Start-Sleep -Seconds 60
         ($sw.Elapsed.TotalMilliseconds -lt 25000) | Should Be $true
     }
 
-    It 'fires the timeout at approximately the deadline wall-clock time (polling adds no meaningful delay)' {
+    It 'fires the timeout at approximately the deadline wall-clock time' {
         $hungFile = New-TempScript
         Set-Content -Path $hungFile -Value @"
 `$deadline = [DateTime]::UtcNow.AddSeconds(60)
@@ -2295,9 +2761,10 @@ while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
             & powershell -NoProfile -File (Join-Path $bin 'caps.ps1') 3 powershell -NoProfile -File $hungFile 2>&1 | Out-Null
             $sw.Stop()
             $LASTEXITCODE | Should Be 124
-            # The deadline must fire AT ~3s: not early (lower bound), and not a
-            # poll slice or startup jitter late (upper bound; the child process
-            # startups included in $sw account for several of those seconds).
+            # The timer's ABSOLUTE due time fires at the deadline regardless of
+            # anything the wrapper does - there is no poll slice to overshoot
+            # by. Elapsed time is deadline + process startup + scheduler
+            # jitter, hence the same generous bounds as before.
             ($sw.Elapsed.TotalMilliseconds -ge 2800) | Should Be $true
             ($sw.Elapsed.TotalMilliseconds -lt 15000) | Should Be $true
         } finally {
@@ -2306,44 +2773,50 @@ while ([DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 250 }
     }
 }
 
-Describe 'caps.ps1 absolute-deadline arithmetic (sleep/suspend-safe)' {
-    # WaitForSingleObject's relative dwMilliseconds doesn't count time spent in
-    # sleep/suspend on Windows 8+, so caps derives its deadline from absolute
-    # DateTime.UtcNow timestamps re-checked every poll slice. A CI runner can't
-    # be genuinely suspended on demand, so the regression value lives in the
-    # pure arithmetic: RemainingWaitMs(deadlineUtc, nowUtc, maxSliceMs) is the
-    # exact function the wait loop feeds WaitForSingleObject, exercised here
-    # with synthetic timestamps - including the simulated suspend where "now"
-    # jumps past the deadline while the machine was paused. Called on the
-    # already-compiled caps probe type: $script:allLauncherProbes compiles the
-    # real embedded C# of every launcher at load time.
+Describe 'caps.ps1 waitable-timer deadline (sleep/suspend-safe by construction)' {
+    # Round-17 P2 fix. The old design (relative WaitForSingleObject poll
+    # slices re-derived from UtcNow) had a sleep-blind window: a slice wait
+    # ALREADY IN PROGRESS when the machine suspended kept running down its
+    # pre-sleep remainder after the wake, so caps could overshoot the deadline
+    # by up to a slice and even accept a post-deadline exit as on-time
+    # success. The replacement - a one-shot waitable timer with an ABSOLUTE
+    # due time, waited on together with the process handle - closes that BY
+    # CONSTRUCTION: a timer whose absolute due time has passed comes up
+    # already-signaled whenever the system next looks at it; signaled-ness is
+    # a property of the absolute clock, not of an in-progress wait
+    # (SetWaitableTimer docs). A CI runner can't be genuinely suspended on
+    # demand, so these tests exercise the REAL Win32 primitive on the compiled
+    # probe copy: an already-past-due absolute time is mechanically identical
+    # to a deadline that passed while the machine was asleep, because the
+    # timer's signaled state comes up the same way in both cases.
     $t = $script:allLauncherProbes['caps']
 
-    It 'returns the full poll slice while plenty of deadline remains' {
-        $now = [DateTime]::UtcNow
-        $t::RemainingWaitMs($now.AddSeconds(5), $now, 1000) | Should Be 1000
+    It 'signals immediately (WAIT_OBJECT_0) for an absolute due time already in the past' {
+        # 10s past due: exactly the state the timer is in after a suspend that
+        # outlasted the deadline. WaitForMultipleObjects must return
+        # WAIT_OBJECT_0 right away - not after the 30s budget - proving no
+        # relative-wait remainder can postpone the deadline past a wake.
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $result = $t::ProbePastDueTimerWait([DateTime]::UtcNow.AddSeconds(-10), 30000)
+        $sw.Stop()
+        $result | Should Be 0
+        # "Immediately" = scheduler latency, not the wait budget and not a
+        # leftover poll slice.
+        ($sw.Elapsed.TotalMilliseconds -lt 5000) | Should Be $true
     }
 
-    It 'caps the final slice at the remaining time so the last wait lands on the deadline' {
-        $now = [DateTime]::UtcNow
-        $t::RemainingWaitMs($now.AddMilliseconds(300.7), $now, 1000) | Should Be 301
-    }
-
-    It 'returns 0 once the deadline has passed - the timeout path, with no further wait' {
-        $now = [DateTime]::UtcNow
-        $t::RemainingWaitMs($now.AddSeconds(-5), $now, 1000) | Should Be 0
-        $t::RemainingWaitMs($now, $now, 1000) | Should Be 0
-    }
-
-    It 'reports the timeout immediately after a simulated suspend overshoots the deadline' {
-        # The P2 scenario itself: the wrapper computes deadline = start + 5s,
-        # then the machine suspends for 8s. On wake "now" is 3s PAST the
-        # deadline - the old single relative wait would have kept counting its
-        # preserved remainder; this must demand 0 ms, i.e. timeout right now.
-        $start = [DateTime]::UtcNow
-        $deadline = $start.AddSeconds(5)
-        $wake = $start.AddSeconds(13)
-        $t::RemainingWaitMs($deadline, $wake, 1000) | Should Be 0
+    It 'does not signal an absolute due time in the future before its time (control case)' {
+        # Refutation control for the probe above: a due time 5s in the FUTURE
+        # must stay unsignaled - WaitForMultipleObjects may only come back
+        # WAIT_TIMEOUT (0x102) after the 1.5s budget. Without this, a probe
+        # that returned 0 for everything (e.g. a marshaling bug signaling the
+        # timer immediately) would still pass the past-due test.
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $result = $t::ProbePastDueTimerWait([DateTime]::UtcNow.AddSeconds(5), 1500)
+        $sw.Stop()
+        $result | Should Be 0x00000102
+        ($sw.Elapsed.TotalMilliseconds -ge 1400) | Should Be $true
+        ($sw.Elapsed.TotalMilliseconds -lt 10000) | Should Be $true
     }
 }
 

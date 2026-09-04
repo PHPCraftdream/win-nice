@@ -351,17 +351,23 @@ public static class CaptLauncher
             int releaseSize = Marshal.SizeOf(releaseInfo);
             IntPtr releasePtr = Marshal.AllocHGlobal(releaseSize);
             bool releaseOk;
+            int releaseErr = 0;
             try
             {
                 Marshal.StructureToPtr(releaseInfo, releasePtr, false);
                 releaseOk = SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, releasePtr, (uint)releaseSize);
+                // Capture the Win32 error immediately, before any other call can
+                // overwrite it - every other native failure branch in this file
+                // reports the code for the same diagnosability reason.
+                if (!releaseOk)
+                    releaseErr = Marshal.GetLastWin32Error();
             }
             finally
             {
                 Marshal.FreeHGlobal(releasePtr);
             }
             if (!releaseOk)
-                Console.Error.WriteLine("warning: could not release the job's kill-on-close guard - a still-running background process left by the wrapped command may be terminated when this wrapper exits");
+                Console.Error.WriteLine("warning: could not release the job's kill-on-close guard (SetInformationJobObject failed with Win32 error " + releaseErr + ") - a still-running background process left by the wrapped command may be terminated when this wrapper exits");
 
             return (int)exitCode;
         }

@@ -21,13 +21,16 @@ everything below shipped together as `0.2.0`.
   inside the deadline: the wrapped exit code propagates like every other
   launcher. `<seconds>` accepts a positive whole or decimal number (e.g. `2`
   or `2.5`), converted to whole milliseconds, minimum 1 ms, maximum
-  `4294967294` ms (~49.7 days) because `WaitForSingleObject` reserves
+  `4294967294` ms (~49.7 days) because `WaitForMultipleObjects` reserves
   `0xFFFFFFFF` ms as INFINITE - anything larger is a usage error, not a
-  silently truncated deadline. The deadline is absolute, not a plain relative
-  `WaitForSingleObject` wait: it is computed from `DateTime.UtcNow` and
-  re-checked on a short poll loop, so time spent in sleep/suspend counts
-  against it and the timeout fires on wake if the deadline passed during sleep
-  (a relative wait doesn't count sleep time on Windows 8+). Unlike
+  silently truncated deadline. The deadline is absolute, not a relative wait:
+  it is computed from `DateTime.UtcNow`, armed as the absolute due time of a
+  one-shot waitable timer, and waited on together with the process handle via
+  `WaitForMultipleObjects` (a `GetProcessTimes` check rejects an exit that
+  only won the simultaneous-signal race after the deadline), so time spent in
+  sleep/suspend counts against it and the timeout fires on wake if the
+  deadline passed during sleep (a relative wait doesn't count sleep time on
+  Windows 8+). Unlike
   `capc`/`capt`/`capm` it sets no resource
   limit - the Job Object (with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so a
   non-cooperatively killed wrapper still takes the tree down) exists purely to

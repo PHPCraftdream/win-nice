@@ -72,15 +72,18 @@ processes brought up through an external broker/service (e.g. WMI's
   Object (the whole subtree, from the first instruction via the same
   suspend-then-assign-then-resume mechanism as `capc`/`capt`/`capm`), and
   `caps` exits with code 124 (unix `timeout(1)` convention). The deadline is
-  absolute — computed from `DateTime.UtcNow` and re-checked on a short poll
-  loop — so time the machine spends asleep/suspended counts against it, and it
-  fires immediately on wake if it passed during sleep. The job carries
+  absolute — computed from `DateTime.UtcNow` and armed into a one-shot
+  waitable timer waited on together with the process handle
+  (`WaitForMultipleObjects`, with a `GetProcessTimes` check rejecting an exit
+  that only won the simultaneous-signal race after the deadline) — so time
+  the machine spends asleep/suspended counts against it, and it fires
+  immediately on wake if it passed during sleep. The job carries
   only `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` — no resource limit — which is also
   the backstop if the `caps` wrapper itself dies non-cooperatively; released
   before a normal inside-the-deadline exit, so a daemon the command legitimately
   left running survives. `<seconds>`:
   positive whole or decimal (`2`, `2.5`), converted to whole milliseconds
-  (min 1 ms); max 4294967294 ms (~49.7 days) since `WaitForSingleObject`'s
+  (min 1 ms); max 4294967294 ms (~49.7 days) since `WaitForMultipleObjects`'
   `dwMilliseconds` is a uint32 with `0xFFFFFFFF` reserved as INFINITE — larger
   values are a usage error, never silently truncated. Finishing in time
   propagates the exit code like every other launcher.

@@ -39,7 +39,7 @@ if (-not $numOk -or [double]::IsNaN($secondsNum) -or [double]::IsInfinity($secon
     Write-Error "caps: <seconds> is out of range. $usage"
     exit 1
 }
-# WaitForSingleObject's dwMilliseconds is a uint32 whose 0xFFFFFFFF value is
+# WaitForMultipleObjects' dwMilliseconds is a uint32 whose 0xFFFFFFFF value is
 # reserved as INFINITE - so this tool's deadline cap is 0xFFFFFFFE ms (~49.7
 # days). Anything larger would silently wrap/truncate into a different
 # deadline or collide with the wait-forever sentinel; reject it as the usage
@@ -156,7 +156,31 @@ public static class CapsLauncher
     static extern uint ResumeThread(IntPtr hThread);
 
     [DllImport("kernel32.dll", SetLastError = true)]
-    static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+    static extern IntPtr CreateWaitableTimer(IntPtr lpTimerAttributes, bool bManualReset, string lpTimerName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetWaitableTimer(IntPtr hTimer, ref long pDueTime, int lPeriod,
+        IntPtr pfnCompletionRoutine, IntPtr lpArgToCompletionRoutine, bool fResume);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern uint WaitForMultipleObjects(uint nCount, IntPtr[] lpHandles, bool bWaitAll, uint dwMilliseconds);
+
+    // Authoritative exit-timestamp source for the tie-break in Run(): when
+    // both wait handles are already signaled, only the kernel's own record of
+    // WHEN the process exited can say whether that happened before the
+    // deadline. FILETIME fields combine into one 64-bit UTC FILETIME value
+    // (high dword first), the same representation and epoch as the timer's
+    // absolute due time.
+    [StructLayout(LayoutKind.Sequential)]
+    struct FILETIME
+    {
+        public uint dwLowDateTime;
+        public uint dwHighDateTime;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetProcessTimes(IntPtr hProcess, out FILETIME lpCreationTime,
+        out FILETIME lpExitTime, out FILETIME lpKernelTime, out FILETIME lpUserTime);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
@@ -179,11 +203,6 @@ public static class CapsLauncher
     const uint CREATE_SUSPENDED = 0x00000004;
     const int JobObjectExtendedLimitInformation = 9;
     const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
-
-    // Poll-slice length for the absolute-deadline wait loop in Run(): long
-    // enough that a bounded run costs only one kernel call per second, short
-    // enough that timeout detection after an unexpected wake is prompt.
-    const uint DeadlinePollSliceMs = 1000;
 
     // Standard MSVCRT/CommandLineToArgvW quoting: safe for a directly-launched .exe's
     // own argv parsing. No cmd.exe involved on this path, so none of its operator or
@@ -226,22 +245,34 @@ public static class CapsLauncher
         return string.Join(" ", parts);
     }
 
-    // Pure deadline arithmetic for the wait loop in Run(), public and with both
-    // timestamps injectable so tests can pin the sleep/suspend semantics
-    // deterministically (a CI runner can't be genuinely suspended on demand):
-    // returns the milliseconds to pass to the next WaitForSingleObject slice -
-    // min(maxSliceMs, time left until deadlineUtc as of nowUtc) - or 0 when the
-    // deadline has passed, which the caller must treat as its timeout path
-    // without waiting again. The partial final slice is ceilinged so the last
-    // wait lands on the deadline instead of a fraction short of it.
-    public static uint RemainingWaitMs(DateTime deadlineUtc, DateTime nowUtc, uint maxSliceMs)
+    // Test hook for the sleep-safe deadline, exposing the EXACT production
+    // primitive: create a one-shot MANUAL-RESET waitable timer, arm it with an
+    // ABSOLUTE due time (positive FILETIME from ToFileTimeUtc, fResume false),
+    // and wait on it alone through WaitForMultipleObjects - same function, same
+    // marshaling, same flags Run() uses, just a one-element handle array.
+    // Public so the Pester suite can compile-call it on the fault-probe copy:
+    // with a due time already in the past this is mechanically identical to a
+    // deadline that passed while the machine was asleep, because in both cases
+    // the timer's signaled state is a property of the absolute clock. Returns
+    // the raw WaitForMultipleObjects result - WAIT_OBJECT_0 (0) when the timer
+    // was already signaled, WAIT_TIMEOUT (0x102) if it never signaled within
+    // timeoutMs (the control case proving the probe can't return 0 spuriously).
+    public static uint ProbePastDueTimerWait(DateTime dueTimeUtc, uint timeoutMs)
     {
-        double remainingMs = (deadlineUtc - nowUtc).TotalMilliseconds;
-        if (remainingMs <= 0.0)
-            return 0;
-        if (remainingMs >= maxSliceMs)
-            return maxSliceMs;
-        return (uint)Math.Ceiling(remainingMs);
+        IntPtr hTimer = CreateWaitableTimer(IntPtr.Zero, true, null);
+        if (hTimer == IntPtr.Zero)
+            throw new InvalidOperationException("CreateWaitableTimer failed: " + Marshal.GetLastWin32Error());
+        try
+        {
+            long dueTime = dueTimeUtc.ToFileTimeUtc();
+            if (!SetWaitableTimer(hTimer, ref dueTime, 0, IntPtr.Zero, IntPtr.Zero, false))
+                throw new InvalidOperationException("SetWaitableTimer failed: " + Marshal.GetLastWin32Error());
+            return WaitForMultipleObjects(1, new IntPtr[] { hTimer }, false, timeoutMs);
+        }
+        finally
+        {
+            CloseHandle(hTimer);
+        }
     }
 
     public static int Run(uint timeoutMs, string[] argv, string cmdExeCommandLine)
@@ -251,13 +282,16 @@ public static class CapsLauncher
             throw new InvalidOperationException("CreateJobObject failed: " + Marshal.GetLastWin32Error());
 
         // Single owner for every handle this method acquires. The finally below closes
-        // hThread/hProcess/hJob - in that order - on EVERY way out: normal return, any
-        // of the InvalidOperationExceptions thrown here, and an unexpected managed
-        // exception (allocation/marshalling failure) between acquisition and use.
-        // hProcess/hThread stay IntPtr.Zero until CreateProcess has actually succeeded,
-        // so each handle is closed exactly once and only if it was really acquired.
+        // hThread/hProcess/hJob/hTimer - in that order - on EVERY way out: normal
+        // return, any of the InvalidOperationExceptions thrown here, and an
+        // unexpected managed exception (allocation/marshalling failure) between
+        // acquisition and use. hProcess/hThread stay IntPtr.Zero until CreateProcess
+        // has actually succeeded, hTimer until the deadline timer is created just
+        // before the wait, so each handle is closed exactly once and only if it
+        // was really acquired.
         IntPtr hProcess = IntPtr.Zero;
         IntPtr hThread = IntPtr.Zero;
+        IntPtr hTimer = IntPtr.Zero;
         try
         {
             var extInfo = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
@@ -385,40 +419,72 @@ public static class CapsLauncher
             // caps' one behavioral difference from every other launcher in this
             // repo: the wait is bounded. The PowerShell side validated the
             // deadline into [1, 0xFFFFFFFE] ms before the cast, so the value can
-            // never collide with the 0xFFFFFFFF INFINITE sentinel.
+            // never collide with the 0xFFFFFFFF INFINITE sentinel below.
             //
-            // The deadline is computed once as an ABSOLUTE UTC timestamp and
-            // polled in short slices - NOT passed as one long relative wait.
-            // WaitForSingleObject's relative dwMilliseconds does not count time
-            // spent in low-power sleep/suspend on Windows 8+ (see its Microsoft
-            // docs page), so a laptop suspended mid-wait would otherwise resume
-            // with most of its original countdown still ahead of it instead of
-            // noticing the wall-clock deadline passed while it slept.
-            // DateTime.UtcNow keeps advancing across a suspend (the RTC keeps
-            // running), so re-deriving the remaining time from it before every
-            // slice makes the deadline genuinely absolute: right after waking
-            // from an overslept suspend, the very next iteration sees no time
-            // left and takes the timeout path immediately.
-            // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject
+            // The deadline is computed once as an ABSOLUTE UTC timestamp, armed
+            // into a one-shot waitable timer, and waited on TOGETHER with the
+            // process handle - it is never any kind of relative wait, not even a
+            // sliced one. WaitForSingleObject's relative dwMilliseconds does not
+            // count time spent in low-power sleep/suspend on Windows 8+, and the
+            // problem is not just ONE long wait: a relative wait ALREADY IN
+            // PROGRESS when the machine suspends keeps running down its
+            // pre-sleep remainder after the wake, however far past the deadline
+            // the clock now is - so the previous poll-slice design could still
+            // overshoot the deadline by up to a slice and even accept a
+            // post-deadline exit as on-time success. SetWaitableTimer's
+            // ABSOLUTE due time has the opposite, documented property: a timer
+            // whose due time has already passed comes up already-signaled,
+            // whenever the system next looks at it - signaled-ness is a property
+            // of the absolute clock, not of an in-progress wait. If the machine
+            // sleeps past the deadline, the timer is therefore signaled the
+            // moment anything waits on it after the wake: the deadline cannot be
+            // postponed by a leftover wait remainder, and a child exiting after
+            // the deadline can never be mistaken for an on-time success.
+            // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-setwaitabletimer
             DateTime deadlineUtc = DateTime.UtcNow.AddMilliseconds(timeoutMs);
-            uint waitResult;
-            while (true)
-            {
-                // Capped by the real remaining time (see RemainingWaitMs). A
-                // fast-exiting child is still detected instantly via
-                // WAIT_OBJECT_0 - the polling never delays a normal run.
-                uint sliceMs = RemainingWaitMs(deadlineUtc, DateTime.UtcNow, DeadlinePollSliceMs);
-                if (sliceMs == 0)
-                {
-                    // No time left before the deadline - indistinguishable from
-                    // the single-wait WAIT_TIMEOUT result handled below.
-                    waitResult = 0x00000102; // WAIT_TIMEOUT
-                    break;
-                }
-                waitResult = WaitForSingleObject(hProcess, sliceMs);
-                if (waitResult != 0x00000102)
-                    break; // WAIT_OBJECT_0 (finished) or WAIT_FAILED (handled below)
-            }
+
+            // Manual reset, not auto-reset: once due the timer STAYS signaled,
+            // so "deadline passed" is a stable state rather than a consumable
+            // event - the process-finished vs deadline-hit outcome can't be
+            // lost to a race against signal consumption. Anonymous (null name),
+            // exactly like the job object above. On failure here the child is
+            // already running; the throw falls through to the finally, whose
+            // hJob close still carries KILL_ON_JOB_CLOSE (the release below
+            // only happens on the success path), so the whole tree is
+            // terminated by the same backstop as a non-cooperative wrapper
+            // death - nothing is left running unmanaged.
+            hTimer = CreateWaitableTimer(IntPtr.Zero, true, null);
+            if (hTimer == IntPtr.Zero)
+                throw new InvalidOperationException("CreateWaitableTimer failed: " + Marshal.GetLastWin32Error());
+
+            // Positive due time = ABSOLUTE FILETIME (100ns units since
+            // 1601-01-01 UTC), which ToFileTimeUtc() produces directly from the
+            // deadline above. lPeriod 0 = one-shot. No completion routine: APC
+            // delivery would require an alertable wait, which this never is.
+            // fResume = false, deliberately: caps must never wake a sleeping
+            // machine just to enforce a timeout - that would be a surprising
+            // and hostile side effect for a tool whose whole point is to
+            // coexist politely with the user's machine. If the machine is
+            // asleep at the due time, the timer simply comes up
+            // already-signaled on wake (the whole point of the absolute due
+            // time) and the kill happens then.
+            long timerDueTime = deadlineUtc.ToFileTimeUtc();
+            if (!SetWaitableTimer(hTimer, ref timerDueTime, 0, IntPtr.Zero, IntPtr.Zero, false))
+                throw new InvalidOperationException("SetWaitableTimer failed: " + Marshal.GetLastWin32Error());
+
+            // Wait for EITHER the process to finish (index 0 - success path
+            // below) or the deadline to pass (index 1 - timeout path below).
+            // INFINITE is safe here: the timer itself is what bounds this wait,
+            // and its due time is already validated into [1, 0xFFFFFFFE] ms.
+            // If both handles are ALREADY signaled when the wait is serviced
+            // (a child exit racing the deadline - or a deadline that passed
+            // during sleep, after which the timer sits signaled while a woken
+            // child races through its last instructions),
+            // WaitForMultipleObjects reports the LOWEST signaled index: the
+            // process. That alone proves nothing about which signal came
+            // first, so the tie is resolved below against the timer's
+            // absolute due time, not by array order.
+            uint waitResult = WaitForMultipleObjects(2, new IntPtr[] { hProcess, hTimer }, false, 0xFFFFFFFF);
             if (waitResult == 0xFFFFFFFF)
             {
                 // WAIT_FAILED - same handling as every other launcher: the
@@ -426,15 +492,37 @@ public static class CapsLauncher
                 // failure and potentially leave it running unmanaged in the
                 // background. Best-effort kill before giving up.
                 int waitErr = Marshal.GetLastWin32Error();
-                string message = "WaitForSingleObject failed: " + waitErr;
+                string message = "WaitForMultipleObjects failed: " + waitErr;
                 // Report if the best-effort kill itself also failed.
                 if (!TerminateProcess(hProcess, 1))
                     message += "; TerminateProcess also failed: " + Marshal.GetLastWin32Error();
                 throw new InvalidOperationException(message);
             }
-            if (waitResult == 0x00000102) // WAIT_TIMEOUT
+            if (waitResult == 0x00000000) // WAIT_OBJECT_0: the process handle signaled
             {
-                // The deadline passed - the whole point of this tool. Kill the
+                // The lowest-index rule makes "process reported first"
+                // compatible with "exited AFTER the deadline": both objects
+                // signaled, process listed first. The kernel's own record of
+                // when the process actually exited is the authoritative
+                // arbiter - GetProcessTimes returns a real exit time for a
+                // terminated process, in the same absolute FILETIME clock and
+                // epoch the timer's due time was computed in. At or before
+                // the due time: genuinely finished in time, normal success
+                // path below. Strictly after: the process only won the
+                // array-order tie - treat it exactly like the timer signaling
+                // (timeout path below), never as an on-time success.
+                FILETIME creationTime, exitTime, kernelTime, userTime;
+                if (!GetProcessTimes(hProcess, out creationTime, out exitTime, out kernelTime, out userTime))
+                    throw new InvalidOperationException("GetProcessTimes failed: " + Marshal.GetLastWin32Error());
+                long exitFileTime = ((long)exitTime.dwHighDateTime << 32) | (long)exitTime.dwLowDateTime;
+                if (exitFileTime > timerDueTime)
+                    waitResult = 0x00000001;
+            }
+            if (waitResult == 0x00000001) // deadline: timer signaled, or the tie-break demoted a post-deadline exit
+            {
+                // The deadline passed (timer signaled, or the process's real
+                // exit time landed after the due time) - the whole point of
+                // this tool. Kill the
                 // entire job now (see TerminateJobObject above for why one
                 // kernel call is the right primitive). KILL_ON_JOB_CLOSE is
                 // only the backstop for THIS wrapper dying non-cooperatively;
@@ -478,26 +566,37 @@ public static class CapsLauncher
             int releaseSize = Marshal.SizeOf(releaseInfo);
             IntPtr releasePtr = Marshal.AllocHGlobal(releaseSize);
             bool releaseOk;
+            int releaseErr = 0;
             try
             {
                 Marshal.StructureToPtr(releaseInfo, releasePtr, false);
                 releaseOk = SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, releasePtr, (uint)releaseSize);
+                // Capture the Win32 error immediately, before any other call can
+                // overwrite it - every other native failure branch in this file
+                // reports the code for the same diagnosability reason.
+                if (!releaseOk)
+                    releaseErr = Marshal.GetLastWin32Error();
             }
             finally
             {
                 Marshal.FreeHGlobal(releasePtr);
             }
             if (!releaseOk)
-                Console.Error.WriteLine("warning: could not release the job's kill-on-close guard - a still-running background process left by the wrapped command may be terminated when this wrapper exits");
+                Console.Error.WriteLine("warning: could not release the job's kill-on-close guard (SetInformationJobObject failed with Win32 error " + releaseErr + ") - a still-running background process left by the wrapped command may be terminated when this wrapper exits");
 
             return (int)exitCode;
         }
         finally
         {
-            // Same order as the code this replaces: thread handle, process handle, job handle.
+            // Thread handle, process handle, job handle, then the timer. The
+            // timer's position is functionally irrelevant - an anonymous kernel
+            // object with no cascade semantics, unlike hJob whose close IS the
+            // kill-on-close trigger - so it is appended last to leave the
+            // long-established sequence untouched.
             if (hThread != IntPtr.Zero) CloseHandle(hThread);
             if (hProcess != IntPtr.Zero) CloseHandle(hProcess);
             if (hJob != IntPtr.Zero) CloseHandle(hJob);
+            if (hTimer != IntPtr.Zero) CloseHandle(hTimer);
         }
     }
 }

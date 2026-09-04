@@ -224,11 +224,18 @@ to stderr. If the command finishes in time, `caps` propagates its exit code
 exactly like every other launcher in this family.
 
 The deadline is genuinely wall-clock: `caps` computes it once as an absolute
-UTC timestamp and re-checks the real elapsed time on a short poll loop, so
-time the machine spends asleep/suspended counts against it (a single relative
-`WaitForSingleObject` wait does not count sleep time on Windows 8+). Put the
-laptop to sleep mid-run and `caps` still fires the moment it wakes if the
-deadline passed during sleep, instead of waiting out the leftover countdown.
+UTC timestamp and arms a one-shot waitable timer with that absolute due time
+(`SetWaitableTimer`), then waits on the timer and the wrapped process together
+(`WaitForMultipleObjects`). An absolute timer due time is a property of the
+wall clock, not of an in-progress wait, so time the machine spends
+asleep/suspended counts against it: if the deadline passes during sleep, the
+timer is already signaled when the machine wakes, and `caps` fires immediately
+instead of waiting out any leftover countdown (a relative `WaitForSingleObject`
+wait does not count sleep time on Windows 8+ and keeps counting its pre-sleep
+remainder after the wake). If the two signals race - a child exiting right
+around the deadline - `caps` asks the kernel for the process's real exit time
+(`GetProcessTimes`) and only accepts it as on-time if it actually finished at
+or before the deadline.
 
 The same "covers the whole subtree from the first instruction" guarantee
 applies: same suspend-then-assign-then-resume Job Object mechanism as
@@ -245,7 +252,7 @@ own non-cooperative death, never on an ordinary successful exit.
 
 `<seconds>` accepts a positive whole or decimal number (`2`, `2.5`), converted
 to whole milliseconds (floored; minimum 1 ms). The maximum is 4294967294 ms
-(~49.7 days) because `WaitForSingleObject`'s `dwMilliseconds` is a uint32 whose
+(~49.7 days) because `WaitForMultipleObjects`' `dwMilliseconds` is a uint32 whose
 `0xFFFFFFFF` value is reserved as the wait-forever sentinel — anything larger
 is rejected as a usage error (exit 1), never silently truncated into a
 different deadline.
