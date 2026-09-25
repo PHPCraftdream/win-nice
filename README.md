@@ -13,10 +13,10 @@ specific pain point: running several parallel AI coding agents (Claude Code, etc
 on one Windows box without their builds/tests pegging every core and freezing the
 desktop — mouse, keyboard, window dragging, audio, all of it.
 
-No compiled binaries, no runtime dependencies. Just `.bat` + `.ps1` files that
-call the relevant Win32 APIs directly (Job Objects, process priority classes).
-npm is used only as a distribution/version channel and for the install CLI —
-none of the tools themselves need Node.js to run.
+The Win32 launchers use prebuilt managed helper assemblies shipped in the npm
+package. Target machines need Windows PowerShell/.NET, but no C# compiler or
+Node.js to run the tools. npm is only the distribution/version channel and
+installer.
 
 ## Argument handling
 
@@ -299,8 +299,8 @@ from the first instruction" and "breakaway fails closed" guarantees apply.
 The count **includes the directly wrapped process itself**: it is assigned to
 the still-empty job before it can spawn anything, so `capn 1 <command>` runs
 the command but the instant it tries to spawn any child — including
-infrastructure children like PowerShell's own `Add-Type` compiler (`csc.exe`,
-plus the `CVTRES.EXE` that compiler runs) — that spawn attempt fails.
+children started by the command — that spawn attempt fails. Win-Nice loads its
+prebuilt helpers, so it does not add `csc.exe` or `CVTRES.EXE` to the job.
 Confirmed empirically, not just from docs: under `capn 1`, a wrapped
 PowerShell's `Start-Process` fails with "Not enough quota is available to
 process this command." and the parent keeps running and exits 0.
@@ -381,16 +381,12 @@ each limit type combines differently:**
   fit under *every* job in the chain at once, and an outer job's count
   includes the inner wrapper process itself plus everything beneath it. Not a
   "silently clamped to the tighter limit" rule like affinity, and not a plain
-  `min()`: confirmed empirically, `capn 1 capn 5 ...` fails outright (the
-  outer job is already full with the inner wrapper alone, so the inner
-  wrapper can't even start its target — for a PowerShell-based inner tool
-  this surfaces as its own `Add-Type`/`csc.exe` child spawn being refused,
-  exit 1); `capn 2 capn 5 ...` still fails one step later (the compiler's own
-  `CVTRES.EXE` child doesn't fit); `capn 3 capn 5 ...` works. In the other
-  direction, `capn 5 capn 1 <cmd-that-spawns>` runs the command but its child
-  spawn is refused by the *inner* limit while the outer still has room. Leave
-  real headroom in an outer `capn` for the chain itself — roughly 3 slots
-  before a PowerShell-based inner tool's actual workload even starts.
+  `min()`: a tighter outer job can prevent an inner wrapper from starting its
+  target. The wrappers load prebuilt helpers, so nested limits no longer count
+  runtime `csc.exe`/`CVTRES.EXE` processes; leave room for the wrapper chain
+  and the target's actual child processes. In the other direction,
+  `capn 5 capn 1 <cmd-that-spawns>` runs the command but its child spawn is
+  refused by the *inner* limit while the outer still has room.
 - **Timeout (`caps`)**: not a Job Object limit being combined at all — each
   `caps` enforces its own deadline on its direct child. The innermost `caps`
   wrapping the eventual work fires at its own deadline and the outer one
@@ -465,11 +461,12 @@ of their own — the flag names describe exactly what they do.
 npm install -g win-nice
 ```
 
-This copies every tool above into `%LOCALAPPDATA%\win-nice\bin` and adds that
-directory to your user `PATH` (via `postinstall`). Restart your terminal
-afterwards so the new `PATH` takes effect.
+This copies every tool above and the `idle` helper assembly into
+`%LOCALAPPDATA%\win-nice\bin` and adds that directory to your user `PATH`
+(via `postinstall`). Restart your terminal afterwards so the new `PATH` takes
+effect.
 
-`npm uninstall -g win-nice` does **not** reverse this — npm's `uninstall`
+`npm uninstall -g win-nice` does **not** reverse this - npm's `uninstall`
 lifecycle script was removed (npm ≥ 7 never runs it at all; there is no
 supported npm version where a `preuninstall` script would fire). Run
 `npx win-nice uninstall` (see below) before or after the `npm uninstall`,
@@ -537,6 +534,11 @@ Windows 8 / Server 2012 or newer (Job Object CPU rate control). PowerShell is
 bundled with Windows — no separate install needed to run the tools. Node.js is
 only needed for the npm-based installer/tests, not for the tools themselves.
 `cy`/`cx` additionally need `claude`/`codex` installed and on `PATH`.
+
+Maintainers regenerate the shipped helper assemblies with
+`scripts/build-launcher-assemblies.ps1` (also run by `npm test` and `npm pack`).
+That build step uses the .NET Framework compiler; installed tools load the
+prebuilt assemblies and never invoke it.
 
 **PowerShell execution policy:** Windows client editions default to
 `Restricted`, which blocks a bare `.ps1` invoked directly by PowerShell itself

@@ -4,6 +4,12 @@ const path = require('path');
 const paths = require('./paths');
 const manifest = require('./manifest');
 
+function orderManagedFiles(names) {
+  const binaries = names.filter((name) => path.extname(name).toLowerCase() === '.dll');
+  const otherFiles = names.filter((name) => path.extname(name).toLowerCase() !== '.dll');
+  return [...binaries, ...otherFiles];
+}
+
 // Rejects any candidate that doesn't resolve inside expectedDir - guards against a
 // corrupted/tampered manifest (absolute paths, "../.." traversal) pointing deletion
 // outside the install directory.
@@ -45,13 +51,13 @@ function uninstall({ updatePath = true } = {}) {
   if (data && Array.isArray(data.files)) {
     // Files tracked by a valid manifest are owned by the package - remove them
     // regardless of local edits (reinstall is expected to replace them anyway).
-    candidates = data.files.map((name) => path.join(data.binDir || dir, name));
+    candidates = orderManagedFiles(data.files).map((name) => path.join(data.binDir || dir, name));
     requireMarker = false;
   } else if (fs.existsSync(dir)) {
     // Manifest missing/corrupt - fall back to scanning the known install dir. This
     // scan can hit files we didn't put there, so only remove ones that still carry
     // the marker.
-    candidates = fs.readdirSync(dir).map((name) => path.join(dir, name));
+    candidates = orderManagedFiles(fs.readdirSync(dir)).map((name) => path.join(dir, name));
     requireMarker = true;
   } else {
     candidates = [];
@@ -84,4 +90,4 @@ function uninstall({ updatePath = true } = {}) {
   return results;
 }
 
-module.exports = { uninstall, removeManagedFile };
+module.exports = { uninstall, removeManagedFile, orderManagedFiles };

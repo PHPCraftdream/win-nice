@@ -210,7 +210,8 @@ public static class AboveNormalLauncher
 }
 "@
 
-Add-Type -TypeDefinition $source -Language CSharp
+. (Join-Path $PSScriptRoot 'load-launcher.ps1')
+Import-WinNiceLauncherAssembly -Name 'AboveNormalLauncher'
 
 $ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
 try {

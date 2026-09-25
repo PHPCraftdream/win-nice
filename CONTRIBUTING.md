@@ -53,10 +53,9 @@ key under `HKCU:\Software\WinNiceTest`.
   callers), `.ps1` (PowerShell bare-name resolution, the fully argument-safe
   path), and an extensionless POSIX shim (Git Bash). See README's "Argument
   handling" section for why there are three and what each one guarantees.
-- Each `.ps1`'s embedded C# class needs a name unique across the whole `bin/`
-  directory (`Add-Type` throws "type already exists" if two tools share a
-  class name and both run bare-name in the same PowerShell session - this bit
-  us once, see the sequential-invocation regression test).
+- Each helper assembly exposes a distinct public C# type name because PowerShell
+  loads them into the same AppDomain. The sequential-invocation regression test
+  covers this requirement.
 - Managed files (everything under `bin/`, plus the installed skill) carry a
   `win-nice: managed-file` / `win-nice: managed-skill` marker comment - the
   installer relies on it to know what it's allowed to overwrite/remove.

@@ -43,7 +43,7 @@ function withHome(home, fn) {
   }
 }
 
-test('install copies every bin/*.bat and *.ps1 file and writes a manifest', () => {
+test('install copies launchers and helper assets and writes a manifest', () => {
   withHome(freshHome(), () => {
     const result = install({ updatePath: false });
     assert.ok(result, 'install should not skip when WIN_NICE_HOME is set');
@@ -52,6 +52,16 @@ test('install copies every bin/*.bat and *.ps1 file and writes a manifest', () =
     assert.deepEqual(files, result.files.slice().sort());
     assert.ok(files.includes('capc.ps1'));
     assert.ok(files.includes('idle.bat'));
+    assert.ok(files.includes('load-launcher.ps1'));
+    for (const name of [
+      'AboveNormalLauncher', 'AdminLauncher', 'BelowNormalLauncher',
+      'CapcLauncher', 'CapmLauncher', 'CapnLauncher', 'CapsLauncher', 'CaptLauncher',
+      'CxLauncher', 'CyLauncher', 'HighLauncher', 'IdleLauncher', 'RealtimeLauncher',
+      'EnvironmentNotifier',
+    ]) {
+      assert.ok(files.includes(`${name}.dll`), `${name}.dll is installed`);
+      assert.ok(files.includes(`${name}.dll.managed`), `${name}.dll marker is installed`);
+    }
 
     const data = manifest.read(paths.manifestPath());
     assert.ok(data);
@@ -84,7 +94,7 @@ test('uninstall removes a manifest-tracked file even if its marker was stripped 
   });
 });
 
-test('uninstall falls back to scanning binDir for marked files when the manifest is gone', () => {
+test('uninstall removes DLLs when fallback enumeration lists their marker sidecars first', () => {
   withHome(freshHome(), () => {
     install({ updatePath: false });
     fs.unlinkSync(paths.manifestPath());
@@ -92,7 +102,19 @@ test('uninstall falls back to scanning binDir for marked files when the manifest
     const dir = paths.binDir();
     assert.ok(fs.readdirSync(dir).length > 0);
 
-    uninstall({ updatePath: false });
+    const originalReaddirSync = fs.readdirSync;
+    fs.readdirSync = function (target, ...args) {
+      const entries = originalReaddirSync.call(this, target, ...args);
+      if (path.resolve(target) === path.resolve(dir) && entries.every((entry) => typeof entry === 'string')) {
+        return entries.slice().sort().reverse();
+      }
+      return entries;
+    };
+    try {
+      uninstall({ updatePath: false });
+    } finally {
+      fs.readdirSync = originalReaddirSync;
+    }
     assert.equal(fs.existsSync(dir), false);
   });
 });

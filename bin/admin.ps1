@@ -214,7 +214,8 @@ public static class AdminLauncher
     }
 }
 "@
-Add-Type -TypeDefinition $source -Language CSharp
+. (Join-Path $PSScriptRoot 'load-launcher.ps1')
+Import-WinNiceLauncherAssembly -Name 'AdminLauncher'
 
 if ($isAdmin) {
     # Already elevated - launch inline, sharing the current console.

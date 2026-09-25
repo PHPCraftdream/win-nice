@@ -210,7 +210,8 @@ public static class HighLauncher
 }
 "@
 
-Add-Type -TypeDefinition $source -Language CSharp
+. (Join-Path $PSScriptRoot 'load-launcher.ps1')
+Import-WinNiceLauncherAssembly -Name 'HighLauncher'
 
 $HIGH_PRIORITY_CLASS = 0x00000080
 try {

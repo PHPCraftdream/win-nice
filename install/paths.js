@@ -131,11 +131,12 @@ function writeRegistryString(keyPath, valueName, value) {
 // running processes. Broadcast WM_SETTINGCHANGE so Explorer/new shells pick it up.
 function broadcastEnvironmentChange() {
   const script = [
-    'Add-Type -Namespace WinNice -Name NativeMethods -MemberDefinition \'[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);\'',
-    '$result = [UIntPtr]::Zero',
-    '[WinNice.NativeMethods]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null',
+    '[void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($env:WIN_NICE_ENVIRONMENT_NOTIFIER_DLL))',
+    '[EnvironmentNotifier]::Broadcast()',
   ].join('\n');
-  runPowershell(script);
+  runPowershell(script, {
+    WIN_NICE_ENVIRONMENT_NOTIFIER_DLL: path.join(__dirname, '..', 'bin', 'EnvironmentNotifier.dll'),
+  });
 }
 
 const USER_ENV_KEY = 'HKCU:\\Environment';

@@ -5,8 +5,11 @@ const path = require('path');
 const MARKER = 'win-nice: managed-file';
 
 function hasMarker(filePath) {
+  const markerPath = path.extname(filePath).toLowerCase() === '.dll'
+    ? `${filePath}.managed`
+    : filePath;
   try {
-    return fs.readFileSync(filePath, 'utf8').includes(MARKER);
+    return fs.readFileSync(markerPath, 'utf8').includes(MARKER);
   } catch {
     return false;
   }

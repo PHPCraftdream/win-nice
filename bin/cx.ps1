@@ -203,7 +203,8 @@ public static class CxLauncher
 }
 "@
 
-Add-Type -TypeDefinition $source -Language CSharp
+. (Join-Path $PSScriptRoot 'load-launcher.ps1')
+Import-WinNiceLauncherAssembly -Name 'CxLauncher'
 
 try {
     exit ([CxLauncher]::Run([string[]]$Command, $commandLine))

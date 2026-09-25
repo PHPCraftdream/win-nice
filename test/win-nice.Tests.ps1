@@ -220,6 +220,45 @@ Set-Content -Path '{0}' -Value ($a -join '|SEP|')
     }
 }
 
+Describe 'prebuilt helper assemblies' {
+    It 'ships a prebuilt assembly for every launcher and loads none through Add-Type' {
+        $launchers = @(
+            @{ Script = 'abovenormal.ps1'; Class = 'AboveNormalLauncher' },
+            @{ Script = 'admin.ps1'; Class = 'AdminLauncher' },
+            @{ Script = 'belownormal.ps1'; Class = 'BelowNormalLauncher' },
+            @{ Script = 'capc.ps1'; Class = 'CapcLauncher' },
+            @{ Script = 'capm.ps1'; Class = 'CapmLauncher' },
+            @{ Script = 'capn.ps1'; Class = 'CapnLauncher' },
+            @{ Script = 'caps.ps1'; Class = 'CapsLauncher' },
+            @{ Script = 'capt.ps1'; Class = 'CaptLauncher' },
+            @{ Script = 'cx.ps1'; Class = 'CxLauncher' },
+            @{ Script = 'cy.ps1'; Class = 'CyLauncher' },
+            @{ Script = 'high.ps1'; Class = 'HighLauncher' },
+            @{ Script = 'idle.ps1'; Class = 'IdleLauncher' },
+            @{ Script = 'realtime.ps1'; Class = 'RealtimeLauncher' }
+        )
+        foreach ($launcher in $launchers) {
+            $source = Get-Content (Join-Path $bin $launcher.Script) -Raw
+            $source | Should Match "Import-WinNiceLauncherAssembly -Name '$($launcher.Class)'"
+            $source | Should Not Match 'Add-Type\s+-TypeDefinition'
+            (Test-Path (Join-Path $bin ($launcher.Class + '.dll'))) | Should Be $true
+            (Test-Path (Join-Path $bin ($launcher.Class + '.dll.managed'))) | Should Be $true
+        }
+
+        $loader = Get-Content (Join-Path $bin 'load-launcher.ps1') -Raw
+        $loader | Should Match 'Reflection\.Assembly\]::Load\('
+        $pathsSource = Get-Content (Join-Path $root 'install\paths.js') -Raw
+        $pathsSource | Should Not Match 'Add-Type'
+        $notifierPath = Join-Path $bin 'EnvironmentNotifier.dll'
+        (Test-Path $notifierPath) | Should Be $true
+        (Test-Path (Join-Path $bin 'EnvironmentNotifier.dll.managed')) | Should Be $true
+        $notifierAssembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($notifierPath))
+        $notifierType = $notifierAssembly.GetType('EnvironmentNotifier')
+        ($null -ne $notifierType) | Should Be $true
+        ($null -ne $notifierType.GetMethod('Broadcast')) | Should Be $true
+    }
+}
+
 Describe 'idle.ps1' {
     It 'runs the given command at Idle priority' {
         $out = New-TempFile
@@ -493,7 +532,8 @@ Set-Content -Path $env:WIN_NICE_TEST_OUT -Value ($args -join '|SEP|')
         $r.Output | Should Be '100OFF'
     }
 
-    It 'holds CPU usage of a busy single process measurably below the uncapped baseline' {
+    # This saturates every logical processor, so routine Pester runs skip it.
+    It 'holds CPU usage of a busy single process measurably below the uncapped baseline' -Skip:($env:WIN_NICE_RUN_CPU_STRESS_TEST -ne '1') {
         $burn = @'
 param([int]$Threads, [int]$Seconds)
 $proc = [Diagnostics.Process]::GetCurrentProcess()
@@ -3310,15 +3350,11 @@ Start-Sleep -Seconds 60
 }
 
 Describe 'sequential invocation in one PowerShell session' {
-    It 'runs idle/belownormal/abovenormal/high/realtime/capc/capt/capm/caps/capn/cy/cx/admin one after another without an Add-Type type-collision error' {
+    It 'runs all helper-backed launchers in one PowerShell session without type collisions' {
         # Regression test: bare-name resolution (idle args..., not idle.bat) runs the
         # .ps1 in the CURRENT process/AppDomain, not a new one - each of these used to
-        # Add-Type an identically-named "Launcher" class, so calling a second one in the
-        # same session threw "Cannot add type. The type name 'Launcher' already exists."
-        # (and, for cy/cx's different Run() signature, could fail outright). Confirmed
-        # empirically before the fix; each now has its own unique class name
-        # (IdleLauncher, BelowNormalLauncher, ..., CapcLauncher, CaptLauncher, CapmLauncher,
-        # CapsLauncher, CapnLauncher, CyLauncher, CxLauncher, AdminLauncher).
+        # Add-Type an identically-named launcher type, so calling a second one in the
+        # same session failed. Each prebuilt assembly now has a distinct public type.
         $out = New-TempFile
         $probe = 'Set-Content -Path $env:WIN_NICE_TEST_OUT -Value "ok"'
         $probeFile = New-TempScript
@@ -3353,7 +3389,7 @@ if (`$LASTEXITCODE -ne 0) { throw "cy failed with exit `$LASTEXITCODE" }
 if (`$LASTEXITCODE -ne 0) { throw "cx failed with exit `$LASTEXITCODE" }
 # admin.ps1's own exit code depends on elevation state (refuses via the "%"
 # check when not elevated, runs "cmd" inline when already elevated) - only the
-# Add-Type collision is under test here, not admin's success/failure semantics.
+# Helper assembly loading is under test here, not admin's success/failure semantics.
 & (Join-Path '$bin' 'admin.ps1') cmd /c 'echo 100%OFF' 2>`$null
 exit 0
 "@

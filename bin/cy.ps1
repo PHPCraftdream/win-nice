@@ -203,7 +203,8 @@ public static class CyLauncher
 }
 "@
 
-Add-Type -TypeDefinition $source -Language CSharp
+. (Join-Path $PSScriptRoot 'load-launcher.ps1')
+Import-WinNiceLauncherAssembly -Name 'CyLauncher'
 
 try {
     exit ([CyLauncher]::Run([string[]]$Command, $commandLine))

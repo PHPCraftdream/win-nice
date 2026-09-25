@@ -462,7 +462,8 @@ public static class CapmLauncher
 }
 "@
 
-Add-Type -TypeDefinition $source -Language CSharp
+. (Join-Path $PSScriptRoot 'load-launcher.ps1')
+Import-WinNiceLauncherAssembly -Name 'CapmLauncher'
 
 # $sizeUnit is always 'g'/'G'/'m'/'M'/'%' by this point - the validation above
 # either matched an m/M/g/G suffix or resolved a bare integer to '%'.

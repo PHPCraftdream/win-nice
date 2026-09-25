@@ -4,6 +4,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-25
+
+### Changed
+
+- Replaced per-launch C# compilation with prebuilt .NET helper assemblies and a shared PowerShell loader. `npm test` and `npm pack` regenerate the assemblies from the embedded launcher sources.
+- The installer now manages the helper assemblies and marker sidecars; PATH notifications use the prebuilt `EnvironmentNotifier` helper.
+- Expanded the release artifact allowlist to cover the loader, helper assemblies, and their marker sidecars.
+- Made the Pester CPU-saturation test opt-in with `WIN_NICE_RUN_CPU_STRESS_TEST=1` so routine runs do not saturate every logical processor.
+
+### Fixed
+
+- Prevented Git line-ending conversion of helper DLLs and made fallback cleanup remove assemblies before their marker sidecars.
+
 ## [0.2.0] - 2026-09-04
 
 The first release since `0.1.0` - `0.1.1` was never tagged or published;
@@ -136,6 +149,7 @@ everything below shipped together as `0.2.0`.
 - Node test suite (installer logic) and Pester integration suite (real
   Windows process/priority/Job-Object behavior).
 
-[Unreleased]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/PHPCraftdream/win-nice/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/PHPCraftdream/win-nice/releases/tag/v0.1.0

@@ -1,6 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const { execFileSync } = require('node:child_process');
 const path = require('node:path');
 
@@ -56,9 +57,14 @@ function packedTarballPaths() {
   return packed;
 }
 
-test('release-check allowlist: this checkout packs exactly the 54 expected paths', () => {
+test('release-check allowlist: this checkout packs exactly the 83 expected paths', () => {
   const diff = diffTarballPaths(packedTarballPaths());
   assert.deepEqual(diff, { missing: [], extra: [] });
+});
+
+test('prebuilt helper assemblies are excluded from Git text conversion', () => {
+  const attributes = fs.readFileSync(path.join(__dirname, '..', '.gitattributes'), 'utf8');
+  assert.match(attributes, /^bin\/\*\.dll\s+binary\s+-eol$/m);
 });
 
 test('release-check allowlist: stray install/ file is rejected and named', () => {
@@ -96,10 +102,10 @@ test('release-check allowlist: a missing expected path is rejected and named', (
   assert.deepEqual(missing, ['skills/win-nice/SKILL.md']);
 });
 
-test('release-check allowlist: 54 unique paths = 42 launchers + 12 non-bin literals', () => {
-  assert.equal(expectedTarballPaths.length, 54);
-  assert.equal(new Set(expectedTarballPaths).size, 54);
-  assert.equal(expectedTarballPaths.filter((p) => p.startsWith('bin/')).length, 42);
+test('release-check allowlist: 83 unique paths = 71 bin assets + 12 non-bin literals', () => {
+  assert.equal(expectedTarballPaths.length, 83);
+  assert.equal(new Set(expectedTarballPaths).size, 83);
+  assert.equal(expectedTarballPaths.filter((p) => p.startsWith('bin/')).length, 71);
   // Pinned on purpose: if this list changes, release-check.js's
   // expectedNonBinPaths and this test must change in the same commit.
   assert.deepEqual(

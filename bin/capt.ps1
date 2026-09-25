@@ -436,7 +436,8 @@ public static class CaptLauncher
 }
 "@
 
-Add-Type -TypeDefinition $source -Language CSharp
+. (Join-Path $PSScriptRoot 'load-launcher.ps1')
+Import-WinNiceLauncherAssembly -Name 'CaptLauncher'
 
 # First $countValue logical processors, i.e. threads - not physical cores. See
 # README. Bit-shift, not [Math]::Pow: doubles can't exactly represent 2^63.

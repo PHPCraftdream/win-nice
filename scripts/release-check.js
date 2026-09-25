@@ -68,17 +68,28 @@ function fail(msg) {
   process.exitCode = 1;
 }
 
-// Full contract: each of the 14 tools ships exactly 3 entry points
-// (extensionless Git Bash shim, .bat, .ps1) - 42 files total - and the 6
-// pre-rename legacy names (cap/pint, renamed to capc/capt) must never
-// reappear in a real install.
+// Full contract: 14 tools ship three entry points each, plus the shared loader
+// and 14 prebuilt managed assemblies with uninstall markers.
 const expectedTools = [
   'idle', 'belownormal', 'abovenormal', 'high', 'realtime',
   'capc', 'capt', 'capm', 'caps', 'capn', 'admin', 'uiup', 'cy', 'cx',
 ];
-const expectedFiles = expectedTools.flatMap((t) => [t, `${t}.bat`, `${t}.ps1`]);
+const expectedLaunchers = [
+  ...expectedTools.flatMap((t) => [t, `${t}.bat`, `${t}.ps1`]),
+  'load-launcher.ps1',
+];
+const helperAssemblies = [
+  'AboveNormalLauncher', 'AdminLauncher', 'BelowNormalLauncher',
+  'CapcLauncher', 'CapmLauncher', 'CapnLauncher', 'CapsLauncher', 'CaptLauncher',
+  'CxLauncher', 'CyLauncher', 'HighLauncher', 'IdleLauncher', 'RealtimeLauncher',
+  'EnvironmentNotifier',
+];
+const expectedFiles = [
+  ...expectedLaunchers,
+  ...helperAssemblies.flatMap((name) => [`${name}.dll`, `${name}.dll.managed`]),
+];
 
-// Same 42 paths the bin/ check below compares, hoisted here so the
+// Same 71 paths the bin/ check below compares, hoisted here so the
 // whole-tarball allowlist can build on them (and so
 // test/release-check-allowlist.test.js can import the full contract without
 // running the gate).
@@ -89,7 +100,7 @@ const expectedBinPaths = expectedFiles.map((f) => `bin/${f}`);
 // published tarball. Deliberately a hardcoded literal list, not a scan of
 // install/ and skills/: the point is to catch a file that exists on disk but
 // must not ship, and a scan would just bless whatever happens to be there.
-// 54 paths = 42 launchers + 6 install/*.js + skills/win-nice/SKILL.md +
+// 83 paths = 71 bin assets + 6 install/*.js + skills/win-nice/SKILL.md +
 // package.json (always packed by npm even though it is not listed in
 // `files`) + the 4 whitelisted root docs/licenses.
 const expectedNonBinPaths = [
@@ -212,7 +223,7 @@ try {
     // stray file dropped in there gets packed - but install/'s
     // listSourceFiles() only installs .bat/.ps1/extensionless names, so the
     // installed-manifest check below would still pass green and never notice.
-    // Compare the tarball's actual file list against the same 42-path
+    // Compare the tarball's actual file list against the same 71-path
     // allowlist: bin/ must be exactly the launcher contract, nothing more.
     const packedAllPaths = (Array.isArray(packInfo.files) ? packInfo.files : [])
       .map((f) => f.path);
@@ -279,9 +290,9 @@ try {
         if (missing.length) parts.push(`missing: ${missing.join(', ')}`);
         if (extra.length) parts.push(`extra: ${extra.join(', ')}`);
         if (forbidden.length) parts.push(`forbidden legacy name(s) present: ${forbidden.join(', ')}`);
-        fail(`installed manifest does not match the exact 42-file launcher contract (${parts.join('; ')})`);
+        fail(`installed manifest does not match the exact ${expectedFiles.length}-file install contract (${parts.join('; ')})`);
       } else {
-        ok(`all ${expectedFiles.length} expected launcher files present (14 tools x 3 variants), no legacy names`);
+        ok(`all ${expectedFiles.length} expected files present (14 tools, shared loader, and prebuilt assemblies), no legacy names`);
       }
     }
 

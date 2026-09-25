@@ -214,7 +214,8 @@ public static class RealtimeLauncher
 }
 "@
 
-Add-Type -TypeDefinition $source -Language CSharp
+. (Join-Path $PSScriptRoot 'load-launcher.ps1')
+Import-WinNiceLauncherAssembly -Name 'RealtimeLauncher'
 
 $REALTIME_PRIORITY_CLASS = 0x00000100
 try {

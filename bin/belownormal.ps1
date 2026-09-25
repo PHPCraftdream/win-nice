@@ -209,7 +209,8 @@ public static class BelowNormalLauncher
 }
 "@
 
-Add-Type -TypeDefinition $source -Language CSharp
+. (Join-Path $PSScriptRoot 'load-launcher.ps1')
+Import-WinNiceLauncherAssembly -Name 'BelowNormalLauncher'
 
 $BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
 try {

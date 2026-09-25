@@ -3,16 +3,24 @@ const fs = require('fs');
 const path = require('path');
 const paths = require('./paths');
 const manifest = require('./manifest');
-const { removeManagedFile } = require('./uninstall');
+const { removeManagedFile, orderManagedFiles } = require('./uninstall');
 const { updateInstalledSkill } = require('./skill');
 const pkg = require('../package.json');
 
 const SOURCE_BIN = path.join(__dirname, '..', 'bin');
+const SUPPORT_FILES = [
+  'AboveNormalLauncher', 'AdminLauncher', 'BelowNormalLauncher',
+  'CapcLauncher', 'CapmLauncher', 'CapnLauncher', 'CapsLauncher', 'CaptLauncher',
+  'CxLauncher', 'CyLauncher', 'HighLauncher', 'IdleLauncher', 'RealtimeLauncher',
+  'EnvironmentNotifier',
+].flatMap((name) => [`${name}.dll`, `${name}.dll.managed`]);
 
 function listSourceFiles() {
   // .bat/.ps1 launchers plus their extensionless POSIX shell shims (bin/<tool>,
   // no dot) - the sibling Git Bash needs since it ignores PATHEXT on bare names.
-  return fs.readdirSync(SOURCE_BIN).filter((f) => f.endsWith('.bat') || f.endsWith('.ps1') || !f.includes('.'));
+  const launchers = fs.readdirSync(SOURCE_BIN)
+    .filter((f) => f.endsWith('.bat') || f.endsWith('.ps1') || !f.includes('.'));
+  return [...launchers, ...SUPPORT_FILES];
 }
 
 // `npm install -g win-nice@newer` only runs postinstall (this function) - unlike
@@ -24,7 +32,7 @@ function cleanupStaleFiles(dir, currentFiles) {
   const currentSet = new Set(currentFiles);
   const previous = manifest.read(paths.manifestPath());
   if (previous && Array.isArray(previous.files)) {
-    const staleNames = previous.files.filter((name) => !currentSet.has(name));
+    const staleNames = orderManagedFiles(previous.files.filter((name) => !currentSet.has(name)));
     const previousDir = previous.binDir || dir;
     for (const name of staleNames) {
       removeManagedFile(path.join(previousDir, name), dir, { requireMarker: false });
@@ -39,7 +47,7 @@ function cleanupStaleFiles(dir, currentFiles) {
   // "win-nice: managed-file" marker. An unmarked file (something the user
   // dropped into binDir themselves) is never touched, marker or no manifest.
   if (!fs.existsSync(dir)) return;
-  for (const name of fs.readdirSync(dir)) {
+  for (const name of orderManagedFiles(fs.readdirSync(dir))) {
     if (currentSet.has(name)) continue;
     removeManagedFile(path.join(dir, name), dir, { requireMarker: true });
   }

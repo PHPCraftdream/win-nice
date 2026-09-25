@@ -19,6 +19,7 @@ $commandLine = ($Command | ForEach-Object {
     if ($escaped -eq '' -or $escaped -match '[\s"&|<>^]') { '"' + $escaped + '"' } else { $escaped }
 }) -join ' '
 
+# Build source for the precompiled helper and fault-injection tests.
 $source = @"
 using System;
 using System.Runtime.InteropServices;
@@ -209,7 +210,8 @@ public static class IdleLauncher
 }
 "@
 
-Add-Type -TypeDefinition $source -Language CSharp
+. (Join-Path $PSScriptRoot 'load-launcher.ps1')
+Import-WinNiceLauncherAssembly -Name 'IdleLauncher'
 
 $IDLE_PRIORITY_CLASS = 0x00000040
 try {

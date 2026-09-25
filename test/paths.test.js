@@ -67,3 +67,12 @@ test('registry PowerShell runner does not use a bare executable name', () => {
   assert.match(source, /execFileSync\(powershellPath\(env\),/);
   assert.doesNotMatch(source, /execFileSync\(\s*['"]powershell(?:\.exe)?['"]/);
 });
+
+test('environment notification loads its prebuilt assembly without compiling C#', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'install', 'paths.js'), 'utf8');
+  const assembly = path.join(__dirname, '..', 'bin', 'EnvironmentNotifier.dll');
+  assert.match(source, /WIN_NICE_ENVIRONMENT_NOTIFIER_DLL/);
+  assert.match(source, /Reflection\.Assembly\]::Load/);
+  assert.doesNotMatch(source, /Add-Type/);
+  assert.equal(fs.existsSync(assembly), true);
+});

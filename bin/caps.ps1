@@ -574,7 +574,8 @@ public static class CapsLauncher
 }
 "@
 
-Add-Type -TypeDefinition $source -Language CSharp
+. (Join-Path $PSScriptRoot 'load-launcher.ps1')
+Import-WinNiceLauncherAssembly -Name 'CapsLauncher'
 
 try {
     exit ([CapsLauncher]::Run($timeoutMs, [string[]]$Command, $commandLine))

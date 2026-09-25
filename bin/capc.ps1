@@ -422,7 +422,8 @@ public static class CapcLauncher
 }
 "@
 
-Add-Type -TypeDefinition $source -Language CSharp
+. (Join-Path $PSScriptRoot 'load-launcher.ps1')
+Import-WinNiceLauncherAssembly -Name 'CapcLauncher'
 
 try {
     exit ([CapcLauncher]::Run($percentValue, [string[]]$Command, $commandLine))

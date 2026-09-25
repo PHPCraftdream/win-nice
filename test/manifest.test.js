@@ -44,6 +44,15 @@ test('hasMarker detects the win-nice marker comment', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('hasMarker recognizes the managed sidecar for a binary', () => {
+  const dir = tmpDir();
+  const binary = path.join(dir, 'IdleLauncher.dll');
+  fs.writeFileSync(binary, Buffer.from([0, 1, 2, 3]));
+  fs.writeFileSync(`${binary}.managed`, '# win-nice: managed-file\n');
+  assert.equal(manifest.hasMarker(binary), true);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('hasMarker returns false for a missing file instead of throwing', () => {
   assert.equal(manifest.hasMarker('C:\\definitely\\not\\here.bat'), false);
 });
