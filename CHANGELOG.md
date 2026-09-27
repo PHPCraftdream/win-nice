@@ -4,6 +4,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-27
+
 ### Changed
 
 - `npm test`, `npm pack`, and `npm publish` no longer invoke the C# compiler
@@ -172,7 +174,8 @@ everything below shipped together as `0.2.0`.
 - Node test suite (installer logic) and Pester integration suite (real
   Windows process/priority/Job-Object behavior).
 
-[Unreleased]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/PHPCraftdream/win-nice/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/PHPCraftdream/win-nice/releases/tag/v0.1.0
