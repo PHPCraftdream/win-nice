@@ -59,6 +59,19 @@ key under `HKCU:\Software\WinNiceTest`.
 - Managed files (everything under `bin/`, plus the installed skill) carry a
   `win-nice: managed-file` / `win-nice: managed-skill` marker comment - the
   installer relies on it to know what it's allowed to overwrite/remove.
+- Every `bin/<tool>.ps1`'s `$source = @"..."@` here-string is the build input
+  for its prebuilt `bin/<Class>.dll` (and the input fault-injection probes
+  compile against) - it is never executed at runtime. To change a helper's C#:
+  edit that block (or `scripts/EnvironmentNotifier.cs`), run
+  `scripts/build-launcher-assemblies.ps1`, and commit the resulting
+  `bin/*.dll` + `bin/*.dll.managed` alongside the source change. The build is
+  incremental - it skips an assembly whose `.dll.managed` sidecar hash already
+  matches the current source (`-Force` rebuilds everything). `npm test` runs
+  `scripts/check-assemblies.js`, which recomputes that same hash without a
+  compiler and fails, naming the assembly, if a committed DLL doesn't match
+  its source - so a forgotten rebuild is caught locally, not just in CI.
+  Nothing in any npm lifecycle script (`postinstall`, `prepack`, `test`)
+  invokes the C# compiler; end users never compile anything.
 
 ## Reporting bugs
 

@@ -8,12 +8,32 @@ const { updateInstalledSkill } = require('./skill');
 const pkg = require('../package.json');
 
 const SOURCE_BIN = path.join(__dirname, '..', 'bin');
-const SUPPORT_FILES = [
-  'AboveNormalLauncher', 'AdminLauncher', 'BelowNormalLauncher',
-  'CapcLauncher', 'CapmLauncher', 'CapnLauncher', 'CapsLauncher', 'CaptLauncher',
-  'CxLauncher', 'CyLauncher', 'HighLauncher', 'IdleLauncher', 'RealtimeLauncher',
-  'EnvironmentNotifier',
-].flatMap((name) => [`${name}.dll`, `${name}.dll.managed`]);
+
+// Single source of truth for the 14 prebuilt helper assemblies (P3-3): the
+// script<->class mapping scripts/build-launcher-assemblies.ps1 and
+// scripts/check-assemblies.js both need to extract/verify each launcher's
+// embedded C# source, plus the flat name list release-check.js and this
+// file's own SUPPORT_FILES use. EnvironmentNotifier has no launcher .ps1 of
+// its own (its source is scripts/EnvironmentNotifier.cs directly), hence
+// `script: null`.
+const HELPER_ASSEMBLIES = [
+  { class: 'AboveNormalLauncher', script: 'abovenormal.ps1' },
+  { class: 'AdminLauncher', script: 'admin.ps1' },
+  { class: 'BelowNormalLauncher', script: 'belownormal.ps1' },
+  { class: 'CapcLauncher', script: 'capc.ps1' },
+  { class: 'CapmLauncher', script: 'capm.ps1' },
+  { class: 'CapnLauncher', script: 'capn.ps1' },
+  { class: 'CapsLauncher', script: 'caps.ps1' },
+  { class: 'CaptLauncher', script: 'capt.ps1' },
+  { class: 'CxLauncher', script: 'cx.ps1' },
+  { class: 'CyLauncher', script: 'cy.ps1' },
+  { class: 'HighLauncher', script: 'high.ps1' },
+  { class: 'IdleLauncher', script: 'idle.ps1' },
+  { class: 'RealtimeLauncher', script: 'realtime.ps1' },
+  { class: 'EnvironmentNotifier', script: null },
+];
+const HELPER_ASSEMBLY_NAMES = HELPER_ASSEMBLIES.map((a) => a.class);
+const SUPPORT_FILES = HELPER_ASSEMBLY_NAMES.flatMap((name) => [`${name}.dll`, `${name}.dll.managed`]);
 
 function listSourceFiles() {
   // .bat/.ps1 launchers plus their extensionless POSIX shell shims (bin/<tool>,
@@ -99,4 +119,11 @@ function install({ updatePath = true } = {}) {
   return { dir, files };
 }
 
-module.exports = { install, listSourceFiles, isSourceCheckout: paths.isSourceCheckout };
+module.exports = {
+  install,
+  listSourceFiles,
+  isSourceCheckout: paths.isSourceCheckout,
+  HELPER_ASSEMBLIES,
+  HELPER_ASSEMBLY_NAMES,
+  SUPPORT_FILES,
+};

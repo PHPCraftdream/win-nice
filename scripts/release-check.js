@@ -13,6 +13,7 @@ const { execFileSync } = require('child_process');
 
 const repoRoot = path.join(__dirname, '..');
 const pkg = require(path.join(repoRoot, 'package.json'));
+const { HELPER_ASSEMBLY_NAMES } = require(path.join(repoRoot, 'install', 'install.js'));
 
 // Fixed Windows dependencies must never be resolved through CreateProcess's
 // current-directory/PATH search. Keep the construction injectable so the
@@ -78,12 +79,9 @@ const expectedLaunchers = [
   ...expectedTools.flatMap((t) => [t, `${t}.bat`, `${t}.ps1`]),
   'load-launcher.ps1',
 ];
-const helperAssemblies = [
-  'AboveNormalLauncher', 'AdminLauncher', 'BelowNormalLauncher',
-  'CapcLauncher', 'CapmLauncher', 'CapnLauncher', 'CapsLauncher', 'CaptLauncher',
-  'CxLauncher', 'CyLauncher', 'HighLauncher', 'IdleLauncher', 'RealtimeLauncher',
-  'EnvironmentNotifier',
-];
+// Canonical list lives in install/install.js (P3-3) - this used to be a
+// fourth hand-maintained copy.
+const helperAssemblies = HELPER_ASSEMBLY_NAMES;
 const expectedFiles = [
   ...expectedLaunchers,
   ...helperAssemblies.flatMap((name) => [`${name}.dll`, `${name}.dll.managed`]),

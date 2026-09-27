@@ -259,6 +259,66 @@ Describe 'prebuilt helper assemblies' {
     }
 }
 
+Describe 'load-launcher.ps1 stale-assembly warning' {
+    It 'warns exactly once per session when the loaded DLL changes on disk, stays silent while unchanged, and keeps the original type usable' {
+        # Runs entirely in a CHILD powershell process - Assembly.Load and the
+        # AppDomain data this feature relies on must never touch THIS Pester
+        # session's own AppDomain (it stays alive across every other test).
+        $tempDir = Join-Path $script:testRoot ('stale-assembly-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+        $dllPath = Join-Path $tempDir 'IdleLauncher.dll'
+        Copy-Item (Join-Path $bin 'load-launcher.ps1') (Join-Path $tempDir 'load-launcher.ps1')
+        Copy-Item (Join-Path $bin 'IdleLauncher.dll') $dllPath
+        # A different launcher DLL stands in for "the file changed on disk" -
+        # any bytes with a different SHA-256 than the original IdleLauncher.dll
+        # would do; this one is guaranteed to differ and to already exist.
+        $otherDllPath = Join-Path $bin 'CapsLauncher.dll'
+        $out = New-TempFile
+        $driver = New-TempScript
+        try {
+            $driverContent = @"
+`$ErrorActionPreference = 'Stop'
+. '$tempDir\load-launcher.ps1'
+
+# 1: first import in this session - loads the assembly, no warning possible yet.
+`$w1 = Import-WinNiceLauncherAssembly -Name 'IdleLauncher' 3>&1
+# 2: unchanged file - the "stays silent while unchanged" case.
+`$w2 = Import-WinNiceLauncherAssembly -Name 'IdleLauncher' 3>&1
+Copy-Item -Path '$otherDllPath' -Destination '$dllPath' -Force
+# 3: file now differs from what was loaded - exactly one warning expected.
+`$w3 = Import-WinNiceLauncherAssembly -Name 'IdleLauncher' 3>&1
+# 4: still differs, same session - already warned, no additional warning.
+`$w4 = Import-WinNiceLauncherAssembly -Name 'IdleLauncher' 3>&1
+`$typeResolves = (`$null -ne ('IdleLauncher' -as [type]))
+
+[PSCustomObject]@{
+    W1 = @(`$w1).Count
+    W2 = @(`$w2).Count
+    W3 = @(`$w3).Count
+    W3Text = ((@(`$w3) | ForEach-Object { `$_.Message }) -join '|')
+    W4 = @(`$w4).Count
+    TypeResolves = `$typeResolves
+} | ConvertTo-Json -Compress | Set-Content -Path '$out'
+"@
+            Set-Content -Path $driver -Value $driverContent
+
+            & $script:powerShellPath -NoProfile -File $driver
+            $LASTEXITCODE | Should Be 0
+
+            $result = Get-Content $out -Raw | ConvertFrom-Json
+            $result.W1 | Should Be 0
+            $result.W2 | Should Be 0
+            $result.W3 | Should Be 1
+            $result.W3Text | Should Match 'changed on disk'
+            $result.W4 | Should Be 0
+            $result.TypeResolves | Should Be $true
+        } finally {
+            Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $out, $driver -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Describe 'idle.ps1' {
     It 'runs the given command at Idle priority' {
         $out = New-TempFile

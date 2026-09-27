@@ -7,7 +7,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const crypto = require('node:crypto');
 
-const { install } = require('../install/install');
+const { install, HELPER_ASSEMBLY_NAMES } = require('../install/install');
 const { uninstall } = require('../install/uninstall');
 const paths = require('../install/paths');
 const manifest = require('../install/manifest');
@@ -53,12 +53,7 @@ test('install copies launchers and helper assets and writes a manifest', () => {
     assert.ok(files.includes('capc.ps1'));
     assert.ok(files.includes('idle.bat'));
     assert.ok(files.includes('load-launcher.ps1'));
-    for (const name of [
-      'AboveNormalLauncher', 'AdminLauncher', 'BelowNormalLauncher',
-      'CapcLauncher', 'CapmLauncher', 'CapnLauncher', 'CapsLauncher', 'CaptLauncher',
-      'CxLauncher', 'CyLauncher', 'HighLauncher', 'IdleLauncher', 'RealtimeLauncher',
-      'EnvironmentNotifier',
-    ]) {
+    for (const name of HELPER_ASSEMBLY_NAMES) {
       assert.ok(files.includes(`${name}.dll`), `${name}.dll is installed`);
       assert.ok(files.includes(`${name}.dll.managed`), `${name}.dll marker is installed`);
     }

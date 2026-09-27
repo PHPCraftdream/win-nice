@@ -54,6 +54,42 @@ jobs:
           if ($result.FailedCount -gt 0) { exit 1 }
           exit 0
 
+      - name: PowerShell 7 (pwsh) smoke test
+        # Launchers now load a prebuilt .NET Framework 4 assembly via
+        # Assembly.Load(bytes) instead of Add-Type-compiling for whatever
+        # runtime is hosting the script - unverified under pwsh's .NET (Core)
+        # runtime until this step exists. windows-latest ships pwsh
+        # preinstalled. One matrix leg only, same reasoning as the
+        # release-check step below: this gates the launchers themselves, not
+        # any given Node version.
+        if: matrix.node-version == 24
+        shell: pwsh
+        run: |
+          # Process-scoped only (never persisted): hosted Windows runners run
+          # RemoteSigned by default, which already allows locally-checked-out
+          # scripts, but this keeps the step self-contained regardless.
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+
+          $cases = @(
+              @{ Script = 'bin\idle.ps1'; Args = @('cmd', '/c', 'exit', '7'); Expected = 7 },
+              @{ Script = 'bin\caps.ps1'; Args = @('5', 'cmd', '/c', 'exit', '4'); Expected = 4 },
+              @{ Script = 'bin\capc.ps1'; Args = @('50', 'cmd', '/c', 'exit', '6'); Expected = 6 }
+          )
+          $failed = $false
+          foreach ($case in $cases) {
+              $scriptArgs = $case.Args
+              & $case.Script @scriptArgs
+              if ($LASTEXITCODE -ne $case.Expected) {
+                  Write-Error "pwsh smoke: $($case.Script) expected exit $($case.Expected), got $LASTEXITCODE"
+                  $failed = $true
+              }
+          }
+          # Explicit exit, same reasoning as the Pester step above (05d93cf):
+          # without it the step's result would inherit whatever $LASTEXITCODE
+          # the last native call left behind, even when every case passed.
+          if ($failed) { exit 1 }
+          exit 0
+
       - name: Verify the actual packed artifact (scripts/release-check.js)
         # Only one matrix leg needs to run this - it's a gate on the tarball
         # itself, not on any given Node version, and running it 4x buys

@@ -4,6 +4,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `npm test`, `npm pack`, and `npm publish` no longer invoke the C# compiler
+  or rewrite the committed helper assemblies. Each `bin/<Class>.dll.managed`
+  sidecar now records the SHA-256 of the C# source the DLL was built from;
+  `scripts/check-assemblies.js` (run by `npm test` and as `prepack`)
+  recomputes it without a compiler and fails, naming the assembly, when a
+  committed DLL is stale or missing. The published tarball therefore ships
+  exactly the committed DLL bytes. `scripts/build-launcher-assemblies.ps1` is
+  incremental (`-Force` rebuilds everything).
+- The list of the 14 helper assemblies is defined once in `install/install.js`
+  and used by the installer, `release-check`, and the freshness check; a test
+  keeps the build script's own table in sync with it.
+- After an upgrade, a PowerShell session that had already loaded a helper
+  assembly prints one warning that the DLL changed on disk and keeps using the
+  loaded version until a new session starts.
+- CI runs `idle`, `caps`, and `capc` under PowerShell 7 (`pwsh`) as a smoke
+  test of the prebuilt .NET Framework assemblies there.
+
+### Removed
+
+- Unused `scripts/build-idle-launcher.ps1`.
+
 ## [0.2.1] - 2026-09-25
 
 ### Changed

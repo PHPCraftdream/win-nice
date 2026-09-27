@@ -461,10 +461,17 @@ of their own — the flag names describe exactly what they do.
 npm install -g win-nice
 ```
 
-This copies every tool above and the `idle` helper assembly into
+This copies every tool above, the shared `load-launcher.ps1` loader, and their
+14 prebuilt helper assemblies (13 launchers plus `EnvironmentNotifier`) into
 `%LOCALAPPDATA%\win-nice\bin` and adds that directory to your user `PATH`
 (via `postinstall`). Restart your terminal afterwards so the new `PATH` takes
 effect.
+
+Upgrading while a long-lived PowerShell session already used one of these tools
+keeps that session on the old assembly (it can't be swapped out mid-session);
+the next time that session uses the tool it prints one `win-nice: ... changed
+on disk` warning and keeps running the old version until you start a new
+session.
 
 `npm uninstall -g win-nice` does **not** reverse this - npm's `uninstall`
 lifecycle script was removed (npm ≥ 7 never runs it at all; there is no
@@ -535,10 +542,15 @@ bundled with Windows — no separate install needed to run the tools. Node.js is
 only needed for the npm-based installer/tests, not for the tools themselves.
 `cy`/`cx` additionally need `claude`/`codex` installed and on `PATH`.
 
-Maintainers regenerate the shipped helper assemblies with
-`scripts/build-launcher-assemblies.ps1` (also run by `npm test` and `npm pack`).
-That build step uses the .NET Framework compiler; installed tools load the
-prebuilt assemblies and never invoke it.
+Maintainers regenerate the shipped helper assemblies by editing the C# in the
+relevant `bin/<tool>.ps1`'s `$source` block (or `scripts/EnvironmentNotifier.cs`)
+and running `scripts/build-launcher-assemblies.ps1`, then committing the
+resulting `bin/*.dll` and `bin/*.dll.managed` together with the source change.
+That build step uses the .NET Framework compiler and is incremental - it skips
+an assembly whose sidecar hash already matches its current source (`-Force`
+rebuilds everything). `npm test`/`npm pack` never invoke the compiler; they run
+a Node-only freshness check that fails, naming the assembly, if a committed DLL
+doesn't match its source.
 
 **PowerShell execution policy:** Windows client editions default to
 `Restricted`, which blocks a bare `.ps1` invoked directly by PowerShell itself
