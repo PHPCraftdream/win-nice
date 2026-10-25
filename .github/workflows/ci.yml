@@ -7,7 +7,49 @@ on:
     branches: [main, master]
 
 jobs:
+  # The prebuilt Rust binary is built once here and shared with every matrix
+  # leg via an artifact - rebuilding it 4x (once per Node version) buys nothing.
+  build-exe:
+    runs-on: windows-latest
+    # Cargo release builds of a cold cache can take a while; cap the job.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # windows-latest ships rustup; install the stable toolchain explicitly
+      # (minimal profile + clippy/rustfmt) instead of relying on whatever
+      # default toolchain the runner image happens to pin.
+      - name: Set up stable Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - name: cargo fmt --check
+        shell: bash
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        shell: bash
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: cargo test
+        shell: bash
+        run: cargo test --locked
+
+      - name: cargo build --release
+        shell: bash
+        run: cargo build --release --locked
+
+      - name: Upload wnice.exe artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wnice-exe
+          path: target/release/wnice.exe
+
   test:
+    # Waits on the shared prebuilt binary from build-exe.
+    needs: build-exe
     runs-on: windows-latest
     # Upper bound for the whole job (npm install + both suites): an unbounded hang
     # would otherwise occupy the runner for the 6-hour default.
@@ -28,6 +70,14 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node-version }}
+
+      # Grabs the binary built once by build-exe; path: bin drops it at
+      # bin/wnice.exe (gitignored, so the checkout never contains it).
+      - name: Download prebuilt wnice.exe
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wnice-exe
+          path: bin
 
       - name: Install
         run: npm install
@@ -50,43 +100,34 @@ jobs:
           $ErrorActionPreference = 'Continue'
           # Runners ship Pester 3.4.0 and 5.9.0 side by side; the suite uses v3 syntax.
           Import-Module Pester -MaximumVersion 3.99
-          $result = Invoke-Pester -Path test\win-nice.Tests.ps1 -PassThru
+          $result = Invoke-Pester -Path test\pester -PassThru
           if ($result.FailedCount -gt 0) { exit 1 }
           exit 0
 
       - name: PowerShell 7 (pwsh) smoke test
-        # Launchers now load a prebuilt .NET Framework 4 assembly via
-        # Assembly.Load(bytes) instead of Add-Type-compiling for whatever
-        # runtime is hosting the script - unverified under pwsh's .NET (Core)
-        # runtime until this step exists. windows-latest ships pwsh
-        # preinstalled. One matrix leg only, same reasoning as the
-        # release-check step below: this gates the launchers themselves, not
-        # any given Node version.
+        # The tools are native exes now; this checks that pwsh's native-command
+        # argument passing reaches them intact. One matrix leg is enough.
         if: matrix.node-version == 24
         shell: pwsh
         run: |
-          # Process-scoped only (never persisted): hosted Windows runners run
-          # RemoteSigned by default, which already allows locally-checked-out
-          # scripts, but this keeps the step self-contained regardless.
-          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-
+          $bin = Join-Path $env:RUNNER_TEMP 'wnice-pwsh-smoke'
+          New-Item -ItemType Directory -Path $bin -Force | Out-Null
+          foreach ($t in 'idle', 'caps', 'capc') { Copy-Item binwnice.exe (Join-Path $bin "$t.exe") }
           $cases = @(
-              @{ Script = 'bin\idle.ps1'; Args = @('cmd', '/c', 'exit', '7'); Expected = 7 },
-              @{ Script = 'bin\caps.ps1'; Args = @('5', 'cmd', '/c', 'exit', '4'); Expected = 4 },
-              @{ Script = 'bin\capc.ps1'; Args = @('50', 'cmd', '/c', 'exit', '6'); Expected = 6 }
+              @{ Tool = 'idle'; Args = @('cmd', '/c', 'exit', '7'); Expected = 7 },
+              @{ Tool = 'caps'; Args = @('5', 'cmd', '/c', 'exit', '4'); Expected = 4 },
+              @{ Tool = 'capc'; Args = @('50', 'cmd', '/c', 'exit', '6'); Expected = 6 }
           )
           $failed = $false
           foreach ($case in $cases) {
-              $scriptArgs = $case.Args
-              & $case.Script @scriptArgs
+              $toolArgs = $case.Args
+              & (Join-Path $bin "$($case.Tool).exe") @toolArgs
               if ($LASTEXITCODE -ne $case.Expected) {
-                  Write-Error "pwsh smoke: $($case.Script) expected exit $($case.Expected), got $LASTEXITCODE"
+                  Write-Error "pwsh smoke: $($case.Tool) expected exit $($case.Expected), got $LASTEXITCODE"
                   $failed = $true
               }
           }
-          # Explicit exit, same reasoning as the Pester step above (05d93cf):
-          # without it the step's result would inherit whatever $LASTEXITCODE
-          # the last native call left behind, even when every case passed.
+          # Explicit exit: otherwise the step inherits the last native exit code.
           if ($failed) { exit 1 }
           exit 0
 

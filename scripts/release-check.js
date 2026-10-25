@@ -13,7 +13,9 @@ const { execFileSync } = require('child_process');
 
 const repoRoot = path.join(__dirname, '..');
 const pkg = require(path.join(repoRoot, 'package.json'));
-const { HELPER_ASSEMBLY_NAMES } = require(path.join(repoRoot, 'install', 'install.js'));
+const {
+  expectedInstalledFiles,
+} = require(path.join(repoRoot, 'install', 'install.js'));
 
 // Fixed Windows dependencies must never be resolved through CreateProcess's
 // current-directory/PATH search. Keep the construction injectable so the
@@ -57,7 +59,7 @@ function npmExec(args, options) {
     );
     process.exit(1);
   }
-  return execFileSync(process.execPath, [npmExecPath, ...args], options);
+  return execFileSync(process.execPath, [npmExecPath, ...args], { windowsHide: true, ...options });
 }
 
 function ok(msg) {
@@ -69,44 +71,31 @@ function fail(msg) {
   process.exitCode = 1;
 }
 
-// Full contract: 14 tools ship three entry points each, plus the shared loader
-// and 14 prebuilt managed assemblies with uninstall markers.
-const expectedTools = [
-  'idle', 'belownormal', 'abovenormal', 'high', 'realtime',
-  'capc', 'capt', 'capm', 'caps', 'capn', 'admin', 'uiup', 'cy', 'cx',
-];
-const expectedLaunchers = [
-  ...expectedTools.flatMap((t) => [t, `${t}.bat`, `${t}.ps1`]),
-  'load-launcher.ps1',
-];
-// Canonical list lives in install/install.js (P3-3) - this used to be a
-// fourth hand-maintained copy.
-const helperAssemblies = HELPER_ASSEMBLY_NAMES;
-const expectedFiles = [
-  ...expectedLaunchers,
-  ...helperAssemblies.flatMap((name) => [`${name}.dll`, `${name}.dll.managed`]),
-];
-
-// Same 71 paths the bin/ check below compares, hoisted here so the
+// The tarball ships exactly ONE binary (bin/wnice.exe, built by CI); the
+// single source of truth for what an install produces lives in
+// install/install.js (expectedInstalledFiles) - release-check must not keep
+// its own hand-maintained copy.
+// Same 1 bin path the bin/ check below compares, hoisted here so the
 // whole-tarball allowlist can build on them (and so
 // test/release-check-allowlist.test.js can import the full contract without
 // running the gate).
-const expectedBinPaths = expectedFiles.map((f) => `bin/${f}`);
+const expectedBinPaths = ['bin/wnice.exe'];
 
 // package.json's `files` whitelist ships install/ and skills/ whole too, so
 // a stray file anywhere - not just bin/ - gets packed into the real
 // published tarball. Deliberately a hardcoded literal list, not a scan of
 // install/ and skills/: the point is to catch a file that exists on disk but
 // must not ship, and a scan would just bless whatever happens to be there.
-// 83 paths = 71 bin assets + 6 install/*.js + skills/win-nice/SKILL.md +
-// package.json (always packed by npm even though it is not listed in
-// `files`) + the 4 whitelisted root docs/licenses.
+// 14 paths = 1 bin asset (bin/wnice.exe) + 7 install/*.js +
+// skills/win-nice/SKILL.md + package.json (always packed by npm even though
+// it is not listed in `files`) + the 4 whitelisted root docs/licenses.
 const expectedNonBinPaths = [
   'install/cli.js',
   'install/install.js',
   'install/manifest.js',
   'install/paths.js',
   'install/skill.js',
+  'install/stage-exe.js',
   'install/uninstall.js',
   'skills/win-nice/SKILL.md',
   'package.json',
@@ -218,11 +207,10 @@ try {
     ok(`packed ${packInfo.filename} (${packInfo.entryCount} files, ${packInfo.size} bytes)`);
 
     // package.json's `files` whitelist ships the whole bin/ directory, so any
-    // stray file dropped in there gets packed - but install/'s
-    // listSourceFiles() only installs .bat/.ps1/extensionless names, so the
-    // installed-manifest check below would still pass green and never notice.
-    // Compare the tarball's actual file list against the same 71-path
-    // allowlist: bin/ must be exactly the launcher contract, nothing more.
+    // stray file dropped in there gets packed - but the tarball now ships
+    // exactly one binary, bin/wnice.exe (built by CI; the install step derives
+    // every shim/tool copy from it). Compare the tarball's actual file list
+    // against the same 1-path bin/ allowlist: bin/ must contain nothing else.
     const packedAllPaths = (Array.isArray(packInfo.files) ? packInfo.files : [])
       .map((f) => f.path);
     const packedBinPaths = packedAllPaths.filter((p) => p.startsWith('bin/'));
@@ -232,9 +220,9 @@ try {
       const parts = [];
       if (packedMissing.length) parts.push(`missing from tarball: ${packedMissing.join(', ')}`);
       if (packedExtra.length) parts.push(`unexpected in tarball: ${packedExtra.join(', ')}`);
-      fail(`packed tarball's bin/ does not match the exact ${expectedFiles.length}-file launcher contract (${parts.join('; ')})`);
+      fail(`packed tarball's bin/ does not match the exact ${expectedBinPaths.length}-path binary contract (${parts.join('; ')})`);
     } else {
-      ok(`packed tarball's bin/ contains exactly the ${expectedFiles.length} expected launcher files`);
+      ok(`packed tarball's bin/ contains exactly the ${expectedBinPaths.length} expected binary file`);
     }
 
     // The bin/ check above stays green when the mismatch is anywhere else in
@@ -279,9 +267,15 @@ try {
       }
 
       const legacyNames = ['cap', 'cap.bat', 'cap.ps1', 'pint', 'pint.bat', 'pint.ps1'];
+      // Exact equality against install/install.js's expectedInstalledFiles() -
+      // the single source of truth (wnice.exe + wnice.exe.managed + 14
+      // <tool>.exe + 15 extensionless shims = 31 entries). Exact comparison
+      // already excludes every .bat/.ps1/.dll leftover; the legacy-names
+      // assertion below just names the historical offenders explicitly.
+      const expectedFiles = expectedInstalledFiles();
       const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
       const missing = expectedFiles.filter((f) => !manifestFiles.includes(f));
-      const extra = manifestFiles.filter((f) => !expectedFiles.includes(f) && !legacyNames.includes(f));
+      const extra = manifestFiles.filter((f) => !expectedFiles.includes(f));
       const forbidden = legacyNames.filter((f) => manifestFiles.includes(f));
       if (missing.length || extra.length || forbidden.length) {
         const parts = [];
@@ -290,18 +284,22 @@ try {
         if (forbidden.length) parts.push(`forbidden legacy name(s) present: ${forbidden.join(', ')}`);
         fail(`installed manifest does not match the exact ${expectedFiles.length}-file install contract (${parts.join('; ')})`);
       } else {
-        ok(`all ${expectedFiles.length} expected files present (14 tools, shared loader, and prebuilt assemblies), no legacy names`);
+        ok(`all ${expectedFiles.length} expected files present (single wnice.exe binary plus install.js's derived tool copies and shims), no legacy names`);
       }
     }
 
     // The manifest/exact-file-set check above only proves the files exist,
-    // not that each one actually runs - exercise one .ps1 per Job-Object
+    // not that each one actually runs - exercise one tool per Job-Object
     // launcher family (capc/capt/capm each wrap process creation
     // differently; caps wraps the same process-creation machinery with a
     // bounded wait instead of an infinite one; capn sets an
     // active-process-count limit instead), not just capc, so a
     // capt/capm/caps/capn-only regression can't slip
     // through a gate that only ever smoke-tested capc.
+    // Everything now resolves through the extensionless shim via cmd.exe's
+    // PATHEXT search (note the deliberately extensionless tool path), which
+    // in turn execs the single installed wnice.exe - this is what actually
+    // ships and runs after `npm install -g`.
     const smokeCases = [
       { tool: 'capc', arg: '50' },
       { tool: 'capt', arg: '1' },
@@ -310,23 +308,19 @@ try {
       { tool: 'capn', arg: '10' },
     ];
     for (const { tool, arg } of smokeCases) {
-      const ps1 = path.join(home, 'bin', `${tool}.ps1`);
-      if (!fs.existsSync(ps1)) {
-        fail(`bin/${tool}.ps1 missing from the installed tarball`);
+      const shim = path.join(home, 'bin', tool);
+      if (!fs.existsSync(shim)) {
+        fail(`bin/${tool} (extensionless shim) missing from the installed tarball`);
         continue;
       }
       let status = null;
       let stderr = '';
       try {
-        // Match the -ExecutionPolicy Bypass every .bat/shim wrapper already
-        // passes: without it, a default Restricted client policy makes the
-        // .ps1 itself refuse to run, and stdio:'ignore' used to hide that
-        // entirely behind a bare "exited 1, expected 7".
-        execFileSync(
-          powershellPath(),
-          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1, arg, cmdPath(), '/c', 'exit', '7'],
-          { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' }
-        );
+        execFileSync(cmdPath(), ['/d', '/c', shim, arg, cmdPath(), '/c', 'exit', '7'], {
+          stdio: ['ignore', 'ignore', 'pipe'],
+          encoding: 'utf8',
+          windowsHide: true,
+        });
         status = 0;
       } catch (err) {
         status = err.status;
@@ -335,24 +329,20 @@ try {
       if (status !== 7) {
         fail(`smoke test: "${tool} ${arg} cmd.exe /c exit 7" exited ${status}, expected 7${stderr ? ` (stderr: ${stderr})` : ''}`);
       } else {
-        ok(`smoke test: ${tool} (installed from the tarball) propagates the wrapped exit code`);
+        ok(`smoke test: ${tool} (installed from the tarball, via cmd.exe PATHEXT) propagates the wrapped exit code`);
       }
     }
-    // Every tool ships three launcher variants but the loop above only ever
-    // exercises the .ps1 one; run one .bat and one extensionless Git Bash shim
-    // from the installed tarball too, so a variant-only regression can't pass
-    // the gate either. idle takes the wrapped command directly (no numeric
-    // size/percent argument like the capc/capt/capm launchers).
-    const bat = path.join(home, 'bin', 'idle.bat');
-    if (!fs.existsSync(bat)) {
-      fail('bin/idle.bat missing from the installed tarball');
-    } else {
+    // idle takes the wrapped command directly (no numeric size/percent
+    // argument like the capc/capt/capm launchers).
+    {
+      const idleShim = path.join(home, 'bin', 'idle');
       let status = null;
       let stderr = '';
       try {
-        execFileSync(cmdPath(), ['/d', '/c', bat, cmdPath(), '/c', 'exit', '7'], {
+        execFileSync(cmdPath(), ['/d', '/c', idleShim, cmdPath(), '/c', 'exit', '7'], {
           stdio: ['ignore', 'ignore', 'pipe'],
           encoding: 'utf8',
+          windowsHide: true,
         });
         status = 0;
       } catch (err) {
@@ -360,9 +350,9 @@ try {
         stderr = err.stderr ? err.stderr.trim() : '';
       }
       if (status !== 7) {
-        fail(`smoke test: "idle.bat cmd.exe /c exit 7" exited ${status}, expected 7${stderr ? ` (stderr: ${stderr})` : ''}`);
+        fail(`smoke test: "idle cmd.exe /c exit 7" exited ${status}, expected 7${stderr ? ` (stderr: ${stderr})` : ''}`);
       } else {
-        ok('smoke test: idle.bat (installed from the tarball) propagates the wrapped exit code');
+        ok('smoke test: idle (installed from the tarball, via cmd.exe PATHEXT) propagates the wrapped exit code');
       }
     }
 
@@ -374,6 +364,7 @@ try {
       const uname = execFileSync('bash', ['-c', 'uname -s'], {
         stdio: ['ignore', 'pipe', 'ignore'],
         encoding: 'utf8',
+        windowsHide: true,
       });
       hasGitBash = /^(MINGW|MSYS)/.test(uname.trim());
     } catch {
@@ -391,6 +382,7 @@ try {
         execFileSync('bash', [shim, cmdPath(), '/c', 'exit', '7'], {
           stdio: ['ignore', 'ignore', 'pipe'],
           encoding: 'utf8',
+          windowsHide: true,
         });
         status = 0;
       } catch (err) {
@@ -433,7 +425,7 @@ if (!compareLinkMatch) {
   const baseVersion = compareLinkMatch[1];
   let tags = [];
   try {
-    tags = execFileSync('git', ['tag', '--list', 'v*'], { cwd: repoRoot, encoding: 'utf8' })
+    tags = execFileSync('git', ['tag', '--list', 'v*'], { cwd: repoRoot, encoding: 'utf8', windowsHide: true })
       .split('\n')
       .map((t) => t.trim())
       .filter(Boolean);

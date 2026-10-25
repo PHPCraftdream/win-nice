@@ -3,3 +3,7 @@
 
 # Scratch/generated content not meant for the repo (e.g. draft articles)
 /docs/temp/
+
+# Built Rust exe and cargo output - staged/copied, never committed
+/bin/wnice.exe
+/target/

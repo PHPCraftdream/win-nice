@@ -1,6 +1,6 @@
 {
   "name": "win-nice",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Windows nice/renice/cpulimit for parallel AI coding agents - process priority (idle/belownormal/abovenormal/high/realtime), hard CPU quotas, thread affinity, memory limits, and process-count ceilings via Job Objects (capc/capt/capm/capn), a wall-clock timeout that kills the whole tree on expiry (caps), elevation (admin), a UI responsiveness boost, and an optional Claude Code/Codex reference skill, with no dependencies.",
   "license": "MIT OR Apache-2.0",
   "author": {
@@ -32,10 +32,13 @@
   ],
   "scripts": {
     "postinstall": "node install/cli.js install",
-    "prepack": "node scripts/check-assemblies.js",
-    "test": "node --test test/assembly-list-sync.test.js test/check-assemblies.test.js test/cli.test.js test/docs-sync.test.js test/gitbash-shims.test.js test/install-uninstall.test.js test/manifest.test.js test/paths.test.js test/release-check-allowlist.test.js test/skill.test.js",
+    "prepack": "node install/stage-exe.js --check",
+    "build:exe": "cargo build --release --locked && node install/stage-exe.js",
+    "test": "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File scripts\\lib\\guarded.ps1 100 900 node --require ./scripts/lib/hide-windows.js --test scripts/lint/lint-structure.test.js test/cli.test.js test/docs-sync.test.js test/install/gitbash-shims.test.js test/install/install-uninstall.test.js test/install/install-transaction.test.js test/install/manifest.test.js test/install/paths.test.js test/release-check-allowlist.test.js test/skill.test.js",
+    "test:pester": "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File scripts\\lib\\guarded.ps1 60 1800 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\run-pester.ps1",
     "test:elevated": "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File test\\run-elevated.ps1",
-    "release-check": "node scripts/release-check.js"
+    "release-check": "node --require ./scripts/lib/hide-windows.js scripts/release-check.js",
+    "lint:structure": "node scripts/lint/lint-structure.js"
   },
   "keywords": [
     "windows",

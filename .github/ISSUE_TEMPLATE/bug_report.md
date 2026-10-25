@@ -13,9 +13,9 @@ labels: bug
 
 **Environment**
 - Windows version:
-- PowerShell version (`$PSVersionTable.PSVersion`):
+- `wnice -V` output:
 - Shell you ran the command from (PowerShell / cmd.exe / Git Bash / other):
 - `win-nice` version (`npx win-nice status`):
 
-**Anything else worth knowing** (e.g. non-default execution policy, elevated
+**Anything else worth knowing** (e.g. elevated
 vs. non-elevated shell, unusual PATH setup)

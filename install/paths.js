@@ -129,13 +129,11 @@ function writeRegistryString(keyPath, valueName, value) {
 
 // A raw registry write (unlike [Environment]::SetEnvironmentVariable) doesn't notify
 // running processes. Broadcast WM_SETTINGCHANGE so Explorer/new shells pick it up.
+// .NET's user-scope SetEnvironmentVariable broadcasts it after its own write,
+// so deleting a never-set variable is a pure, compile-free notification.
 function broadcastEnvironmentChange() {
-  const script = [
-    '[void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($env:WIN_NICE_ENVIRONMENT_NOTIFIER_DLL))',
-    '[EnvironmentNotifier]::Broadcast()',
-  ].join('\n');
-  runPowershell(script, {
-    WIN_NICE_ENVIRONMENT_NOTIFIER_DLL: path.join(__dirname, '..', 'bin', 'EnvironmentNotifier.dll'),
+  runPowershell("[Environment]::SetEnvironmentVariable($env:WIN_NICE_NOOP_VAR, $null, 'User')", {
+    WIN_NICE_NOOP_VAR: 'WIN_NICE_BROADCAST_NOOP',
   });
 }
 

@@ -22,6 +22,10 @@ const {
   cmdPath,
 } = require('../scripts/release-check.js');
 
+const {
+  expectedInstalledFiles,
+} = require('../install/install.js');
+
 const repoRoot = path.join(__dirname, '..');
 
 // Same constraint scripts/release-check.js documents for spawning npm:
@@ -57,14 +61,14 @@ function packedTarballPaths() {
   return packed;
 }
 
-test('release-check allowlist: this checkout packs exactly the 83 expected paths', () => {
+test('release-check allowlist: this checkout packs exactly the 14 expected paths', () => {
   const diff = diffTarballPaths(packedTarballPaths());
   assert.deepEqual(diff, { missing: [], extra: [] });
 });
 
-test('prebuilt helper assemblies are excluded from Git text conversion', () => {
+test('the prebuilt exe is excluded from Git text conversion', () => {
   const attributes = fs.readFileSync(path.join(__dirname, '..', '.gitattributes'), 'utf8');
-  assert.match(attributes, /^bin\/\*\.dll\s+binary\s+-eol$/m);
+  assert.match(attributes, /^bin\/\*\.exe\s+binary$/m);
 });
 
 test('release-check allowlist: stray install/ file is rejected and named', () => {
@@ -102,10 +106,14 @@ test('release-check allowlist: a missing expected path is rejected and named', (
   assert.deepEqual(missing, ['skills/win-nice/SKILL.md']);
 });
 
-test('release-check allowlist: 83 unique paths = 71 bin assets + 12 non-bin literals', () => {
-  assert.equal(expectedTarballPaths.length, 83);
-  assert.equal(new Set(expectedTarballPaths).size, 83);
-  assert.equal(expectedTarballPaths.filter((p) => p.startsWith('bin/')).length, 71);
+test('release-check allowlist: 14 unique paths = 1 bin asset (bin/wnice.exe) + 13 non-bin literals', () => {
+  assert.equal(expectedTarballPaths.length, 14);
+  assert.equal(new Set(expectedTarballPaths).size, 14);
+  assert.equal(expectedTarballPaths.filter((p) => p.startsWith('bin/')).length, 1);
+  assert.deepEqual(
+    expectedTarballPaths.filter((p) => p.startsWith('bin/')),
+    ['bin/wnice.exe']
+  );
   // Pinned on purpose: if this list changes, release-check.js's
   // expectedNonBinPaths and this test must change in the same commit.
   assert.deepEqual(
@@ -121,10 +129,46 @@ test('release-check allowlist: 83 unique paths = 71 bin assets + 12 non-bin lite
       'install/manifest.js',
       'install/paths.js',
       'install/skill.js',
+      'install/stage-exe.js',
       'install/uninstall.js',
       'skills/win-nice/SKILL.md',
     ].sort()
   );
+});
+
+test('release-check install contract: expectedInstalledFiles() has exactly the 31 install entries', () => {
+  const files = expectedInstalledFiles();
+  const tools = [
+    'idle', 'belownormal', 'abovenormal', 'high', 'realtime',
+    'capc', 'capt', 'capm', 'caps', 'capn', 'cy', 'cx', 'admin', 'uiup',
+  ];
+  assert.equal(files.length, 31);
+  assert.equal(new Set(files).size, 31, 'expectedInstalledFiles() must not contain duplicates');
+  for (const name of ['wnice.exe', 'wnice.exe.managed']) {
+    assert.ok(files.includes(name), `missing ${name}`);
+  }
+  for (const t of tools) {
+    assert.ok(files.includes(`${t}.exe`), `missing ${t}.exe`);
+    assert.ok(files.includes(t), `missing extensionless shim ${t}`);
+  }
+  // Exact set, not just membership: nothing beyond the single binary, its
+  // managed marker, the 14 tool exes and the 15 shims (14 tools + wnice).
+  assert.deepEqual(
+    [...files].sort(),
+    [
+      'wnice.exe',
+      'wnice.exe.managed',
+      ...tools.map((t) => `${t}.exe`),
+      ...tools,
+      'wnice',
+    ].sort()
+  );
+});
+
+test('release-check allowlist: bin/ contains exactly bin/wnice.exe and nothing else', () => {
+  const binPaths = expectedTarballPaths.filter((p) => p.startsWith('bin/'));
+  assert.deepEqual(binPaths, ['bin/wnice.exe']);
+  assert.ok(expectedTarballPaths.includes('bin/wnice.exe'));
 });
 
 test('release-check changelog: accepts an optional Unreleased entry and a real date', () => {
@@ -193,7 +237,6 @@ test('release-check smoke sites use fixed system paths for PowerShell and cmd.ex
     path.join(repoRoot, 'scripts', 'release-check.js'),
     'utf8'
   );
-  assert.match(source, /execFileSync\(\s*powershellPath\(\)/);
   assert.match(source, /execFileSync\(cmdPath\(\)/);
   assert.match(source, /cmdPath\(\), '\/c', 'exit', '7'/);
   assert.doesNotMatch(source, /execFileSync\(\s*['"]powershell(?:\.exe)?['"]/);

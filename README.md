@@ -13,17 +13,47 @@ specific pain point: running several parallel AI coding agents (Claude Code, etc
 on one Windows box without their builds/tests pegging every core and freezing the
 desktop — mouse, keyboard, window dragging, audio, all of it.
 
-The Win32 launchers use prebuilt managed helper assemblies shipped in the npm
-package. Target machines need Windows PowerShell/.NET, but no C# compiler or
-Node.js to run the tools. npm is only the distribution/version channel and
-installer.
+Every tool is one native executable, `wnice.exe` (Rust, no runtime
+dependencies), prebuilt in CI and shipped in the npm package — nothing is
+compiled on your machine, and the tools need neither PowerShell nor Node.js to
+run. npm is only the distribution/version channel and installer. The other
+command names (`idle`, `capc`, ...) are copies of the same binary that pick
+their behavior from the name they were started as.
+
+## `wnice [options] [--] <command> [args...]`
+
+The combined frontend: every limit at once, in **one** wrapper process and
+**one** Windows Job Object, so the process tree under it is just
+`wnice.exe -> your command` — no `cmd.exe`/`powershell.exe` layers.
+
+```
+wnice -p idle -c 50 -t 4 -m 50 -n 64 -s 600 -- npm run build
+```
+
+| Option | Same as | Meaning |
+| --- | --- | --- |
+| `-p, --priority <class>` | `idle` ... `realtime` | `idle`, `belownormal`, `normal`, `abovenormal`, `high` or `realtime` for the whole tree |
+| `-c, --cpu <1-100>` | `capc` | hard CPU cap, percent of total CPU |
+| `-t, --threads <n>` | `capt` | affinity: the first `n` logical processors |
+| `-m, --memory <size>` | `capm` | job memory ceiling (`50` = 50% of RAM, `512m`, `2g`) |
+| `-n, --procs <n>` | `capn` | maximum simultaneously active processes |
+| `-s, --timeout <seconds>` | `caps` | wall-clock deadline, exit 124 |
+| `-h` / `-V` | | help / version |
+
+Options are parsed only up to the first non-option token or `--`; everything
+after belongs to the wrapped command verbatim. The single-purpose tools below
+are the same machinery with one limit each, kept for their short positional
+syntax.
+
+Every tool has built-in help with examples: `wnice --help`, `capc --help`,
+`idle -h`, `admin /?`, ... (`cy`/`cx` pass `--help` on to `claude`/`codex`).
+A usage error prints the tool's usage line and exits `1`.
 
 ## Argument handling
 
 Every tool tries to launch the wrapped command directly first (`CreateProcess`,
-no shell involved at all) and only falls back to `cmd.exe /c` when the target
-turns out to be a `.bat`/`.cmd` file or a cmd.exe builtin that genuinely needs
-one.
+no shell involved at all) and only goes through `cmd.exe /c` when the target is
+a `.bat`/`.cmd` file, which genuinely needs it.
 
 **Direct-launch path** (the common case: the target is a real `.exe`): arguments
 are immune to cmd.exe's special characters entirely — `&`, `|`, `<`, `>`, `^`,
@@ -31,8 +61,7 @@ are immune to cmd.exe's special characters entirely — `&`, `|`, `<`, `>`, `^`,
 MSVCRT/`CommandLineToArgvW` quoting. cmd.exe is never invoked on this path, so
 there's nothing to expand.
 
-**`cmd.exe /c` fallback path** (only reached for `.bat`/`.cmd` targets or
-cmd.exe builtins): `&|<>^`/quotes/spaces/empty strings are still fully
+**`cmd.exe /c` fallback path** (only reached for `.bat`/`.cmd` targets): `&|<>^`/quotes/spaces/empty strings are still fully
 protected. A literal `%` used to be able to trigger environment-variable
 expansion here — cmd.exe pairs up `%` characters across the *entire* command
 line, even across separate arguments, and there's no reliable per-character
@@ -42,77 +71,64 @@ prints an error to stderr, and exits with code `1` — the command never reaches
 cmd.exe. This is a change from just checking for the character; it's a hard
 reject, not a best-effort escape.
 
-**Separately, and unaffected by the fail-closed fix above:** each tool ships
-as up to three files — `name.bat`, `name.ps1`, and a plain extensionless
-`name` shim (a `#!/bin/sh` script) — and which one a bare `name ...`
-invocation resolves to depends on the calling shell:
+Bare command names are resolved by the tool itself, never by Windows: only
+absolute `PATH` entries are searched, in `PATHEXT` order (`.com`, `.exe`,
+`.bat`, `.cmd`), and **the current directory is never searched** — an
+`npm.exe` dropped into the working directory cannot hijack `capc 50 npm ...`.
+A name found nowhere fails with exit code `127`. cmd.exe builtins (`dir`,
+`echo`, ...) are not files, so wrap them explicitly: `idle cmd /c dir`.
 
-| Calling shell | Resolves to | `%` handling |
-| --- | --- | --- |
-| PowerShell | `name.ps1` | full argument safety (see above) |
-| cmd.exe, or PATHEXT-based resolution (e.g. Node's `child_process`, which doesn't include `.PS1` in `PATHEXT` by default) | `name.bat` | corrupted before `.ps1` ever runs (see below) |
-| POSIX shell (Git Bash only — ignores `PATHEXT`/bare-name extension resolution entirely) | `name` (no extension) | full argument safety — the shim `exec`s straight into `name.ps1` via `powershell -File`, the same direct-to-`.ps1` path PowerShell itself uses, with MSYS argument conversion disabled so slash-style switches (`/c`, `/d`) and Windows paths arrive untouched; no `.bat`/cmd.exe hop involved |
+The tools are real `.exe` files, so every shell — PowerShell, pwsh, cmd.exe,
+Node's `child_process`, Git Bash — starts them the same way and their
+arguments arrive unchanged. Two things your *calling shell* still does before
+the tool ever runs: cmd.exe expands `%VAR%` on its own command line, and
+Windows PowerShell 5.1 mis-quotes an argument that ends in a backslash
+(`'C:\dir with space\'`) when passing it to any native program.
 
-Known limitation of the extensionless shims: the `MSYS2_ARG_CONV_EXCL='*'`
-they set to keep their own arguments intact is inherited by the wrapped
-command and its whole process tree, so an MSYS program spawned *inside* the
-wrapped command (an inner `bash`/`sh`, a `#!/bin/sh` git hook — not a native
-program like `node.exe` or `cmd.exe`) inherits it too and stops converting
-POSIX-style paths in its own children's arguments — e.g.
-`caps 600 bash -c 'node /c/proj/run.js'` fails with `Cannot find module`
-where the same command without the shim works. The shim's own documented
-argument guarantee (its arguments arrive untouched) is unaffected.
+For Git Bash the installer also writes an extensionless `name` shim (a
+`#!/bin/sh` script) next to each `name.exe`; it sets
+`MSYS2_ARG_CONV_EXCL='*'` so slash-style switches (`/c`, `/d`) and Windows
+paths reach the tool untouched, then `exec`s the `.exe`. Known limitation:
+that variable is inherited by the wrapped command's whole process tree, so an
+MSYS program spawned *inside* it (an inner `bash`/`sh`, a `#!/bin/sh` git
+hook) stops converting POSIX-style paths in its own children's arguments —
+e.g. `caps 600 bash -c 'node /c/proj/run.js'` fails with
+`Cannot find module`. Call the `.exe` directly (`caps.exe ...`) when that
+matters.
 
-The extensionless shims are Git Bash-specific; WSL is not supported — WSL has
-no bare `powershell` (only `powershell.exe`), Windows PowerShell can't resolve
-the `/mnt/...` script path such a shim would pass to `-File`, and a WSL-side
-npm refuses this package anyway (`"os": ["win32"]` in `package.json`). Install
-through Windows Node/npm and call the tools from Git Bash.
-
-The `.bat` file corrupts any literal `%` in its own arguments before your
-command, and before `.ps1`, ever runs at all, confirmed with nothing more
-than a bare `echo %1` in a plain `.bat`. This is cmd.exe's own
-batch-parameter substitution (`%1`/`%*`) rescanning for `%...%` patterns
-across the whole line while parsing the `.bat` entry point itself; there's no
-fix for it from inside a `.bat` file, and it happens before the `.ps1` (and
-its fail-closed `%` check) ever sees the arguments. Every other special
-character (`&|<>^`) survives this hop untouched.
+WSL is not supported: a WSL-side npm refuses this package
+(`"os": ["win32"]`). Install through Windows Node/npm.
 
 ## Tools
 
 ### `idle <command> [args...]`
-Runs `command` at `IDLE_PRIORITY_CLASS`, waits for it to exit, propagates its exit
-code. Priority applies to the whole spawned process tree automatically — Windows'
-`CreateProcess` inherits `IDLE`/`BELOW_NORMAL` priority by default when a child
-process doesn't request a priority of its own.
+Runs `command` at `IDLE_PRIORITY_CLASS`, waits for it to exit, propagates its
+exit code. The priority is a Job Object limit (`JOB_OBJECT_LIMIT_PRIORITY_CLASS`),
+so it holds for the whole process tree — including children that ask for a
+different priority of their own.
 
 ### `belownormal <command> [args...]`
 Same as `idle`, at `BELOW_NORMAL_PRIORITY_CLASS` — a lighter touch than idle.
 
 ### `abovenormal <command> [args...]`
-Runs `command` at `ABOVE_NORMAL_PRIORITY_CLASS`, waits for it to exit, propagates
-its exit code.
-
-**Unlike `idle`/`belownormal`, this does *not* apply to the whole process tree** —
-confirmed empirically. Windows only inherits `IDLE`/`BELOW_NORMAL` priority into
-child processes by default; `ABOVE_NORMAL` and higher are not, so anything the
-wrapped command spawns runs back at ordinary `Normal` priority. Only useful when
-the command you're wrapping does the actual work itself rather than delegating to
-child processes.
+Same as `idle`, at `ABOVE_NORMAL_PRIORITY_CLASS` — also for the whole tree
+(confirmed empirically for children and grandchildren).
 
 ### `high <command> [args...]`
-Same as `abovenormal`, at `HIGH_PRIORITY_CLASS` — a stronger boost. Same
-single-process-only caveat applies.
+Same shape, at `HIGH_PRIORITY_CLASS`. Windows only accepts `HIGH` as a job
+limit from a process holding `SeIncreaseBasePriorityPrivilege` (elevated
+processes have it). Without it the job refuses (Win32 error 1314) and `high`
+falls back to setting `HIGH` on the root process only, printing
+`wnice: note: high priority applies to the root process only ...` to stderr;
+the children then run at their default priority.
 
 ### `realtime <command> [args...]`
 Same shape, at `REALTIME_PRIORITY_CLASS`. **Dangerous, use with caution:**
 `REALTIME` outranks the OS's own input/audio/UI threads — a busy realtime-priority
 process can make the entire desktop (mouse, keyboard, everything) stop responding,
-which is the exact failure mode this project otherwise exists to prevent. It also
-needs the `SeIncreaseBasePriorityPrivilege` privilege (elevated/admin processes
-have it by default); without it, Windows doesn't error out, it silently downgrades
-the request to `HIGH_PRIORITY_CLASS` instead — confirmed empirically. Same
-single-process-only caveat as `abovenormal`/`high` applies on top of all that.
+which is the exact failure mode this project otherwise exists to prevent. It needs
+the same privilege as `high`; without it you get `HIGH` on the root process only,
+with the same stderr note.
 
 ### `capc <percent> <command> [args...]`
 Hard CPU quota (1-100) for the whole process tree, enforced by a Windows Job
@@ -166,13 +182,8 @@ physical cores. On a machine with Hyper-Threading/SMT, `capt 4` pins to 4
 *logical processors* — depending on which ones, that could be 2 fully-used
 physical cores or 4 half-used ones; the affinity API has no concept of "whole
 core" grouping on its own. `<thread-count>` must be between 1 and the number
-of logical processors on the machine (`[Environment]::ProcessorCount`, capped
-at 63 — a single affinity mask can't address more). Under 32-bit Windows
-PowerShell (the `SysWOW64` host) the effective cap is additionally 32: the
-affinity mask is a pointer-sized `UIntPtr`, so a 32-bit process can only
-address 32 logical processors — counts of 33-63 are rejected up front with a
-usage error naming 64-bit PowerShell (the same process-width limit `capm`
-enforces on its memory cap).
+of logical processors on the machine (capped at 63 — a single affinity mask
+can't address more).
 
 ```
 capt 4 npm run build
@@ -234,7 +245,7 @@ killed.
 Runs the command with a wall-clock deadline: if it's still running when
 `<seconds>` have passed, it is force-killed and `caps` exits with code **124** (the unix
 `timeout(1)` convention), printing
-`caps: timed out after <seconds>s - job and every process in it were force-killed`
+`wnice: timed out after <seconds>s - job and every process in it were force-killed`
 to stderr. If the command finishes in time, `caps` propagates its exit code
 exactly like every other launcher in this family.
 
@@ -299,9 +310,7 @@ from the first instruction" and "breakaway fails closed" guarantees apply.
 The count **includes the directly wrapped process itself**: it is assigned to
 the still-empty job before it can spawn anything, so `capn 1 <command>` runs
 the command but the instant it tries to spawn any child — including
-children started by the command — that spawn attempt fails. Win-Nice loads its
-prebuilt helpers, so it does not add `csc.exe` or `CVTRES.EXE` to the job.
-Confirmed empirically, not just from docs: under `capn 1`, a wrapped
+children started by the command — that spawn attempt fails. Confirmed empirically, not just from docs: under `capn 1`, a wrapped
 PowerShell's `Start-Process` fails with "Not enough quota is available to
 process this command." and the parent keeps running and exits 0.
 
@@ -331,19 +340,12 @@ capm 50 capc 50 idle npm run build
 ```
 
 Each wrapper wraps everything after its own arguments, so the outermost
-wrapper is whichever one you type first. A few things to know before relying
-on a combination:
-
-**Bare tool names resolve through the same `cmd.exe`/`PATHEXT` fallback
-documented above.** None of these ship a `.exe`, so e.g. `capm`'s attempt to
-launch `capc` directly always fails and falls back to `cmd.exe`, which finds
-`capc.bat` via `PATHEXT` — meaning chaining only works when the tools'
-install directory is actually on `PATH`, and any `%` elsewhere on that
-command line trips the same fail-closed check described above. `capm`'s own
-`<size>` deliberately has no `%` form for exactly this reason: an earlier
-version accepted `25%`, and `capc 50 capm 25% ...` failed the fail-closed
-check while `capm 25% capc 50 ...` worked fine — an order-dependent foot-gun.
-A bare percent (`capm 50 capc 50 ...`) sidesteps it entirely, in any order.
+wrapper is whichever one you type first, and each one adds its own wrapper
+process and its own nested Job Object. **Prefer one `wnice` call instead**
+(`wnice -m 50 -c 50 -p idle -- npm run build`): one process, one job, and
+none of the nesting rules below apply. When you do chain, the tool names
+resolve through `PATH` like any other program, so the install directory must
+be on `PATH`.
 
 **Nested Job Object limits do not follow one universal "smaller wins" rule —
 each limit type combines differently:**
@@ -366,9 +368,9 @@ each limit type combines differently:**
   process's memory use, on top of whatever the inner 400m job is using.
   Don't rely on nested `capm` ceilings combining to an exact number; treat
   the outer value as an upper bound that can bind earlier than expected.
-- **Priority (`idle`/`belownormal`/`abovenormal`/`high`/`realtime`)**: not a
-  Job Object limit — the *last* one applied to a given process simply wins,
-  same as invoking any one of them alone.
+- **Priority (`idle`/`belownormal`/`abovenormal`/`high`/`realtime`)**: a
+  Job Object priority-class limit — with nested jobs the outermost job that
+  sets one decides, so `idle high <cmd>` still runs the command at `Idle`.
 - **Affinity (`capt`)**: nested affinity is an *effective-limits* chain — a
   child job's mask can be as tight as it wants but is clamped to whatever
   the parent already allows, never wider
@@ -382,9 +384,8 @@ each limit type combines differently:**
   includes the inner wrapper process itself plus everything beneath it. Not a
   "silently clamped to the tighter limit" rule like affinity, and not a plain
   `min()`: a tighter outer job can prevent an inner wrapper from starting its
-  target. The wrappers load prebuilt helpers, so nested limits no longer count
-  runtime `csc.exe`/`CVTRES.EXE` processes; leave room for the wrapper chain
-  and the target's actual child processes. In the other direction,
+  target; leave room for the wrapper chain and the target's actual child
+  processes. In the other direction,
   `capn 5 capn 1 <cmd-that-spawns>` runs the command but its child spawn is
   refused by the *inner* limit while the outer still has room.
 - **Timeout (`caps`)**: not a Job Object limit being combined at all — each
@@ -429,8 +430,8 @@ prompt (via `ShellExecute`, always opening its own console window, incompatible
 with sharing the caller's). Unlike a plain `ShellExecute("cmd.exe", "/c ...")`,
 this branch also tries a direct launch first: a `.bat`/`.cmd` target still needs
 the `cmd.exe /c` fallback (no elevation-capable equivalent of `CreateProcess`'s
-own `.bat`/`.cmd` auto-relaunch), but any other target launches directly via
-`-FilePath`, never touching cmd.exe — same as the already-elevated branch, a
+own `.bat`/`.cmd` auto-relaunch), but any other target is elevated directly
+by its resolved absolute path, never touching cmd.exe — same as the already-elevated branch, a
 literal `%` in any argument is only refused when the `.bat`/`.cmd` fallback is
 actually needed, since a direct launch is never exposed to `%` expansion at all.
 
@@ -440,9 +441,8 @@ admin npm install -g some-package
 
 ## AI CLI launchers
 
-Not part of the priority/CPU-limiting toolset above — these two are unrelated
-one-line convenience wrappers that happened to live alongside win-nice's own
-scripts and got folded into the same install/PATH mechanism.
+Not part of the priority/CPU-limiting toolset above — two convenience
+wrappers that share the same binary and install/PATH mechanism.
 
 ### `cy [args...]`
 Runs `claude --dangerously-skip-permissions [args...]`.
@@ -461,17 +461,19 @@ of their own — the flag names describe exactly what they do.
 npm install -g win-nice
 ```
 
-This copies every tool above, the shared `load-launcher.ps1` loader, and their
-14 prebuilt helper assemblies (13 launchers plus `EnvironmentNotifier`) into
-`%LOCALAPPDATA%\win-nice\bin` and adds that directory to your user `PATH`
+This installs `wnice.exe` plus one `<tool>.exe` per tool name (hardlinks of
+the same binary, so they cost no extra disk space; a plain copy where
+hardlinks aren't supported) and the Git Bash shims into
+`%LOCALAPPDATA%\win-nice\bin`, and adds that directory to your user `PATH`
 (via `postinstall`). Restart your terminal afterwards so the new `PATH` takes
 effect.
 
-Upgrading while a long-lived PowerShell session already used one of these tools
-keeps that session on the old assembly (it can't be swapped out mid-session);
-the next time that session uses the tool it prints one `win-nice: ... changed
-on disk` warning and keeps running the old version until you start a new
-session.
+Upgrading while one of the tools is still running works: Windows won't let a
+running `.exe` be overwritten or deleted, but it can be renamed, so the
+installer moves the old files aside (`<tool>.exe.old-<n>`) and installs the new
+ones in their place. The whole upgrade is one transaction — if any step fails,
+every original file is restored. Leftover `.old-<n>` files are removed by the
+next install/uninstall once the old process has exited.
 
 `npm uninstall -g win-nice` does **not** reverse this - npm's `uninstall`
 lifecycle script was removed (npm ≥ 7 never runs it at all; there is no
@@ -485,11 +487,13 @@ shimming — `idle`/`capc`/etc. are too generic a name to risk colliding with
 someone else's global npm package. npm here is only the delivery mechanism for
 a dedicated, PATH-managed install directory.
 
-Without npm: copy the contents of `bin/` into any directory on your `PATH`.
+Without npm: put `wnice.exe` in a directory on your `PATH` and copy it as
+`<tool>.exe` for each tool name you want.
 
 ### Managing an existing install
 
 ```
+npx win-nice help        # commands and environment variables
 npx win-nice status      # what's installed, where, which version
 npx win-nice reinstall   # re-copy from the current package version
 npx win-nice uninstall   # remove files + PATH entry
@@ -499,9 +503,10 @@ npx win-nice uninstall   # remove files + PATH entry
 (`%LOCALAPPDATA%\win-nice\install-manifest.json`) as owned by the package and
 remove it regardless of local edits — these are managed files, not a
 customization point. If the manifest itself is missing or corrupt, uninstall
-falls back to scanning the install directory and only removes files that still
-carry the `win-nice: managed-file` marker comment, so that scan doesn't delete
-unrelated files sitting in the same directory.
+falls back to scanning the install directory and only removes files it can
+prove are its own (the exact shipped binary, the generated shim text, or the
+`wnice.exe.managed` sidecar), so that scan doesn't delete unrelated files
+sitting in the same directory.
 
 ### Claude Code / Codex skill
 
@@ -537,34 +542,14 @@ isn't a conflict.
 
 ## Requirements
 
-Windows 8 / Server 2012 or newer (Job Object CPU rate control). PowerShell is
-bundled with Windows — no separate install needed to run the tools. Node.js is
-only needed for the npm-based installer/tests, not for the tools themselves.
+Windows 8 / Server 2012 or newer (Job Object CPU rate control), 64-bit. Node.js
+is only needed for the npm-based installer, not for the tools themselves.
 `cy`/`cx` additionally need `claude`/`codex` installed and on `PATH`.
 
-Maintainers regenerate the shipped helper assemblies by editing the C# in the
-relevant `bin/<tool>.ps1`'s `$source` block (or `scripts/EnvironmentNotifier.cs`)
-and running `scripts/build-launcher-assemblies.ps1`, then committing the
-resulting `bin/*.dll` and `bin/*.dll.managed` together with the source change.
-That build step uses the .NET Framework compiler and is incremental - it skips
-an assembly whose sidecar hash already matches its current source (`-Force`
-rebuilds everything). `npm test`/`npm pack` never invoke the compiler; they run
-a Node-only freshness check that fails, naming the assembly, if a committed DLL
-doesn't match its source.
-
-**PowerShell execution policy:** Windows client editions default to
-`Restricted`, which blocks a bare `.ps1` invoked directly by PowerShell itself
-(`... cannot be loaded because running scripts is disabled on this system`).
-The `.bat` files are unaffected (they pass `-ExecutionPolicy Bypass`
-explicitly), and so are the Git Bash shims — each one runs
-`powershell -NoProfile -ExecutionPolicy Bypass -File ...` itself, so only
-invoking a bare `name.ps1` from PowerShell needs the one-time fix below.
-Caveat: Group Policy can still override `-ExecutionPolicy Bypass` in some
-managed environments. Run once, as the user who'll run these tools:
-
-```
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-```
+Maintainers build the binary with `npm run build:exe` (needs a Rust
+toolchain; it runs `cargo build --release --locked` and stages
+`bin/wnice.exe`). Users never need Rust: CI builds the exe and the published
+package ships it.
 
 ### Environment variables
 
@@ -588,46 +573,29 @@ npm package - the `test`/`test:elevated`/`release-check` scripts below only
 work when run from a git clone, not against an installed package):
 
 ```
-npm test                                       # installer logic (fast; isolated scratch registry key, cleaned up automatically)
-powershell -Command "Invoke-Pester -Path test\win-nice.Tests.ps1"   # real tool behavior
+cargo test                # Rust unit tests + the real-process integration harness
+npm test                  # installer logic (fast; isolated scratch registry key, cleaned up automatically)
+npm run test:pester       # the installed tools driven from PowerShell (needs bin/wnice.exe)
 ```
 
-Pin the Pester version before running the second command by hand: Windows
-ships Pester 3.4.0 built in, but a system with a newer Pester also installed
-(GitHub-hosted runners have both 3.4.0 and 5.x side by side) auto-loads the
-newer one, and this suite uses Pester 3's legacy assertion syntax (`Should
-Be`), which 5.x removed entirely. If bare `Invoke-Pester` fails immediately
-on every `It`, import the right version first:
+`npm test` and `npm run test:pester` run inside `scripts/lib/guarded.ps1`:
+a private hidden desktop (no test window reaches your screen), a cap on live
+processes, Idle priority for the whole tree and a timeout. Because that
+sandbox pins everything to Idle, the priority cases are skipped there and run
+in CI. The Pester suite uses Pester 3 syntax; `scripts/run-pester.ps1`
+already pins `-MaximumVersion 3.99` in case a newer Pester is also installed.
 
-```
-powershell -Command "Import-Module Pester -MaximumVersion 3.99; Invoke-Pester -Path test\win-nice.Tests.ps1"
-```
-
-(this is what CI/publish do; see `.github/workflows/ci.yml`.)
-
-The Pester suite is an integration suite: it spawns real processes, checks
-actual `PriorityClass`, `ProcessorAffinity`, and Job Object CPU throttling
-across every tool, and takes roughly 1-2 minutes (more under system load - the
-CPU-cap test retries a few times if the machine is too busy to get a clean
-baseline). It never touches the real system `PATH`/registry; the installer
-tests use `WIN_NICE_HOME` to redirect installs into a temp directory instead.
-
-3 of its cases only exercise `admin.ps1`'s already-elevated branch, which
-needs the whole test-runner process to already be elevated (not just
-`admin.ps1` itself) - a normal, unelevated run reports them `Skipped`, which
-is expected, not a failure. A separate, disjoint set of 4 cases only makes
-sense when NOT elevated, and `Skip`s under elevation instead. `npm run
-test:elevated` (`test/run-elevated.ps1`) is a single entry point for the
-first group: one UAC prompt elevates the runner once, then the suite runs
-inside that elevated session, activating those 3 cases (and skipping the
-other 4). Neither a normal run nor an elevated run alone exercises every
-case - run both for full coverage.
+One Pester case exercises `admin`'s already-elevated branch and needs the
+whole runner to be elevated; another only makes sense when *not* elevated.
+`npm run test:elevated` (`test/pester/run-elevated.ps1`) asks for elevation
+once and runs the suite in that session — run both for full coverage. No test
+ever triggers a UAC prompt by itself.
 
 `npm run release-check` (`scripts/release-check.js`) is a maintainer-only,
 source-checkout-only command that packs the actual npm tarball, installs it
 into an isolated temp directory, and verifies the real installed artifact
-(launcher file set, manifest version, `capc`/`capt`/`capm`/`caps`/`capn` exit-code smoke
-tests, and CHANGELOG/tag consistency) - this is what `publish.yml` runs right
+(exact file set, manifest version, `capc`/`capt`/`capm`/`caps`/`capn`/`idle` and
+Git Bash shim exit-code smoke tests, and CHANGELOG/tag consistency) - this is what `publish.yml` runs right
 before `npm publish`. It needs `scripts/` and git tag history, neither of
 which is part of the published package, so it can't run against an installed
 copy.

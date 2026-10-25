@@ -1,6 +1,6 @@
 ---
 name: win-nice
-description: Reference for win-nice's Windows CLI tools for process priority, hard CPU quotas, CPU affinity, memory limits, process-count ceilings, and a wall-clock timeout (idle, belownormal, abovenormal, high, realtime, capc, capt, capm, caps, capn, uiup, admin). Use when the user asks how to limit CPU usage, priority, thread/core affinity, memory, or the number of concurrent processes for a command on Windows, wants to kill a command after a timeout, wants to avoid a build/test freezing the desktop, or mentions any of these tool names.
+description: Reference for win-nice's Windows CLI tools for process priority, hard CPU quotas, CPU affinity, memory limits, process-count ceilings, and a wall-clock timeout (wnice, idle, belownormal, abovenormal, high, realtime, capc, capt, capm, caps, capn, uiup, admin). Use when the user asks how to limit CPU usage, priority, thread/core affinity, memory, or the number of concurrent processes for a command on Windows, wants to kill a command after a timeout, wants to avoid a build/test freezing the desktop, or mentions any of these tool names.
 ---
 
 <!-- win-nice: managed-skill -->
@@ -13,29 +13,47 @@ pegging every core and freezing the desktop (mouse, keyboard, window dragging,
 audio - all of it).
 
 Every tool below runs `<command> [args...]`, blocks until it exits, and
-propagates its exit code. None of them need Node.js at runtime.
+propagates its exit code. All of them are one native executable (`wnice.exe`,
+the other names are copies of it) — no PowerShell, .NET or Node.js at runtime.
+
+## `wnice` — every limit in one wrapper (prefer this)
+
+`wnice [options] [--] <command> [args...]` applies any combination of limits
+through **one** wrapper process and **one** Job Object, so the tree is just
+`wnice.exe -> command`:
+
+```
+wnice -p idle -c 50 -t 4 -m 50 -n 64 -s 600 -- npm run build
+```
+
+`-p/--priority <idle|belownormal|normal|abovenormal|high|realtime>`,
+`-c/--cpu <1-100>` (= `capc`), `-t/--threads <n>` (= `capt`),
+`-m/--memory <size>` (= `capm`), `-n/--procs <n>` (= `capn`),
+`-s/--timeout <seconds>` (= `caps`, exit 124), `-h`, `-V`. Options end at the
+first non-option token or `--`; the rest goes to the command verbatim. The
+single-purpose tools below are the same machinery with one limit each.
+Every tool prints detailed help with examples for `--help` (`wnice --help`,
+`capc --help`, ...); usage errors exit `1`.
 
 ## Priority tools
 
-Windows priority classes, lowest to highest. `idle`/`belownormal` propagate to
-the *whole* process tree (Windows inherits `IDLE`/`BELOW_NORMAL` into child
-processes by default). `abovenormal`/`high`/`realtime` do **not** propagate -
-only the directly wrapped process gets the boosted priority; anything it spawns
-runs at ordinary `Normal` priority. Confirmed empirically, not just from docs.
+Windows priority classes, lowest to highest, set as a Job Object limit so they
+hold for the *whole* process tree (children and grandchildren).
 
 - `idle <command> [args...]` — `IDLE_PRIORITY_CLASS`.
 - `belownormal <command> [args...]` — `BELOW_NORMAL_PRIORITY_CLASS`, a lighter
   touch than `idle`.
-- `abovenormal <command> [args...]` — `ABOVE_NORMAL_PRIORITY_CLASS`. Single
-  process only (see above) — pick this over `high`/`realtime` when you just need
-  a mild boost for one foreground process.
-- `high <command> [args...]` — `HIGH_PRIORITY_CLASS`. Single process only.
+- `abovenormal <command> [args...]` — `ABOVE_NORMAL_PRIORITY_CLASS`, a mild
+  boost for the whole tree.
+- `high <command> [args...]` — `HIGH_PRIORITY_CLASS`. Tree-wide only with
+  `SeIncreaseBasePriorityPrivilege` (elevated processes have it); otherwise the
+  job refuses (Win32 error 1314) and only the root process gets `HIGH`, with a
+  `wnice: note: ...` line on stderr.
 - `realtime <command> [args...]` — `REALTIME_PRIORITY_CLASS`. **Dangerous**:
   outranks the OS's own input/audio/UI threads: a busy realtime process can
   freeze the whole desktop, the exact failure mode win-nice otherwise exists to
-  prevent. Needs `SeIncreaseBasePriorityPrivilege` (elevated processes have it
-  by default) — without it, Windows silently downgrades the request to `HIGH`
-  instead of erroring. Single process only, same as `high`.
+  prevent. Needs the same privilege as `high`; without it you get `HIGH` on the
+  root process only, with the same stderr note.
 
 ## Resource limits
 
@@ -55,10 +73,7 @@ processes brought up through an external broker/service (e.g. WMI's
   (`JOB_OBJECT_LIMIT_AFFINITY`). Threads, not physical cores — on
   Hyper-Threading/SMT hardware, N logical processors can be fewer physical
   cores. `<thread-count>` must be between 1 and
-  `min([Environment]::ProcessorCount, 63)` — under 32-bit PowerShell the cap
-  is additionally 32 (the affinity mask is a pointer-sized `UIntPtr`), and
-  counts above it are rejected with a usage error naming 64-bit PowerShell.
-  Example: `capt 4 npm run build`.
+  min(logical processors, 63). Example: `capt 4 npm run build`.
 - `capm <size> <command> [args...]` — hard memory ceiling
   (`JOB_OBJECT_LIMIT_JOB_MEMORY`), aggregate across the whole tree, not
   per-process. `<size>`: bare integer `1`-`100` = percent of total physical RAM
@@ -75,7 +90,7 @@ processes brought up through an external broker/service (e.g. WMI's
   Object (the whole subtree, from the first instruction via the same
   suspend-then-assign-then-resume mechanism as `capc`/`capt`/`capm`), and
   `caps` exits with code 124 (unix `timeout(1)` convention). The deadline is
-  absolute — computed from `DateTime.UtcNow` and armed into a one-shot
+  absolute — computed from the system clock and armed into a one-shot
   waitable timer waited on together with the process handle
   (`WaitForMultipleObjects`, with a `GetProcessTimes` check rejecting an exit
   that only won the simultaneous-signal race after the deadline) — so time
@@ -117,10 +132,10 @@ stays limited until it's killed.
 
 ## Chaining
 
-These tools can be stacked, e.g. `capm 50 capc 50 idle npm run build`. Bare
-tool names resolve through the same `cmd.exe`/`PATHEXT` fallback as any other
-target, so chaining needs the tools' install directory on `PATH`, and any `%`
-in the command line still trips the fail-closed check. Nested Job Object
+These tools can be stacked, e.g. `capm 50 capc 50 idle npm run build`, but a
+single `wnice -m 50 -c 50 -p idle -- npm run build` does the same in one job
+and avoids every nesting rule below — prefer it. Chained tool names resolve
+through `PATH`, so chaining needs the install directory on `PATH`. Nested Job Object
 limits do **not** follow one universal "smaller wins" rule: CPU rate
 (`capc`) is relative to its parent job and *multiplies* when nested (`capc 50
 capc 50 ...` ≈ 25% of system CPU, not 50% - see
@@ -132,12 +147,11 @@ doesn't see the outer wrapper's process at all - so nested `capm` ceilings
 don't reduce to a simple `min(limit1, limit2)`. Process count (`capn`) limits
 are likewise enforced independently per job - a spawn has to fit under every
 job in the chain at once, and an outer job's count already includes the inner
-wrapper process itself (plus anything it spawns, down to a PowerShell-based
-inner tool's own csc.exe/CVTRES.EXE compiler children), so `capn 1 capn 5 ...`
-fails before the inner limit even matters and the effective budget is not a
-plain `min()` - leave outer headroom for the chain itself (roughly 3 slots
-for a PowerShell-based inner tool). Priority (`idle`/etc.) isn't
-a Job Object limit at all - the last one applied wins. A timeout (`caps`) is
+wrapper process itself, so `capn 1 capn 5 ...` fails before the inner limit
+even matters and the effective budget is not a plain `min()` - leave outer
+headroom for the chain itself (one slot per inner wrapper). Priority
+(`idle`/etc.) is a job limit too: with nested jobs the outermost one that sets
+a priority decides. A timeout (`caps`) is
 likewise not a Job Object limit being combined - it's a deadline each `caps`
 wrapper enforces on its own direct child: the innermost `caps` fires at its own
 deadline (the outer propagates the 124), while an outer `caps` whose deadline
@@ -166,62 +180,48 @@ sees 124 either way. See README.md's
 ## Argument safety
 
 Every tool tries to launch the wrapped command directly first (no shell
-involved) and only falls back to `cmd.exe /c` when the target is a `.bat`/
-`.cmd` file or a cmd.exe builtin that genuinely needs one.
+involved) and only goes through `cmd.exe /c` when the target is a `.bat`/
+`.cmd` file, which genuinely needs it.
 
 **Direct-launch path** (the common case: a real `.exe`): `&`, `|`, `<`, `>`,
 `^`, `%`, quotes, spaces, and empty strings all pass through exactly as
 given — cmd.exe is never invoked, so there's nothing to expand.
 
-**`cmd.exe /c` fallback path** (`.bat`/`.cmd` targets or cmd.exe builtins
-only): `&|<>^`/quotes/spaces/empty strings are still fully protected. A
-literal `%` used to be able to trigger environment-variable expansion here;
-there's no reliable per-character escape for that at the `cmd.exe /c` level.
-This path now **fails closed** instead: if any argument contains `%`, the
-tool refuses to run, prints an error to stderr, and exits with code `1` — the
-command never reaches cmd.exe.
+**`cmd.exe /c` fallback path** (`.bat`/`.cmd` targets only):
+`&|<>^`/quotes/spaces/empty strings are still fully protected. A literal `%`
+could trigger environment-variable expansion here and there's no reliable
+per-character escape for that at the `cmd.exe /c` level, so this path **fails
+closed**: if any argument contains `%`, the tool refuses to run, prints an
+error to stderr, and exits with code `1` — the command never reaches cmd.exe.
 
-**Separately, and unaffected by the fail-closed fix above:** each tool ships
-as up to three files, and which one a bare `name ...` invocation resolves to
-depends on the calling shell:
+Bare command names are resolved from absolute `PATH` entries only, in
+`PATHEXT` order — **never from the current directory** — and a name found
+nowhere exits `127`. cmd.exe builtins (`dir`, `echo`) are not files: wrap
+them as `idle cmd /c dir`.
 
-| Calling shell | Resolves to | `%` handling |
-| --- | --- | --- |
-| PowerShell | `name.ps1` | full argument safety (see above) |
-| cmd.exe, or PATHEXT-based resolution (e.g. Node's `child_process` — `PATHEXT` doesn't include `.PS1` by default) | `name.bat` | corrupted before `.ps1` ever runs |
-| POSIX shell (Git Bash only — ignores `PATHEXT`; WSL not supported) | `name` (extensionless shim) | full argument safety — `exec`s straight into `name.ps1` with MSYS argument conversion disabled, same as PowerShell |
+The tools are real `.exe` files, so PowerShell, pwsh, cmd.exe, Node's
+`child_process` and Git Bash all start them the same way. What the *calling
+shell* still does first: cmd.exe expands `%VAR%` on its own command line, and
+Windows PowerShell 5.1 mis-quotes an argument ending in a backslash when
+passing it to any native program.
 
-Known limitation: the shims' `MSYS2_ARG_CONV_EXCL='*'` (what keeps their own
-arguments intact) is inherited by the wrapped command tree, so an MSYS
-program run *inside* the wrapped command (an inner `bash`/`sh` or a
-`#!/bin/sh` git hook — not a native program) stops converting POSIX paths in
-its own children's arguments (`caps 600 bash -c 'node /c/proj/run.js'` fails
-to find the module). The shim's own arguments and native wrapped commands are
-unaffected.
-
-The `.bat` file corrupts any literal `%` in its arguments before the command,
-and before `.ps1` (and its fail-closed `%` check), ever runs at all
-(cmd.exe's own batch-parameter substitution rescanning for `%...%` patterns
-while parsing the `.bat` entry point itself; not fixable from inside a
-`.bat`). Every other special character survives that hop untouched.
-
-**PowerShell execution policy:** Windows client editions default to
-`Restricted`, which blocks a bare `.ps1` invoked directly by PowerShell with
-"running scripts is disabled on this system". One-time fix:
-`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. `.bat` files and the
-Git Bash shims are unaffected — both pass `-ExecutionPolicy Bypass`
-themselves (each shim runs powershell with that flag explicitly). Group
-Policy can still override this in managed environments.
+Git Bash gets an extensionless `name` shim next to each `name.exe` that sets
+`MSYS2_ARG_CONV_EXCL='*'` (keeps `/c` and Windows paths intact) and `exec`s
+the exe. Known limitation: that variable is inherited by the wrapped command
+tree, so an MSYS program run *inside* it (an inner `bash`/`sh`, a `#!/bin/sh`
+git hook) stops converting POSIX paths in its own children's arguments
+(`caps 600 bash -c 'node /c/proj/run.js'` fails to find the module); call
+`caps.exe` directly in that case. WSL is not supported.
 
 ## Install / manage
 
 ```
 npm install -g win-nice        # puts the tools above on PATH
 npx win-nice status            # what's installed, where, which version
-npx win-nice reinstall         # re-copy from the current package version
+npx win-nice reinstall         # reinstall from the current package version
 npx win-nice uninstall         # remove files + PATH entry
 ```
 
-Not covered here: `cy`/`cx`, unrelated one-line launchers for
+Not covered here: `cy`/`cx`, convenience launchers for
 `claude --dangerously-skip-permissions` / `codex --dangerously-bypass-approvals-and-sandbox`
-that happen to ship alongside these tools.
+that ship in the same binary.

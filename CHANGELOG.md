@@ -4,6 +4,66 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-25
+
+All 14 tools are now one native Rust executable, `wnice.exe`, built in CI
+and shipped in the npm package. Nothing is compiled on the user's machine, and
+the tools no longer need PowerShell, .NET or Node.js to run.
+
+### Breaking changes
+
+- The `bin/<tool>.ps1`, `bin/<tool>.bat`, `load-launcher.ps1` and the 14 prebuilt
+  helper DLLs are gone. Every tool is `<tool>.exe`, a hardlink of
+  `wnice.exe` that picks its behavior from its own name; Git Bash gets a
+  generated extensionless shim next to it. Scripts that called `<tool>.ps1`
+  or `<tool>.bat` by full name must call `<tool>` (or `<tool>.exe`).
+- Bare command names are resolved from absolute `PATH` entries only, never
+  from the current directory. A name found nowhere exits `127` instead of
+  falling back to `cmd.exe`, so cmd.exe builtins must be wrapped explicitly
+  (`idle cmd /c dir`).
+- Priority is now a Job Object limit for the whole process tree:
+  `abovenormal`, `high` and `realtime` now also apply to the wrapped
+  command's children. Without `SeIncreaseBasePriorityPrivilege` the job
+  refuses `high`/`realtime` (Win32 error 1314); the tool then sets `HIGH` on
+  the root process only and says so on stderr.
+- The timeout message reads `wnice: timed out after <seconds>s - ...`
+  (was `caps: ...`). Exit code `124` is unchanged.
+- `cy`, `cx` and an already-elevated `admin` run the target inside a Job Object too (no limits,
+  kill-on-close released on a normal exit).
+
+### Added
+
+- `wnice [options] [--] <command> [args...]`: every limit at once
+  (`-p` priority, `-c` CPU cap, `-t` threads, `-m` memory, `-n` process count,
+  `-s` timeout) in one wrapper process and one Job Object, so the process
+  tree is `wnice.exe -> command` with no `cmd.exe`/`powershell.exe` layers.
+- Built-in help with examples: `wnice --help` and `<tool> --help` (also `-h`,
+  `/?`) for every tool except `cy`/`cx`, which pass it on to `claude`/`codex`;
+  usage errors point to it. `win-nice help` lists the installer commands and
+  environment variables.
+- Upgrades work while a tool is running: in-use executables are renamed aside
+  (`<tool>.exe.old-<n>`) and removed later; the whole upgrade rolls back if
+  any step fails.
+
+### Changed
+
+- The installer writes `wnice.exe`, 14 hardlinks and 15 shims (a copy where
+  hardlinks are unsupported); the published package contains 14 files and one
+  binary.
+- PATH change notifications no longer need a helper assembly.
+- Tests run inside a developer sandbox (`scripts/lib/guarded.ps1`: hidden
+  desktop, process cap, Idle priority, timeout), so they never open windows;
+  the Pester suite now drives the installed exes and takes seconds instead of
+  minutes. A structure linter caps code files at 1000 lines and code
+  directories at 7 entries.
+
+### Removed
+
+- `scripts/build-launcher-assemblies.ps1`, `scripts/check-assemblies.js`,
+  `scripts/EnvironmentNotifier.cs` and the C# fault-injection Pester harness
+  (replaced by fault injection through the Rust `Sys` trait).
+- The `PowerShell execution policy` requirement: there are no scripts to run.
+
 ## [0.2.2] - 2026-09-27
 
 ### Changed
@@ -174,7 +234,8 @@ everything below shipped together as `0.2.0`.
 - Node test suite (installer logic) and Pester integration suite (real
   Windows process/priority/Job-Object behavior).
 
-[Unreleased]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/PHPCraftdream/win-nice/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/PHPCraftdream/win-nice/compare/v0.1.0...v0.2.0

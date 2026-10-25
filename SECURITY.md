@@ -11,7 +11,7 @@ so timelines are best-effort, not contractual.
 
 ## Scope
 
-In scope: bugs in `bin/*.ps1`/`bin/*.bat`/the extensionless shims or `install/*.js`
+In scope: bugs in the `wnice.exe` binary (`src/`), the generated Git Bash shims or `install/*.js`
 that let an attacker escalate privileges, execute unintended commands, or bypass
 the argument-safety guarantees described in README's "Argument handling" section
 beyond what's already documented as a known limitation there.
@@ -22,8 +22,9 @@ Out of scope (already known, not vulnerabilities):
 - `realtime` intentionally requests `REALTIME_PRIORITY_CLASS`, which can freeze
   the desktop if misused - documented and warned about in README.
 - `admin` intentionally elevates via UAC - that's its documented purpose.
-- The `.bat` entry points' literal-`%`-corruption quirk - a documented,
-  unfixable-from-inside-a-`.bat` cmd.exe behavior, not a win-nice bug.
+- `%VAR%` expansion done by cmd.exe on its own command line before a tool
+  starts, and Windows PowerShell 5.1's mis-quoting of a trailing backslash -
+  documented calling-shell behavior, not a win-nice bug.
 
 ## Supported versions
 

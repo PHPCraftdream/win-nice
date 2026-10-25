@@ -54,6 +54,13 @@ jobs:
       - name: Install
         run: npm install
 
+      # release-check and prepack (stage-exe.js --check) both need the prebuilt
+      # binary in bin/wnice.exe before the test suites run.
+      - name: Build wnice.exe
+        shell: bash
+        timeout-minutes: 20
+        run: rustup toolchain install stable --profile minimal && rustup default stable && cargo build --release --locked && cp target/release/wnice.exe bin/wnice.exe
+
       - name: Node test suite (installer logic)
         run: npm test
 
@@ -67,7 +74,7 @@ jobs:
           $ErrorActionPreference = 'Continue'
           # Runners ship Pester 3.4.0 and 5.9.0 side by side; the suite uses v3 syntax.
           Import-Module Pester -MaximumVersion 3.99
-          $result = Invoke-Pester -Path test\win-nice.Tests.ps1 -PassThru
+          $result = Invoke-Pester -Path test\pester -PassThru
           if ($result.FailedCount -gt 0) { exit 1 }
           exit 0
 

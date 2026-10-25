@@ -8,10 +8,22 @@ const { spawnSync } = require('node:child_process');
 
 const CLI = path.join(__dirname, '..', 'install', 'cli.js');
 
+// install() reads its source exe from WIN_NICE_SOURCE_BIN (see
+// install/install.js) - point it at a throwaway dir holding a fake wnice.exe
+// so these child-process installs never need the real Rust build.
+function makeSourceBin() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-cli-srcbin-'));
+  fs.writeFileSync(path.join(dir, 'wnice.exe'), Buffer.from('fake wnexe'));
+  return dir;
+}
+
+// Set by withHome() for the duration of each test; read by run().
+let sourceBin = null;
+
 function run(args, home, skillHome, extraEnv) {
   return spawnSync(process.execPath, [CLI, ...args], {
     encoding: 'utf8',
-    env: { ...process.env, WIN_NICE_HOME: home, WIN_NICE_SKILL_HOME: skillHome, WIN_NICE_NO_PATH: '1', ...extraEnv },
+    env: { ...process.env, WIN_NICE_HOME: home, WIN_NICE_SKILL_HOME: skillHome, WIN_NICE_NO_PATH: '1', WIN_NICE_SOURCE_BIN: sourceBin, ...extraEnv },
   });
 }
 
@@ -21,15 +33,19 @@ function run(args, home, skillHome, extraEnv) {
 // that only isolated WIN_NICE_HOME left every run() call in this file free to
 // read/write the real ~/.claude/skills and ~/.agents/skills (confirmed: it
 // did, once, before this second temp dir was added). Isolate both, same as
-// test/install-uninstall.test.js's withHome().
+// test/install/home.js's withHome().
 function withHome(fn) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-cli-'));
   const skillHome = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-cli-skillhome-'));
+  const srcBin = makeSourceBin();
+  sourceBin = srcBin;
   try {
     fn(home, skillHome);
   } finally {
+    sourceBin = null;
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(skillHome, { recursive: true, force: true });
+    fs.rmSync(srcBin, { recursive: true, force: true });
   }
 }
 
@@ -64,7 +80,7 @@ test('cli install then status reports the installed version and files', () => {
 
     const res = run(['status'], home, skillHome);
     assert.match(res.stdout, /win-nice .* installed/);
-    assert.match(res.stdout, /idle\.bat/);
+    assert.match(res.stdout, /wnice\.exe/);
   });
 });
 
@@ -76,6 +92,19 @@ test('cli uninstall removes a prior install', () => {
 
     const res = run(['status'], home, skillHome);
     assert.match(res.stdout, /not installed/);
+  });
+});
+
+test('cli help lists every command and exits 0', () => {
+  withHome((home, skillHome) => {
+    for (const arg of ['help', '--help', '-h']) {
+      const r = run([arg], home, skillHome);
+      assert.equal(r.status, 0, r.stderr);
+      for (const word of ['install', 'uninstall', 'reinstall', 'status', 'skill install', 'WIN_NICE_NO_PATH', 'wnice --help']) {
+        assert.ok(r.stdout.includes(word), `${arg}: missing ${word}`);
+      }
+      assert.equal(fs.readdirSync(home).length, 0, 'help must not install anything');
+    }
   });
 });
 
@@ -190,7 +219,7 @@ test('regression: install() must never fall through to the ambient home when WIN
       fs.writeFileSync(sentinelTarget, sentinelContent);
       const buggy = spawnSync(process.execPath, [CLI, 'install'], {
         encoding: 'utf8',
-        env: { ...process.env, WIN_NICE_HOME: home, WIN_NICE_NO_PATH: '1', USERPROFILE: ambientHome, HOME: ambientHome },
+        env: { ...process.env, WIN_NICE_HOME: home, WIN_NICE_NO_PATH: '1', WIN_NICE_SOURCE_BIN: sourceBin, USERPROFILE: ambientHome, HOME: ambientHome },
       });
       assert.equal(buggy.status, 0, buggy.stderr);
       assert.notEqual(
@@ -228,6 +257,7 @@ test('regression: install() must never fall through to the ambient home when WIN
 test('cli uninstall/reinstall from a source checkout (no WIN_NICE_HOME) refuse to touch a real-looking install', () => {
   const fakeLocalAppData = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-fake-localappdata-'));
   const skillHome = fs.mkdtempSync(path.join(os.tmpdir(), 'win-nice-cli-skillhome-'));
+  const seededSourceBin = makeSourceBin();
   try {
     const seeded = spawnSync(process.execPath, [CLI, 'install'], {
       encoding: 'utf8',
@@ -236,6 +266,7 @@ test('cli uninstall/reinstall from a source checkout (no WIN_NICE_HOME) refuse t
         WIN_NICE_HOME: path.join(fakeLocalAppData, 'win-nice'),
         WIN_NICE_SKILL_HOME: skillHome,
         WIN_NICE_NO_PATH: '1',
+        WIN_NICE_SOURCE_BIN: seededSourceBin,
       },
     });
     assert.equal(seeded.status, 0, seeded.stderr);
@@ -265,5 +296,6 @@ test('cli uninstall/reinstall from a source checkout (no WIN_NICE_HOME) refuse t
   } finally {
     fs.rmSync(fakeLocalAppData, { recursive: true, force: true });
     fs.rmSync(skillHome, { recursive: true, force: true });
+    fs.rmSync(seededSourceBin, { recursive: true, force: true });
   }
 });
