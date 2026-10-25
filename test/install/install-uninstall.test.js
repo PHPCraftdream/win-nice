@@ -135,6 +135,25 @@ test('install replaces an older version\'s marked shim even without a manifest',
   });
 });
 
+// Regression: the tool exes were hardlinks of the npm package's own
+// bin/wnice.exe, so a running tool locked that file and the next
+// `npm install -g win-nice` failed with EBUSY inside node_modules.
+test('tool exes are hardlinks of the installed wnice.exe, never of the package file', () => {
+  withHome(freshHome(), () => {
+    install({ updatePath: false });
+    const dir = paths.binDir();
+    const id = (p) => fs.statSync(p, { bigint: true }).ino;
+    const installed = id(path.join(dir, EXE_NAME));
+    const packageFile = id(path.join(process.env.WIN_NICE_SOURCE_BIN, EXE_NAME));
+    assert.notEqual(installed, packageFile, 'wnice.exe must be a copy, not a link of the package file');
+    for (const t of TOOL_NAMES) {
+      const tool = id(path.join(dir, `${t}.exe`));
+      assert.notEqual(tool, packageFile, `${t}.exe must not share the package file`);
+      assert.equal(tool, installed, `${t}.exe must be a hardlink of the installed wnice.exe`);
+    }
+  });
+});
+
 test('install refuses to overwrite a pre-existing foreign capc.exe and leaves it byte-identical', () => {
   withHome(freshHome(), () => {
     const dir = paths.binDir();

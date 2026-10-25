@@ -254,16 +254,18 @@ function install({ updatePath = true, _fs = fs } = {}) {
     track(path.join(dir, SIDECAR_NAME));
     _fs.writeFileSync(path.join(dir, SIDECAR_NAME), `${manifest.MARKER}\n`);
 
-    // Hardlinks save ~6MB x14 vs full copies; fall back to a copy on any
-    // error (filesystems/devices that don't support them).
+    // Hardlinks of the INSTALLED copy, never of the package's own file: a
+    // running tool locks every link of its file, and a link into
+    // node_modules would make the next `npm install -g` fail with EBUSY.
+    // Fall back to a copy where hardlinks aren't supported.
     for (const t of TOOL_NAMES) {
       const target = path.join(dir, `${t}.exe`);
       track(target);
       if (_fs.existsSync(target)) _fs.unlinkSync(target);
       try {
-        _fs.linkSync(source, target);
+        _fs.linkSync(targetExe, target);
       } catch {
-        _fs.copyFileSync(source, target);
+        _fs.copyFileSync(targetExe, target);
       }
     }
 
