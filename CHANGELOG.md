@@ -31,6 +31,9 @@ the tools no longer need PowerShell, .NET or Node.js to run.
 - `cy`, `cx` and an already-elevated `admin` run the target inside a Job Object too (no limits,
   kill-on-close released on a normal exit).
 
+- The npm installer requires Node.js 24 or newer (`engines.node` is now
+  `>=24`, the only version CI tests). The tools themselves need no Node.js.
+
 ### Added
 
 - `wnice [options] [--] <command> [args...]`: every limit at once

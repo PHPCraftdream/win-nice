@@ -542,7 +542,7 @@ isn't a conflict.
 
 ## Requirements
 
-Windows 8 / Server 2012 or newer (Job Object CPU rate control), 64-bit. Node.js
+Windows 8 / Server 2012 or newer (Job Object CPU rate control), 64-bit. Node.js 24+
 is only needed for the npm-based installer, not for the tools themselves.
 `cy`/`cx` additionally need `claude`/`codex` installed and on `PATH`.
 
