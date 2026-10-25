@@ -5,12 +5,15 @@ const paths = require('./paths');
 const manifest = require('./manifest');
 
 function orderManagedFiles(names) {
-  // Exes/sidecars first, then shims: deleting a shim whose target exe is
-  // already gone is harmless, but the reverse would briefly leave dangling
-  // names on PATH.
-  const binaries = names.filter((n) => n.endsWith('.exe') || n.endsWith('.managed'));
-  const rest = names.filter((n) => !binaries.includes(n));
-  return [...binaries, ...rest];
+  // Binaries, then their .managed sidecars (a binary's ownership is proven by
+  // its sidecar, so the sidecar must outlive it), then shims/scripts: deleting
+  // a shim whose target is already gone is harmless, the reverse would
+  // briefly leave dangling names on PATH.
+  const isBinary = (n) => n.endsWith('.exe') || n.endsWith('.dll');
+  const binaries = names.filter(isBinary);
+  const sidecars = names.filter((n) => n.endsWith('.managed'));
+  const rest = names.filter((n) => !isBinary(n) && !n.endsWith('.managed'));
+  return [...binaries, ...sidecars, ...rest];
 }
 
 // Rejects any candidate that doesn't resolve inside expectedDir - guards against a

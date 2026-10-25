@@ -34,7 +34,7 @@
     "postinstall": "node install/cli.js install",
     "prepack": "node install/stage-exe.js --check",
     "build:exe": "cargo build --release --locked && node install/stage-exe.js",
-    "test": "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File scripts\\lib\\guarded.ps1 100 900 node --require ./scripts/lib/hide-windows.js --test scripts/lint/lint-structure.test.js test/cli.test.js test/docs-sync.test.js test/install/gitbash-shims.test.js test/install/install-uninstall.test.js test/install/install-transaction.test.js test/install/manifest.test.js test/install/paths.test.js test/release-check-allowlist.test.js test/skill.test.js",
+    "test": "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File scripts\\lib\\guarded.ps1 100 900 node --require ./scripts/lib/hide-windows.js --test scripts/lint/lint-structure.test.js test/cli.test.js test/docs-sync.test.js test/install/gitbash-shims.test.js test/install/install-uninstall.test.js test/install/install-transaction.test.js test/install/legacy-upgrade.test.js test/install/manifest.test.js test/install/paths.test.js test/release-check-allowlist.test.js test/skill.test.js",
     "test:pester": "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File scripts\\lib\\guarded.ps1 60 1800 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\run-pester.ps1",
     "test:elevated": "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File test\\run-elevated.ps1",
     "release-check": "node --require ./scripts/lib/hide-windows.js scripts/release-check.js",

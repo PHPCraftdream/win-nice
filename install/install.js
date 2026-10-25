@@ -14,6 +14,19 @@ const TOOL_NAMES = ['idle','belownormal','abovenormal','high','realtime','capc',
 const EXE_NAME = 'wnice.exe';
 const SIDECAR_NAME = 'wnice.exe.managed';
 
+// What 0.2.x installed (PowerShell launchers + prebuilt DLLs). Recognized only
+// so an upgrade or uninstall can remove them; ownership still needs the
+// `win-nice: managed-file` marker (in the file, or in a DLL's .managed sidecar).
+const LEGACY_DLL_NAMES = [
+  'AboveNormal', 'Admin', 'BelowNormal', 'Capc', 'Capm', 'Capn', 'Caps', 'Capt',
+  'Cx', 'Cy', 'High', 'Idle', 'Realtime',
+].map((n) => `${n}Launcher.dll`).concat('EnvironmentNotifier.dll');
+const LEGACY_NAMES = new Set([
+  ...TOOL_NAMES.flatMap((t) => [`${t}.ps1`, `${t}.bat`]),
+  'load-launcher.ps1',
+  ...LEGACY_DLL_NAMES.flatMap((d) => [d, `${d}.managed`]),
+]);
+
 // Injectable so tests can point at a fake exe without a Rust build.
 function sourceBinDir() {
   return process.env.WIN_NICE_SOURCE_BIN || path.join(__dirname, '..', 'bin');
@@ -67,7 +80,12 @@ function isOwnedArtifact(filePath, dir) {
       return fs.readFileSync(filePath).equals(fs.readFileSync(source));
     }
     if (shimNames.has(name)) {
-      return fs.readFileSync(filePath, 'utf8') === shimText(name);
+      // Older versions' shims had other text but the same marker comment.
+      const text = fs.readFileSync(filePath, 'utf8');
+      return text === shimText(name) || text.includes(manifest.MARKER);
+    }
+    if (LEGACY_NAMES.has(name)) {
+      return manifest.hasMarker(filePath);
     }
   } catch {}
   return false;
@@ -153,8 +171,16 @@ function install({ updatePath = true, _fs = fs } = {}) {
   // foreign file as ours (sidecar present => owned) and silently overwrite it.
   const targetShimNames = [...TOOL_NAMES, EXE_NAME.replace(/\.exe$/, '')];
   const allTargets = [targetExe, ...TOOL_NAMES.map((t) => path.join(dir, `${t}.exe`)), ...targetShimNames.map((n) => path.join(dir, n))];
+  // A name the previous install's manifest lists in this same directory was
+  // put there by us, whatever its current bytes (an older version's layout).
+  const previous = manifest.read(paths.manifestPath());
+  const previouslyInstalled = new Set(
+    previous && Array.isArray(previous.files) && path.resolve(previous.binDir || dir) === path.resolve(dir)
+      ? previous.files
+      : []
+  );
   for (const target of allTargets) {
-    if (fs.existsSync(target) && !isOwnedArtifact(target, dir)) {
+    if (fs.existsSync(target) && !previouslyInstalled.has(path.basename(target)) && !isOwnedArtifact(target, dir)) {
       throw new Error(`refusing to overwrite a pre-existing unrelated file: ${target}`);
     }
   }

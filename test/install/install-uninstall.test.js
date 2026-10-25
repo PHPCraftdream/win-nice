@@ -21,6 +21,18 @@ const manifest = require('../../install/manifest');
 
 const { FAKE_EXE, freshHome, withHome } = require('./home');
 
+// The extensionless shim 0.2.x installed (verbatim apart from the tool name).
+const OLD_SHIM = [
+  '#!/bin/sh',
+  '# SPDX-License-Identifier: MIT OR Apache-2.0',
+  '# win-nice: managed-file',
+  "MSYS2_ARG_CONV_EXCL='*'",
+  'export MSYS2_ARG_CONV_EXCL',
+  'script=$(cygpath -w "$(dirname "$0")/idle.ps1" 2>/dev/null) || script="$(dirname "$0")/idle.ps1"',
+  'exec powershell -NoProfile -ExecutionPolicy Bypass -File "$script" "$@"',
+  '',
+].join('\n');
+
 test('install creates exactly the 31 contract files and writes a manifest listing them', () => {
   withHome(freshHome(), () => {
     const result = install({ updatePath: false });
@@ -94,11 +106,10 @@ test('install (upgrade path) removes old-layout files listed in a synthetic prev
     fs.mkdirSync(dir, { recursive: true });
     const oldFiles = ['idle.bat', 'idle.ps1', 'IdleLauncher.dll', 'IdleLauncher.dll.managed', 'load-launcher.ps1'];
     for (const name of oldFiles) fs.writeFileSync(path.join(dir, name), 'stale old layout');
-    // The old layout also had an extensionless 'idle' shim; seed it with content
-    // the installer recognizes as its own (old shims used the same generated
-    // text), so install() replaces it rather than refusing the overwrite.
-    fs.writeFileSync(path.join(dir, 'idle'), shimText('idle'));
-    manifest.write(paths.manifestPath(), { version: '0.0.9', binDir: dir, files: [...oldFiles, 'idle'] });
+    // The 0.2.x layout also had an extensionless 'idle' shim with DIFFERENT
+    // text than today's (it exec'd idle.ps1); install() must replace it.
+    fs.writeFileSync(path.join(dir, 'idle'), OLD_SHIM);
+    manifest.write(paths.manifestPath(), { version: '0.2.2', binDir: dir, files: [...oldFiles, 'idle'] });
 
     install({ updatePath: false });
 
@@ -106,6 +117,21 @@ test('install (upgrade path) removes old-layout files listed in a synthetic prev
       assert.equal(fs.existsSync(path.join(dir, name)), false, `${name} (old layout) must be removed on upgrade`);
     }
     assert.deepEqual(fs.readdirSync(dir).sort(), expectedInstalledFiles().slice().sort());
+    assert.equal(fs.readFileSync(path.join(dir, 'idle'), 'utf8'), shimText('idle'));
+  });
+});
+
+test('install replaces an older version\'s marked shim even without a manifest', () => {
+  withHome(freshHome(), () => {
+    const dir = paths.binDir();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'capc'), OLD_SHIM);
+    fs.writeFileSync(path.join(dir, 'idle'), '#!/bin/sh\necho a user script without the marker\n');
+
+    assert.throws(() => install({ updatePath: false }), /refusing to overwrite a pre-existing unrelated file: .*idle/);
+    fs.unlinkSync(path.join(dir, 'idle'));
+    install({ updatePath: false });
+    assert.equal(fs.readFileSync(path.join(dir, 'capc'), 'utf8'), shimText('capc'));
   });
 });
 

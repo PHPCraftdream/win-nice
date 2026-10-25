@@ -50,6 +50,10 @@ the tools no longer need PowerShell, .NET or Node.js to run.
 - The installer writes `wnice.exe`, 14 hardlinks and 15 shims (a copy where
   hardlinks are unsupported); the published package contains 14 files and one
   binary.
+- Upgrading over a 0.2.x install (`npm install -g win-nice`) replaces its
+  shims and removes its `.ps1`/`.bat`/DLL files, with or without the old
+  install manifest; files without the `win-nice: managed-file` marker are
+  never touched.
 - PATH change notifications no longer need a helper assembly.
 - Tests run inside a developer sandbox (`scripts/lib/guarded.ps1`: hidden
   desktop, process cap, Idle priority, timeout), so they never open windows;
