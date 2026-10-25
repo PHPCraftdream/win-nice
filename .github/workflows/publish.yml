@@ -59,7 +59,7 @@ jobs:
       - name: Build wnice.exe
         shell: bash
         timeout-minutes: 20
-        run: rustup toolchain install stable --profile minimal && rustup default stable && cargo build --release --locked && cp target/release/wnice.exe bin/wnice.exe
+        run: rustup toolchain install stable --profile minimal && rustup default stable && cargo build --release --locked && node install/stage-exe.js
 
       - name: Node test suite (installer logic)
         run: npm test
