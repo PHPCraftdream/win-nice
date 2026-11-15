@@ -74,7 +74,7 @@ pipeline in one job, in order:
 
   On a re-run a stale DRAFT of the same tag is deleted and recreated; a
   published release is never touched;
-- `npm publish release-assets/win-nice-<version>.tgz --provenance --access
+- `npm publish ./release-assets/win-nice-<version>.tgz --provenance --access
   public` via Trusted Publishing (OIDC) - the LAST step.
 
 The registry tarball and the Release tarball are the same bytes by
