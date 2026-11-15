@@ -6,19 +6,45 @@ on:
   pull_request:
     branches: [main, master]
 
+# Least privilege: nothing in CI publishes or pushes, so every job runs with
+# read-only access to the repo.
+permissions:
+  contents: read
+
+# Cancel superseded runs of the same ref. On pull_request this kills a PR's
+# outdated run as new commits arrive; pushes to main/master are never
+# cancelled - a cancelled push run would hide the branch's real state.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  # The prebuilt Rust binary is built once here and handed to the test job
-  # via an artifact.
+  # The prebuilt Rust binary is built once per OS image here and handed to
+  # the test job via per-OS artifacts.
   build-exe:
-    runs-on: windows-latest
+    strategy:
+      # Run both images even if one fails, so a windows-2022-only regression
+      # is never masked by an early windows-2025 failure.
+      fail-fast: false
+      matrix:
+        # Explicit runner images instead of the floating windows-latest:
+        # "latest" silently moves to new Windows versions, so a break lands
+        # in CI before anyone chose it. These two are the currently supported
+        # Windows Server images (windows-latest itself now points at 2025).
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
     # Cargo release builds of a cold cache can take a while; cap the job.
     timeout-minutes: 30
     steps:
+      # Nothing here pushes to git, so the checkout's cached credentials are
+      # dropped immediately.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      # windows-latest ships rustup; install the stable toolchain explicitly
-      # (minimal profile + clippy/rustfmt) instead of relying on whatever
-      # default toolchain the runner image happens to pin.
+      # Every windows image ships rustup; install the stable toolchain
+      # explicitly (minimal profile + clippy/rustfmt) instead of relying on
+      # whatever default toolchain the runner image happens to pin.
       - name: Set up stable Rust
         shell: bash
         run: |
@@ -44,33 +70,41 @@ jobs:
       - name: Upload wnice.exe artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: wnice-exe
+          name: wnice-exe-${{ matrix.os }}
           path: target/release/wnice.exe
 
   test:
-    # Waits on the shared prebuilt binary from build-exe.
+    # Waits on the per-OS prebuilt binaries from build-exe.
     needs: build-exe
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
     # Upper bound for the whole job (npm install + both suites): an unbounded hang
     # would otherwise occupy the runner for the 6-hour default.
     timeout-minutes: 20
     steps:
       # fetch-depth: 0 (full history + tags): release-check.js (below) needs
-      # the tags.
+      # the tags. It only lists them locally (`git tag --list`), and npm
+      # install has no git dependencies, so no persisted credentials are
+      # needed anywhere in this job.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
 
-      # Grabs the binary built once by build-exe; path: bin drops it at
-      # bin/wnice.exe (gitignored, so the checkout never contains it).
+      # Grabs the binary built once by build-exe on the SAME image; path: bin
+      # drops it at bin/wnice.exe (gitignored, so the checkout never contains
+      # it).
       - name: Download prebuilt wnice.exe
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: wnice-exe
+          name: wnice-exe-${{ matrix.os }}
           path: bin
 
       - name: Install
@@ -130,3 +164,80 @@ jobs:
         # publish job, after a tag already exists.
         shell: bash
         run: npm run release-check
+
+  # Verifies Cargo.toml's declared rust-version by compiling with exactly
+  # that toolchain. The declared floor is evidence-based, not guessed:
+  # - src/run/mod.rs uses `u32::is_multiple_of` (stable in 1.87);
+  # - src/run/fakesys.rs uses the `#[expect]` attribute (stable in 1.81);
+  # - Cargo.lock is lockfile-format v4, which cargo < 1.78 cannot parse;
+  # - the only dependency (windows-sys 0.59) declares rust-version 1.60.
+  # This job is the arbiter: it reads the version from Cargo.toml instead of
+  # duplicating it here, so raising rust-version in Cargo.toml is all it
+  # takes to move the floor. If this job fails on 1.87, the real floor is
+  # higher - raise rust-version to the version this job's output points at.
+  msrv:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Read the declared MSRV from Cargo.toml
+        shell: bash
+        run: |
+          msrv=$(sed -n 's/^rust-version *= *"\([^"]*\)"/\1/p' Cargo.toml)
+          if [ -z "$msrv" ]; then
+            echo "rust-version is missing from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
+
+      - name: Install the declared MSRV toolchain
+        shell: bash
+        run: rustup toolchain install "$MSRV" --profile minimal
+
+      - name: cargo check on the declared MSRV
+        shell: bash
+        run: rustup run "$MSRV" cargo check --locked --all-targets
+
+  # Dependency security gate: OSV/GH advisories, the license allow-list (the
+  # project and its whole dependency tree are MIT OR Apache-2.0), duplicate-
+  # crate and registry-source checks. Configuration: deny.toml at the repo
+  # root. cargo-deny only parses manifests and the lockfile (no Rust code is
+  # compiled), so this job is cheap and Linux-hosted.
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: cargo-deny check (advisories, licenses, bans, sources)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+
+  # Doc-build gate: rustdoc lints (broken intra-doc links, etc.) fail the job
+  # via -D warnings. Windows runner: the crate's Win32 code is not cfg-gated,
+  # so the crate only builds on a Windows host.
+  doc:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up stable Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: cargo doc
+        shell: bash
+        run: cargo doc --locked --no-deps

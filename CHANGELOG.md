@@ -4,6 +4,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Release engineering and repository hygiene. No tool behavior changes: `src/`,
+the installer logic and the runtime dependency count (zero) are untouched.
+
+### Added
+
+- CI runs the build/test matrix on explicit `windows-2022` and `windows-2025`
+  runner images (`fail-fast: false`) instead of the floating `windows-latest`
+  image only.
+- An MSRV gate: `Cargo.toml` now declares `rust-version = "1.87"` and CI runs
+  `cargo check --locked --all-targets` with exactly that toolchain (floor:
+  `u32::is_multiple_of` needs 1.87, `#[expect]` needs 1.81, Cargo.lock's v4
+  format needs cargo >= 1.78, and windows-sys declares 1.60).
+- `cargo-deny` (advisories, license allow-list, duplicate/source bans) via
+  `deny.toml` and a CI job.
+- Dependabot for cargo, npm and GitHub Actions (weekly, grouped updates;
+  SHA-pinned actions keep their pins).
+- OpenSSF Scorecard analysis (weekly + push, SARIF to code scanning) and a
+  zizmor-based GitHub Actions security audit.
+- `cargo doc` with `RUSTDOCFLAGS=-D warnings` as a CI job.
+- CODEOWNERS and SUPPORT.md.
+
+### Changed
+
+- CI workflows declare least-privilege `permissions` (`contents: read`,
+  raised only where code-scanning uploads need it), cancel outdated
+  pull-request runs via `concurrency`, cap every job with `timeout-minutes`,
+  and drop the checkouts' persisted git credentials
+  (`persist-credentials: false` - nothing in CI pushes).
+
 ## [0.3.0] - 2026-10-25
 
 All 14 tools are now one native Rust executable, `wnice.exe`, built in CI

@@ -1,0 +1,4 @@
+# Solo-maintained project: the maintainer owns everything, including
+# Dependabot's grouped weekly PRs. Syntax reference:
+# https://docs.github.com/en/repositories/managing-a-repository-on-github/about-code-owners
+* @PHPCraftdream
