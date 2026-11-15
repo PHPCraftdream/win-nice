@@ -1,4 +1,4 @@
-//! Legacy single-purpose frontends, selected by argv[0]: `idle`..`realtime`
+//! Legacy single-purpose frontends, selected by `argv[0]`: `idle`..`realtime`
 //! (`<tool> <command> [args...]`) and `capc`/`capt`/`capm`/`caps`/`capn`
 //! (`<tool> <value> <command> [args...]`). Positional syntax only — nothing
 //! after the value is option-parsed — mapped onto the combined `wnice`
@@ -51,7 +51,7 @@ pub fn is_legacy(stem: &str) -> bool {
     priority_of(stem).is_some() || value_tool(stem, 1).is_some()
 }
 
-/// Parse a legacy frontend's arguments (argv[0] excluded). `Err` is the
+/// Parse a legacy frontend's arguments (`argv[0]` excluded). `Err` is the
 /// complete stderr message for a usage error (exit 1).
 pub fn parse(stem: &str, args: &[String], logical_cpus: u32) -> Result<Config, String> {
     if let Some(p) = priority_of(stem) {

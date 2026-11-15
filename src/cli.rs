@@ -120,7 +120,7 @@ fn parse_memory(s: &str) -> Result<MemSpec, String> {
     Ok(MemSpec::Bytes(total as u64))
 }
 
-/// `<seconds>`: `^\d+(\.\d+)?$`, > 0, floored to whole ms in [1, 4294967294].
+/// `<seconds>`: `^\d+(\.\d+)?$`, > 0, floored to whole ms in `[1, 4294967294]`.
 /// Parsed as integer + fraction digits to avoid f64 precision problems.
 fn parse_timeout(s: &str) -> Result<u32, String> {
     let bad = || "invalid -s/--timeout <seconds>".to_string();
@@ -157,7 +157,7 @@ fn parse_timeout(s: &str) -> Result<u32, String> {
     Ok(total_ms as u32)
 }
 
-/// Parse the `wnice` argument list (excluding argv[0]).
+/// Parse the `wnice` argument list (excluding `argv[0]`).
 ///
 /// `logical_cpus` is the machine's logical processor count, used as the upper
 /// bound for `-t/--threads`.

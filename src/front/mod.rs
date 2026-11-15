@@ -1,4 +1,4 @@
-//! Single-purpose frontends selected by argv[0] (the hardlinks postinstall
+//! Single-purpose frontends selected by `argv[0]` (the hardlinks postinstall
 //! creates next to wnice.exe).
 
 pub mod admin;

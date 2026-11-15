@@ -28,7 +28,7 @@ multiple-versions = "deny"
 
 [sources]
 unknown-registry = "deny"
-unknown-index = "deny"
+unknown-git = "deny"
 allow-registry = [
   "https://github.com/rust-lang/crates.io-index",
 ]

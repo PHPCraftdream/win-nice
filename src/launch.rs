@@ -149,7 +149,7 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// The search directories from the process `PATH` (see [`split_path_var`]).
+/// The search directories from the process `PATH` (see `split_path_var`).
 pub fn path_dirs() -> Vec<String> {
     let cwd = std::env::current_dir().ok();
     split_path_var(&std::env::var("PATH").unwrap_or_default(), cwd.as_deref())
@@ -211,7 +211,7 @@ pub enum Resolved {
     Shell(String),
 }
 
-/// Resolve argv[0]. A name containing a path separator is user-explicit and
+/// Resolve `argv[0]`. A name containing a path separator is user-explicit and
 /// returned as-is (Direct, no search). A bare name is searched in `dirs`
 /// only; a hit ending in .bat/.cmd is Shell, everything else Direct.
 pub fn resolve_command(dirs: &[String], argv0: &str) -> Option<Resolved> {
