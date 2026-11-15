@@ -29,6 +29,10 @@ options:
                            itself included; a spawn above it fails
   -s, --timeout <seconds>  wall-clock deadline (2, 2.5, ...; sleep counts);
                            on expiry the whole tree is killed and wnice exits 124
+  --wsl[=<distro>]         run the command inside a WSL2 distro (the one named,
+                           or wsl.exe's default) under a systemd scope; the
+                           other options become cgroup v2 limits in the guest
+                           (see WSL MODE below)
   -h, --help               this help
   -V, --version            print the version
 
@@ -41,6 +45,30 @@ command lookup:
   .bat/.cmd files run through 'cmd.exe /d /v:off /s /c'; on that path an
   argument containing '%' is refused (cmd.exe would expand it).
   cmd.exe builtins are not files: wrap them, e.g. wnice -p idle -- cmd /c dir
+
+WSL mode (--wsl):
+  The command runs inside the guest as its default user; root is only used
+  to start it (systemd-run --scope supplies the limits, nice(1) sets the
+  nice level, runuser(1) drops back to the user). Flag mapping:
+    -c   CPUQuota = N percent of ALL guest vCPUs (nproc --all)
+    -p   Nice 19/10/0/-5/-20 and CPUWeight 1/50/100/500/10000 for
+         idle/belownormal/normal/abovenormal/high; realtime is REFUSED
+         (the Linux nice/weight model has no realtime band)
+    -m   MemoryMax: percent of the guest's RAM, or m/g byte sizes
+    -t   AllowedCPUs = the first N guest vCPUs
+    -n   TasksMax
+    -s   RuntimeMaxSec plus a cgroup-wide SIGKILL at the deadline;
+         wnice then exits 124 like Windows mode
+  Requirements, all checked up front with a clear error: WSL2 (WSL1 is
+  refused), systemd as PID 1 (enable [boot] systemd=true in /etc/wsl.conf),
+  cgroup v2, systemd-run, runuser/nice. The command starts in the current
+  Windows directory translated to /mnt/<drive>/...; if that directory is
+  not visible in the guest, the run is refused. Arguments travel as a raw
+  argv array through 'wsl.exe --exec' - no shell on either side - so the
+  cmd.exe '%' refusal of Windows mode does not apply here. Startup runs a
+  few WSL probes, so expect a second or two of overhead. The guest's total
+  vCPUs/RAM are whatever .wslconfig (processors=/memory=) gives the VM;
+  wnice never edits that file - it is the hard ceiling.
 
 exit codes:
   <n>   the command's own exit code
@@ -64,6 +92,9 @@ examples:
       kill the test run and everything it started after 5 minutes
   wnice -p belownormal -c 70 -m 50 -s 1800 -- npm run e2e
       everything at once, still one wrapper process and one job
+  wnice --wsl -c 50 -s 300 -- ./bench.sh
+      run a Linux benchmark capped at half the VM's CPU, killed after
+      5 minutes (exit 124)
 
 The single-purpose tools idle, belownormal, abovenormal, high, realtime,
 capc, capt, capm, caps and capn are this binary with one limit each, and
@@ -282,6 +313,7 @@ mod tests {
             "--memory",
             "--procs",
             "--timeout",
+            "--wsl",
             "--help",
             "--version",
         ] {

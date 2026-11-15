@@ -97,8 +97,130 @@ e.g. `caps 600 bash -c 'node /c/proj/run.js'` fails with
 `Cannot find module`. Call the `.exe` directly (`caps.exe ...`) when that
 matters.
 
-WSL is not supported: a WSL-side npm refuses this package
-(`"os": ["win32"]`). Install through Windows Node/npm.
+The npm package itself installs on Windows only (a WSL-side npm refuses it,
+`"os": ["win32"]`) — install through Windows Node/npm. Launching commands
+*into* a WSL2 distro from Windows is a different matter and is supported by
+`wnice --wsl`; see "WSL mode" below.
+
+## WSL mode
+
+`wnice --wsl[=<distro>] [options] -- <command> [args...]` runs the command
+inside a WSL2 distro. Why a separate mode: Windows mode's Job Object cannot
+limit Linux processes — they run inside the WSL2 VM, invisible to Job
+Objects. This mode translates the same wnice flags into systemd/cgroup-v2
+constraints *inside the guest* instead: the command runs as the distro's
+default user under a transient systemd scope started by root (root is only
+used to start it — `systemd-run --scope` supplies the limits, `nice -n` sets
+the nice level, `runuser -u` drops back to the user):
+
+```
+wnice --wsl -p idle -c 50 -t 4 -m 50 -n 64 -s 600 -- npm run build
+```
+
+| Option | Becomes in the guest |
+| --- | --- |
+| `-c, --cpu <1-100>` | `CPUQuota=<N*vcpu>%` — N percent of **all** guest vCPUs (from `nproc --all`), so 50 on a 16-vCPU VM is `CPUQuota=800%` |
+| `-p, --priority <class>` | nice 19/10/0/-5/-20 plus CPUWeight 1/50/100/500/10000 for idle/belownormal/normal/abovenormal/high; `realtime` is **refused** (exit 1) — the Linux nice/cgroup-weight model has no realtime band, and unlike Windows mode there is no silent downgrade |
+| `-m, --memory <size>` | `MemoryMax` — percent of the **guest's** RAM (from `/proc/meminfo`), or `512m`/`2g` byte sizes |
+| `-t, --threads <n>` | `AllowedCPUs=0-<n-1>` — the first N guest vCPUs; N greater than the guest's vCPU count is refused |
+| `-n, --procs <n>` | `TasksMax=<n>` |
+| `-s, --timeout <seconds>` | `RuntimeMaxSec=<N>ms` plus `KillSignal=SIGKILL`; wnice exits 124 (see "Timeout" below) |
+
+Exit codes follow the Windows-mode conventions: the command's own exit code,
+`124` on timeout, `1` for usage/precheck errors.
+
+### Requirements (each checked up front)
+
+Every precheck failure prints a clear stderr message and exits `1` — no flag
+is ever silently dropped:
+
+- `wsl.exe` present (looked up in `System32`).
+- The distro exists (matched exactly, then case-insensitively; a miss lists
+  the available names) and is **WSL2** — WSL1 is refused.
+- systemd as PID 1 (otherwise: set `[boot] systemd=true` in
+  `/etc/wsl.conf` and restart WSL).
+- cgroup v2 (`/sys/fs/cgroup/cgroup.controllers` non-empty).
+- `systemd-run` available.
+- The distro's default user is resolvable (`id -un`).
+- A dry-run of the exact launch chain (`nice -n 1 runuser -u <user> --
+  /bin/true`) succeeds.
+- The current Windows directory, translated to `/mnt/<drive>/...`, exists in
+  the guest (`test -d`).
+
+### Working directory
+
+The command starts in the current Windows directory translated to
+`/mnt/<drive>/...` (drive letter lowercased, backslashes to slashes), passed
+to `wsl.exe` via `--cd`. UNC paths are refused (there is no verifiable
+guest mapping for them), and if the translated directory is not visible in
+the guest (drive not mounted), the run is refused.
+
+### Launch shape
+
+The exact command wnice builds — useful to know what to look for in
+`systemctl` and process listings:
+
+```
+wsl.exe [-d <distro>] -u root --cd /mnt/<drive>/... --exec systemd-run \
+  --scope --quiet --collect --unit=wnice-<pid>-<ms> \
+  -p CPUQuota=... -p CPUWeight=... -p MemoryMax=... -p AllowedCPUs=... \
+  -p TasksMax=... -p RuntimeMaxSec=... -p KillSignal=SIGKILL \
+  -- nice -n <nice> runuser -u <user> -- <command> [args...]
+```
+
+(Each `-p` line above appears only when the corresponding flag was given.)
+
+### Argument safety
+
+The whole chain travels as an argv **array**: `wsl.exe --exec` on the
+Windows side and systemd-run/runuser `--` argv passthrough in the guest —
+there is **no shell on either side**. `;`, `&`, `|`, `$()`, backticks,
+quotes, spaces, `%`, empty strings and non-ASCII all arrive as verbatim
+separate arguments, so the Windows-mode cmd.exe `%` refusal does not apply
+here. One honest caveat: wsl.exe's argument relay may drop empty-string
+arguments (pending verification on real WSL; there is a gated integration
+test for it).
+
+### Timeout
+
+`-s` becomes `RuntimeMaxSec` with `KillSignal=SIGKILL`: at the deadline
+systemd SIGKILLs the scope's whole cgroup — every process in it, including
+`setsid`'d daemons — which is stronger than `timeout(1)`'s process-group
+kill. wnice maps the deadline to exit `124` by wall clock on the Windows
+side, and the same race class as Windows `caps` applies: a command that
+self-exits within roughly the relay overhead (hundreds of ms) of the
+deadline can be reported as 124.
+
+If wnice itself is killed, the scope keeps running under the guest's
+systemd with its limits still attached — the same contract as the
+Windows-mode daemon behavior. `--collect` garbage-collects finished scopes;
+a still-running leftover is cleaned up with `systemctl stop wnice-*.scope`
+(or `systemctl reset-failed` for dead ones).
+
+### Startup overhead
+
+Launching runs 7-9 short `wsl.exe` probes first — a second or two, more on
+the first call, which may boot the VM. Each probe is capped at 120 s, so a
+wedged VM cannot hang wnice forever.
+
+### `.wslconfig` is the hard ceiling
+
+The guest VM's total vCPUs/RAM come from `.wslconfig` (`processors=` and
+`memory=`); those values are the ceiling every `-c`/`-t`/`-m` percent is
+computed against (e.g. `wnice --wsl -c 50 -t 16 -- ...` on a
+`processors=16`, `memory=23GB` VM means `CPUQuota=800%` of 16 vCPUs and the
+first 16 guest vCPUs). wnice never reads or edits `.wslconfig` — changing
+the VM's size is your manual step.
+
+### Checking it by hand
+
+- `wnice --wsl -s 3 -- sleep 30` — exits 124 in about 3 seconds.
+- `wnice --wsl -c 50 -- bash -c "while :; do :; done"` — then, in another
+  terminal: `wsl -u root systemctl status wnice-*.scope` shows the scope
+  with `CPUQuota=` (half the VM's total vCPU capacity) while it runs.
+- `wnice --wsl -- /bin/true` — exits 0.
+- `wnice --wsl=missing -- /bin/true` — exits 1 with a
+  `WSL distribution 'missing' not found (available: ...)` message.
 
 ## Tools
 

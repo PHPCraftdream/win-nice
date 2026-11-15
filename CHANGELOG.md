@@ -4,11 +4,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Release engineering and repository hygiene. No tool behavior changes: `src/`,
-the installer logic and the runtime dependency count (zero) are untouched.
+Repository hygiene and release engineering, plus a new WSL mode. The installer
+logic is untouched and the runtime dependency count stays zero.
 
 ### Added
 
+- `wnice --wsl[=<distro>] [options] -- <command> [args...]`: run the command
+  inside a WSL2 distro as its default user, under a transient systemd scope
+  started by root. The wnice flags map to cgroup-v2 properties in the guest
+  (`-c` CPUQuota, `-p` nice/CPUWeight, `-m` MemoryMax, `-t` AllowedCPUs,
+  `-n` TasksMax, `-s` RuntimeMaxSec + cgroup-wide SIGKILL, exit 124).
+  Every requirement is prechecked up front with a clear error (WSL2,
+  systemd as PID 1, cgroup v2, systemd-run, default user, guest-visible
+  cwd); `-p realtime` is refused loudly (the Linux nice/weight model has no
+  realtime band). Windows mode is unchanged; arguments travel as a raw argv
+  array with no shell on either side, so the cmd.exe `%` refusal does not
+  apply.
 - CI runs the build/test matrix on explicit `windows-2022` and `windows-2025`
   runner images (`fail-fast: false`) instead of the floating `windows-latest`
   image only.

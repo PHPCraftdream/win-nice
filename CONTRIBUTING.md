@@ -20,6 +20,24 @@ npm run test:pester   # the installed tools driven from PowerShell, a few second
 `bin/wnice.exe` is never committed: CI builds it, and `npm pack` refuses to
 run without it. End users never compile anything.
 
+### WSL integration tests (manual, real WSL2 required)
+
+`tests/wsl_integration.rs` launches a real distro, so it is skipped unless
+`WNICE_TEST_WSL=1` is set — CI (windows-latest) stays green without it.
+Run it manually on a WSL2-capable machine:
+
+```
+set WNICE_TEST_WSL=1
+cargo test --locked --test wsl_integration
+```
+
+`WNICE_TEST_WSL_DISTRO=<name>` optionally selects which distro to use
+(otherwise the default one). The machine needs: WSL2 (WSL1 refused),
+systemd as PID 1 (`[boot] systemd=true` in `/etc/wsl.conf`), cgroup v2,
+`systemd-run`, `runuser`/`nice`, and the checkout on a drive visible in the
+guest (`/mnt/<drive>/...`), since the tests run from the translated current
+directory.
+
 Both npm test scripts run inside `scripts/lib/guarded.ps1`: a private hidden desktop
 (no test window ever reaches the screen), one Job Object with a live-process cap
 (100 for `npm test`, 60 for Pester), Idle priority for the whole tree, a
@@ -75,6 +93,11 @@ key under `HKCU:\Software\WinNiceTest`.
   never by viewing a padded `repr(C)` struct as raw bytes.
 - Bare command names are resolved by `launch::resolve_bare_name` from absolute
   PATH entries only - never from the current directory.
+- The WSL engine (`wnice --wsl`) lives in `src/run/wsl` as pure mapping
+  logic (`compose`) plus a `WslExec` seam, so the flag → systemd-property
+  mapping is unit-tested without WSL; only the probe flow touches real
+  `wsl.exe`, and the integration tests exercising it are gated behind
+  `WNICE_TEST_WSL=1`.
 - The installer writes `wnice.exe`, one hardlink per tool name and the Git
   Bash shims; it only ever deletes or replaces files it can prove are its own
   (exact binary bytes, generated shim text, or the `wnice.exe.managed`
