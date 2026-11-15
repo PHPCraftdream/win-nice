@@ -139,13 +139,18 @@ pub fn decode_wsl_output(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// Decode UTF-16LE bytes (an odd trailing byte is dropped by
-/// `chunks_exact`), replacing invalid units per the lossy contract.
+/// Decode UTF-16LE bytes (an odd trailing byte is dropped), replacing
+/// invalid units per the lossy contract. Hand-rolled pair iteration:
+/// `chunks_exact(2)` trips clippy's chunks_exact_to_as_chunks lint on new
+/// stable, and its suggested fix `as_chunks` needs Rust 1.88 while this
+/// crate's MSRV is 1.87.
 fn utf16le_lossy(bytes: &[u8]) -> String {
-    let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|p| u16::from_le_bytes([p[0], p[1]]))
-        .collect();
+    let mut units = Vec::with_capacity(bytes.len() / 2);
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        units.push(u16::from_le_bytes([bytes[i], bytes[i + 1]]));
+        i += 2;
+    }
     String::from_utf16_lossy(&units)
 }
 
