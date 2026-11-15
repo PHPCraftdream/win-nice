@@ -4,7 +4,9 @@
 
 use super::*;
 use crate::{Child, Handle};
-use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::Mutex;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum Call {
@@ -28,37 +30,50 @@ pub(crate) enum Call {
     GetExitCode,
     TerminateProcess,
     TerminateJobObject,
+    CreatePort,
+    AssociatePort,
+    OpenProcess {
+        pid: u32,
+        access: u32,
+    },
+    SetPriorityClass {
+        class: u32,
+    },
 }
 
 pub(crate) struct FakeSys {
-    pub(crate) handles_minted: Cell<u64>,
-    calls: RefCell<Vec<Call>>,
+    pub(crate) handles_minted: AtomicU64,
+    calls: Mutex<Vec<Call>>,
     /// Each entry fails the (skip+1)-th NEXT call to the named fn, once,
     /// with `code`; earlier calls pass through untouched.
-    fail: RefCell<Vec<(&'static str, u32, u32)>>,
-    next_handle: Cell<u64>,
+    fail: Mutex<Vec<(&'static str, u32, u32)>>,
+    next_handle: AtomicU64,
     wait_result: Result<u32, u32>,
     exit_time: i64,
     /// When set, get_process_times returns (recorded timer due + delta) —
     /// lets tie-break tests express exit time relative to the deadline
     /// the run itself computed.
     exit_time_delta: Option<i64>,
-    recorded_due: Cell<i64>,
+    recorded_due: AtomicI64,
     exit_code: u32,
+    /// Job completion messages (message id, pid) returned in order by
+    /// get_queued_completion_status.
+    boost_queue: Mutex<VecDeque<(u32, usize)>>,
 }
 
 impl FakeSys {
     pub(crate) fn new() -> Self {
         FakeSys {
-            calls: RefCell::new(Vec::new()),
-            fail: RefCell::new(Vec::new()),
-            next_handle: Cell::new(0x1000_0000),
-            handles_minted: Cell::new(0),
+            calls: Mutex::new(Vec::new()),
+            fail: Mutex::new(Vec::new()),
+            next_handle: AtomicU64::new(0x1000_0000),
+            handles_minted: AtomicU64::new(0),
             wait_result: Ok(0),
             exit_time: 0,
             exit_time_delta: None,
-            recorded_due: Cell::new(0),
+            recorded_due: AtomicI64::new(0),
             exit_code: 0,
+            boost_queue: Mutex::new(VecDeque::new()),
         }
     }
     pub(crate) fn fail_next(self, name: &'static str, code: u32) -> Self {
@@ -66,7 +81,7 @@ impl FakeSys {
     }
     /// Fail the (skip+1)-th next call to `name` (0 = the very next one).
     pub(crate) fn fail_nth(self, name: &'static str, skip: u32, code: u32) -> Self {
-        self.fail.borrow_mut().push((name, skip, code));
+        self.fail.lock().unwrap().push((name, skip, code));
         self
     }
     pub(crate) fn wait_on(mut self, index: u32) -> Self {
@@ -87,23 +102,34 @@ impl FakeSys {
         self.exit_time_delta = Some(delta);
         self
     }
+    /// Queue a job completion message (message id, pid) for
+    /// get_queued_completion_status to return, in order.
+    #[allow(dead_code)] // used by the priority booster chunk's tests
+    pub(crate) fn queue_boost(mut self, msg: u32, pid: usize) -> Self {
+        self.boost_queue.get_mut().unwrap().push_back((msg, pid));
+        self
+    }
     pub(crate) fn handle(&self) -> Handle {
-        self.handles_minted.set(self.handles_minted.get() + 1);
-        let v = self.next_handle.get() + 1;
-        self.next_handle.set(v);
+        self.handles_minted.fetch_add(1, Ordering::SeqCst);
+        let v = self.next_handle.fetch_add(1, Ordering::SeqCst) + 1;
         Handle::from_raw_no_close(v as usize as *mut core::ffi::c_void)
     }
     pub(crate) fn log(&self, c: Call) {
-        self.calls.borrow_mut().push(c);
+        self.calls.lock().unwrap().push(c);
     }
     pub(crate) fn take(&self) -> Vec<Call> {
-        self.calls.borrow_mut().drain(..).collect()
+        self.calls.lock().unwrap().drain(..).collect()
     }
     pub(crate) fn count(&self, pred: impl Fn(&Call) -> bool) -> usize {
-        self.calls.borrow().iter().filter(|c| pred(c)).count()
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| pred(c))
+            .count()
     }
     pub(crate) fn check(&self, name: &str) -> Result<(), u32> {
-        let mut q = self.fail.borrow_mut();
+        let mut q = self.fail.lock().unwrap();
         if let Some(pos) = q.iter().position(|(n, _, _)| *n == name) {
             let (_, skip, code) = q[pos];
             if skip > 0 {
@@ -196,7 +222,7 @@ impl Sys for FakeSys {
     }
     fn set_waitable_timer(&self, _h: &Handle, due: i64) -> Result<(), u32> {
         self.check("SetWaitableTimer")?;
-        self.recorded_due.set(due);
+        self.recorded_due.store(due, Ordering::SeqCst);
         self.log(Call::SetTimer { due });
         Ok(())
     }
@@ -209,7 +235,7 @@ impl Sys for FakeSys {
         self.check("GetProcessTimes")?;
         self.log(Call::GetProcessTimes);
         if let Some(d) = self.exit_time_delta {
-            Ok(self.recorded_due.get() + d)
+            Ok(self.recorded_due.load(Ordering::SeqCst) + d)
         } else {
             Ok(self.exit_time)
         }
@@ -237,5 +263,36 @@ impl Sys for FakeSys {
     }
     fn system_directory(&self) -> String {
         "C:\\Windows\\System32".to_string()
+    }
+    fn create_completion_port(&self) -> Result<Handle, u32> {
+        self.check("CreateIoCompletionPort")?;
+        self.log(Call::CreatePort);
+        Ok(self.handle())
+    }
+    fn associate_job_with_completion_port(&self, _job: &Handle, _port: &Handle) -> Result<(), u32> {
+        self.check("AssociateJobWithCompletionPort")?;
+        self.log(Call::AssociatePort);
+        Ok(())
+    }
+    fn get_queued_completion_status(
+        &self,
+        _port: &Handle,
+        _timeout_ms: u32,
+    ) -> Result<(u32, usize), u32> {
+        self.check("GetQueuedCompletionStatus")?;
+        match self.boost_queue.lock().unwrap().pop_front() {
+            Some(m) => Ok(m),
+            None => Err(crate::WAIT_TIMEOUT),
+        }
+    }
+    fn open_process(&self, pid: u32, access: u32) -> Result<Handle, u32> {
+        self.check("OpenProcess")?;
+        self.log(Call::OpenProcess { pid, access });
+        Ok(self.handle())
+    }
+    fn set_priority_class(&self, _p: &Handle, class: u32) -> Result<(), u32> {
+        self.check("SetPriorityClass")?;
+        self.log(Call::SetPriorityClass { class });
+        Ok(())
     }
 }

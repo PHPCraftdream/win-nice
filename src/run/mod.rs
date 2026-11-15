@@ -4,24 +4,31 @@
 //! extended limits -> (optional) CPU-rate cap -> launch suspended -> assign to
 //! job -> resume -> absolute-FILETIME waitable-timer wait -> tie-break by
 //! kernel exit time -> timeout kill (exit 124) or exit-code propagation with a
-//! best-effort release of the kill-on-close guard.
+//! best-effort release of the kill-on-close guard. When `cfg.wsl` is set, the whole
+//! engine below is bypassed by `run::wsl` (a systemd scope in a WSL2 distro).
 //!
 //! Priority probing design (the two-step variant): when `cfg.priority` is
-//! set, the extended limits are applied FIRST WITHOUT the priority flag/class,
-//! then a second apply WITH them probes whether the job accepts tree-wide
-//! priority. A 1314 (ERROR_PRIVILEGE_NOT_HELD) keeps the no-priority version,
-//! emits one stderr note, and ORs the priority class into CreateProcess flags
-//! so the root process still gets it (realtime downgrades to High = 0x80, as
-//! in the existing tools). Any other error from the with-priority probe is a
-//! real failure. Cost: two `SetInformationJobObject` calls when priority is
-//! requested, one otherwise — cheap, and it makes the "job refused priority"
-//! case unambiguous (the no-priority baseline is already live, so the probe
-//! result alone decides).
+//! set without `--boost`, the extended limits are applied FIRST WITHOUT the
+//! priority flag/class, then a second apply WITH them probes whether the job
+//! accepts tree-wide priority. A 1314 (ERROR_PRIVILEGE_NOT_HELD) keeps the
+//! no-priority version and emits one stderr note; on an ABOVE-NORMAL class it
+//! also starts the booster (job + completion port + a per-process
+//! SetPriorityClass thread, see `booster`), and the root process still gets
+//! the class via its creation flags. The root-only fallback (realtime
+//! downgrades to High = 0x80, as in the existing tools) remains for
+//! below-normal classes and as graceful degradation when booster setup fails —
+//! only `--boost` turns setup failure into a hard error, and it skips the
+//! probe entirely. Any other error from the with-priority probe is a real
+//! failure. Cost: two `SetInformationJobObject` calls when priority is
+//! requested without `--boost`, one otherwise — cheap, and it makes the "job
+//! refused priority" case unambiguous (the no-priority baseline is already
+//! live, so the probe result alone decides).
 
 use crate::launch;
 use crate::limits;
 use crate::win32_err;
 use crate::{Config, Sys};
+use std::sync::Arc;
 
 /// WSL mode: the command runs inside a WSL2 distro under a systemd scope
 /// instead of in a Job Object. Public so `Config` can name its mode type.
@@ -59,21 +66,23 @@ fn append_kill_failure(msg: &mut String, code: u32) {
     msg.push_str(&code.to_string());
 }
 
-pub fn run(cfg: &Config, sys: &dyn Sys) -> i32 {
+pub fn run(cfg: &Config, sys: Arc<dyn Sys>) -> i32 {
     run_with_writer(cfg, sys, &mut |msg| eprintln!("{msg}"))
 }
 
-/// Core of [`run`] with an injectable stderr writer, for tests.
-pub fn run_with_writer(cfg: &Config, sys: &dyn Sys, err: &mut dyn FnMut(&str)) -> i32 {
+/// Core of [`run`] with an injectable stderr writer, for tests. The `Arc` is
+/// shared with the booster thread when the priority booster starts.
+pub fn run_with_writer(cfg: &Config, sys: Arc<dyn Sys>, err: &mut dyn FnMut(&str)) -> i32 {
     run_with_writer_in(cfg, sys, &launch::path_dirs(), err)
 }
 
 /// Like [`run_with_writer`] but with explicit search directories for bare
 /// command names (the current directory is NEVER searched). Tests inject a
-/// fake list so they don't depend on the real `PATH`.
+/// fake list so they don't depend on the real `PATH`. The `Arc` `Sys` is
+/// shared with the booster thread when the priority booster starts.
 pub fn run_with_writer_in(
     cfg: &Config,
-    sys: &dyn Sys,
+    sys: Arc<dyn Sys>,
     dirs: &[String],
     err: &mut dyn FnMut(&str),
 ) -> i32 {
@@ -84,7 +93,7 @@ pub fn run_with_writer_in(
         return crate::run::wsl::run_wsl(cfg, err);
     }
 
-    let limits = match limits::compose(cfg, sys) {
+    let limits = match limits::compose(cfg, sys.as_ref()) {
         Ok(l) => l,
         Err(msg) => {
             err(&msg);
@@ -116,42 +125,105 @@ pub fn run_with_writer_in(
         err(&win32_err("SetInformationJobObject", code));
         return 1;
     }
-    if let Some(prio) = cfg.priority {
-        let probe_info = limits::extended_limit_info(&limits, true);
-        match sys.set_information_job_object(
-            &job,
-            crate::JobObjectExtendedLimitInformation,
-            &limits::extended_bytes(&probe_info),
-        ) {
-            Ok(()) => {
-                // The with-priority version is what's live on the job now.
-                applied = limits;
-                let class = if prio == crate::PriorityClass::Realtime {
-                    // Existing tools' convention: realtime refused by the job
-                    // silently becomes High.
-                    crate::PriorityClass::High.to_u32()
-                } else {
-                    prio.to_u32()
-                };
-                creation_priority = Some(class);
-            }
-            Err(crate::ERROR_PRIVILEGE_NOT_HELD) => {
-                err(&format!(
-                    "wnice: note: {} priority applies to the root process only (the job refused tree-wide priority: Win32 error 1314)",
-                    format!("{prio:?}").to_lowercase()
-                ));
-                creation_priority = Some(if prio == crate::PriorityClass::Realtime {
-                    crate::PriorityClass::High.to_u32()
-                } else {
-                    prio.to_u32()
-                });
-            }
-            Err(code) => {
-                err(&win32_err("SetInformationJobObject", code));
-                return 1;
-            }
+    // Legacy 1314 handling, shared by the below-normal arm and the booster
+    // degrade path so the note string is defined exactly once: one stderr
+    // note + the class ORed into CreateProcess flags for the root process.
+    fn root_only_fallback(prio: crate::PriorityClass, err: &mut dyn FnMut(&str)) -> u32 {
+        err(&format!(
+            "wnice: note: {} priority applies to the root process only (the job refused tree-wide priority: Win32 error 1314)",
+            format!("{prio:?}").to_lowercase()
+        ));
+        if prio == crate::PriorityClass::Realtime {
+            crate::PriorityClass::High.to_u32()
+        } else {
+            prio.to_u32()
         }
     }
+    // The decision block. The returned booster guard is held for its Drop:
+    // it drops on EVERY return path below (Drop sets the stop flag and joins
+    // the booster thread) — success, timeout and error paths alike; no
+    // explicit shutdown call anywhere.
+    let _booster: Option<booster::BoosterGuard> = if let Some(prio) = cfg.priority {
+        if cfg.boost {
+            // --boost skips the probe entirely: the booster is the mechanism,
+            // and a setup failure is a hard error before anything is launched.
+            let class = booster::boost_class(prio);
+            match booster::BoosterGuard::start(&sys, &job, class) {
+                Ok(guard) => {
+                    err(&booster::booster_note(prio));
+                    creation_priority = Some(class);
+                    Some(guard)
+                }
+                Err(e) => {
+                    let (fn_name, code) = match e {
+                        booster::BoosterSetupError::CreatePort(c) => ("CreateIoCompletionPort", c),
+                        booster::BoosterSetupError::Associate(c) => ("SetInformationJobObject", c),
+                        booster::BoosterSetupError::Thread(c) => ("CreateThread", c),
+                    };
+                    err(&win32_err(fn_name, code));
+                    return 1;
+                }
+            }
+        } else {
+            let probe_info = limits::extended_limit_info(&limits, true);
+            match sys.set_information_job_object(
+                &job,
+                crate::JobObjectExtendedLimitInformation,
+                &limits::extended_bytes(&probe_info),
+            ) {
+                Ok(()) => {
+                    // The with-priority version is what's live on the job now.
+                    applied = limits;
+                    let class = if prio == crate::PriorityClass::Realtime {
+                        // Existing tools' convention: realtime refused by the job
+                        // silently becomes High.
+                        crate::PriorityClass::High.to_u32()
+                    } else {
+                        prio.to_u32()
+                    };
+                    creation_priority = Some(class);
+                    None
+                }
+                Err(crate::ERROR_PRIVILEGE_NOT_HELD) => {
+                    // The job refused tree-wide priority. An ABOVE-NORMAL
+                    // class gets the booster instead (the root process still
+                    // gets the class via its creation flags); a below-normal
+                    // class keeps the legacy root-only fallback, and a failed
+                    // booster setup degrades gracefully to that same
+                    // fallback. Only --boost makes setup failure fatal.
+                    let boostable = matches!(
+                        prio,
+                        crate::PriorityClass::AboveNormal
+                            | crate::PriorityClass::High
+                            | crate::PriorityClass::Realtime
+                    );
+                    if boostable {
+                        let class = booster::boost_class(prio);
+                        match booster::BoosterGuard::start(&sys, &job, class) {
+                            Ok(guard) => {
+                                err(&booster::booster_note(prio));
+                                creation_priority = Some(class);
+                                Some(guard)
+                            }
+                            Err(_) => {
+                                creation_priority = Some(root_only_fallback(prio, err));
+                                None
+                            }
+                        }
+                    } else {
+                        creation_priority = Some(root_only_fallback(prio, err));
+                        None
+                    }
+                }
+                Err(code) => {
+                    err(&win32_err("SetInformationJobObject", code));
+                    return 1;
+                }
+            }
+        }
+    } else {
+        None
+    };
 
     if let Some(p) = applied.cpu_rate {
         let cpu_info = limits::cpu_rate_info(p);
@@ -353,6 +425,7 @@ pub fn run_with_writer_in(
     exit_code as i32
 }
 
+mod booster;
 #[cfg(test)]
 pub(crate) mod fakesys;
 #[cfg(test)]

@@ -4,8 +4,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Repository hygiene and release engineering, plus a new WSL mode. The installer
-logic is untouched and the runtime dependency count stays zero.
+Repository hygiene and release engineering, plus two feature additions: a new
+WSL mode and the priority booster. The installer logic is untouched and the
+runtime dependency count stays zero.
 
 ### Added
 
@@ -20,6 +21,19 @@ logic is untouched and the runtime dependency count stays zero.
   realtime band). Windows mode is unchanged; arguments travel as a raw argv
   array with no shell on either side, so the cmd.exe `%` refusal does not
   apply.
+- `wnice --boost` (requires `-p/--priority`): skip the job priority-limit
+  probe and apply the priority class to every process of the tree via the
+  booster. Documented in `wnice --help`, README.md ("Priority above NORMAL
+  without elevation") and `skills/win-nice/SKILL.md`.
+- The booster itself: the job is associated with an I/O completion port and a
+  watcher thread consumes its notifications, opening each new process
+  (`PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION`) and
+  calling `SetPriorityClass` on it. The new PID arrives in the completion
+  packet's `lpOverlapped` value on `JOB_OBJECT_MSG_NEW_PROCESS` — verified in
+  the W1 no-UAC spike (Windows 10 19045, un-elevated: 92/92 processes
+  boosted, median 0.004 ms per process), which found it differs from the old
+  MSDN wording. Per-process booster errors (process already exited, access
+  denied) are ignored and never change the exit code.
 - CI runs the build/test matrix on explicit `windows-2022` and `windows-2025`
   runner images (`fail-fast: false`) instead of the floating `windows-latest`
   image only.
@@ -38,6 +52,18 @@ logic is untouched and the runtime dependency count stays zero.
 
 ### Changed
 
+- Un-elevated above-normal priorities (`-p abovenormal|high|realtime` and the
+  `abovenormal`/`high`/`realtime` tools) now start the booster when the job
+  refuses the tree-wide priority limit (Win32 error 1314) instead of setting
+  the class on the root process only. The root-only fallback remains for
+  below-normal priorities (job limits need no privilege there) and as
+  graceful degradation when booster setup itself fails; only `--boost` turns
+  a setup failure into a hard error (exit 1). The stderr note changed from
+  `wnice: note: high priority applies to the root process only ...` to
+  `wnice: note: high priority applies to every process in the tree via the
+  booster (job completion port + SetPriorityClass, not a job limit); boost is
+  usually sub-millisecond (up to a few ms in spawn bursts), so very
+  short-lived children may exit before it lands`.
 - CI workflows declare least-privilege `permissions` (`contents: read`,
   raised only where code-scanning uploads need it), cancel outdated
   pull-request runs via `concurrency`, cap every job with `timeout-minutes`,

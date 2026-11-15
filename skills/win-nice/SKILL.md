@@ -29,8 +29,9 @@ wnice -p idle -c 50 -t 4 -m 50 -n 64 -s 600 -- npm run build
 `-p/--priority <idle|belownormal|normal|abovenormal|high|realtime>`,
 `-c/--cpu <1-100>` (= `capc`), `-t/--threads <n>` (= `capt`),
 `-m/--memory <size>` (= `capm`), `-n/--procs <n>` (= `capn`),
-`-s/--timeout <seconds>` (= `caps`, exit 124), `-h`, `-V`. Options end at the
-first non-option token or `--`; the rest goes to the command verbatim. The
+`-s/--timeout <seconds>` (= `caps`, exit 124), `--boost` (with `-p`: run the
+priority booster instead of a job priority limit), `-h`, `-V`. Options end at
+the first non-option token or `--`; the rest goes to the command verbatim. The
 single-purpose tools below are the same machinery with one limit each.
 Every tool prints detailed help with examples for `--help` (`wnice --help`,
 `capc --help`, ...); usage errors exit `1`.
@@ -47,13 +48,20 @@ hold for the *whole* process tree (children and grandchildren).
   boost for the whole tree.
 - `high <command> [args...]` — `HIGH_PRIORITY_CLASS`. Tree-wide only with
   `SeIncreaseBasePriorityPrivilege` (elevated processes have it); otherwise the
-  job refuses (Win32 error 1314) and only the root process gets `HIGH`, with a
-  `wnice: note: ...` line on stderr.
+  job refuses (Win32 error 1314) and the booster applies `HIGH` to every
+  process of the tree (no elevation needed; typical sub-millisecond delay,
+  children run at `NORMAL` until boosted, very short-lived leaves may exit
+  before their boost), with a `wnice: note: ...` line on stderr.
 - `realtime <command> [args...]` — `REALTIME_PRIORITY_CLASS`. **Dangerous**:
   outranks the OS's own input/audio/UI threads: a busy realtime process can
   freeze the whole desktop, the exact failure mode win-nice otherwise exists to
-  prevent. Needs the same privilege as `high`; without it you get `HIGH` on the
-  root process only, with the same stderr note.
+  prevent. Needs the same privilege as `high`; without it the booster applies
+  `HIGH` (realtime downgrades) to every process of the tree, with the same
+  stderr note.
+
+`wnice --boost -p <class>` forces this booster path (requires `-p`);
+below-normal priorities keep using the plain job limit, which needs no
+privilege.
 
 ## Resource limits
 
@@ -139,8 +147,11 @@ through `PATH`, so chaining needs the install directory on `PATH`. Nested Job Ob
 limits do **not** follow one universal "smaller wins" rule: CPU rate
 (`capc`) is relative to its parent job and *multiplies* when nested (`capc 50
 capc 50 ...` ≈ 25% of system CPU, not 50% - see
-[`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information)),
-while memory (`capm`) ceilings apply independently to accounting scopes of
+[`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information))
+, and the same multiplication applies to an outer job you didn't create
+yourself (a CI agent or wrapper shell that job-wraps everything; measured:
+a 10% cap inside a 10% parent ≈ 0.9% of the machine), while memory (`capm`)
+ceilings apply independently to accounting scopes of
 different sizes - a job's committed-memory accounting includes every child
 job's committed memory plus its own process, a child job's accounting
 doesn't see the outer wrapper's process at all - so nested `capm` ceilings

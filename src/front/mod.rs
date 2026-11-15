@@ -21,7 +21,7 @@ fn agent_prefix(stem: &str) -> Option<[&'static str; 2]> {
 
 /// Run the frontend named `stem`; `None` when `stem` is not one.
 pub fn dispatch(stem: &str, args: &[String]) -> Option<i32> {
-    let sys = RealSys;
+    let sys = std::sync::Arc::new(RealSys);
     if help::wants_help(args) {
         if let Some(text) = help::text(stem) {
             println!("{text}");
@@ -31,7 +31,7 @@ pub fn dispatch(stem: &str, args: &[String]) -> Option<i32> {
     if legacy::is_legacy(stem) {
         return Some(
             match legacy::parse(stem, args, sys.logical_processor_count()) {
-                Ok(cfg) => crate::run::run(&cfg, &sys),
+                Ok(cfg) => crate::run::run(&cfg, sys.clone()),
                 Err(usage) => {
                     eprintln!("{usage}");
                     eprintln!("{}", help::hint(stem));
@@ -47,7 +47,7 @@ pub fn dispatch(stem: &str, args: &[String]) -> Option<i32> {
             command,
             ..Config::default()
         };
-        return Some(crate::run::run(&cfg, &sys));
+        return Some(crate::run::run(&cfg, sys.clone()));
     }
     match stem {
         "admin" => Some(admin::main(args)),

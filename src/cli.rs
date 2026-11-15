@@ -16,6 +16,8 @@ options:
   -n, --procs <1-4294967295>
   -s, --timeout <seconds>  (decimal seconds > 0, floored to whole ms, max 4294967294 ms)
   --wsl[=<distro>]   run the command inside WSL2 under a systemd scope (see --help)
+  --boost                  with -p: apply the priority to every process via the
+                           priority booster (see the README), not a job limit
   -h, --help
   -V, --version
 options end at the first non-option token or at '--'; everything after
@@ -207,6 +209,11 @@ pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, String> 
             i += 1;
             continue;
         }
+        if arg == "--boost" {
+            cfg.boost = true;
+            i += 1;
+            continue;
+        }
         let flag: &str = if arg == "-p" || arg == "--priority" {
             "-p/--priority"
         } else if arg == "-c" || arg == "--cpu" {
@@ -276,6 +283,15 @@ pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, String> 
     }
     if want_version {
         return Ok(Action::Version);
+    }
+    if cfg.boost && cfg.wsl.is_some() {
+        return Err(
+            "--boost does not apply to --wsl: the guest priority comes from the WSL cgroup (nice/CPUWeight), not from a Windows job"
+                .to_string(),
+        );
+    }
+    if cfg.boost && cfg.priority.is_none() {
+        return Err("--boost requires -p/--priority".to_string());
     }
     if cfg.command.is_empty() {
         return Err("no command given".to_string());
@@ -573,6 +589,14 @@ mod tests {
     }
 
     #[test]
+    fn boost_flag_sets_config() {
+        let c = run(&["--boost", "-p", "high", "cmd"]);
+        assert!(c.boost);
+        assert_eq!(c.priority, Some(PriorityClass::High));
+        assert_eq!(c.command, vec!["cmd"]);
+    }
+
+    #[test]
     fn wsl_distro() {
         let c = run(&["--wsl=Ubuntu-24.04", "cmd"]);
         assert_eq!(
@@ -627,5 +651,39 @@ mod tests {
             })
         );
         assert_eq!(c.command, vec!["cmd"]);
+    }
+
+    #[test]
+    fn boost_flag_order_insensitive() {
+        let c = run(&["-p", "high", "--boost", "cmd"]);
+        assert!(c.boost);
+    }
+
+    #[test]
+    fn boost_requires_priority() {
+        let e = err(&["--boost", "cmd"]);
+        assert!(!e.is_empty());
+        assert!(e.contains("--boost"));
+        assert!(!err(&["--boost"]).is_empty());
+    }
+
+    #[test]
+    fn boost_after_double_dash_belongs_to_command() {
+        let c = run(&["-p", "high", "--", "--boost"]);
+        assert!(!c.boost);
+        assert_eq!(c.priority, Some(PriorityClass::High));
+        assert_eq!(c.command, vec!["--boost"]);
+    }
+
+    #[test]
+    fn boost_and_wsl_are_incompatible() {
+        let e = err(&["--wsl", "--boost", "-p", "high", "cmd"]);
+        assert!(e.contains("--boost"));
+        assert!(e.contains("--wsl"));
+        let e = err(&["--boost", "-p", "high", "--wsl=Debian-12", "cmd"]);
+        assert!(e.contains("--boost") && e.contains("--wsl"));
+        // Without -p the mode conflict is reported (checked first).
+        let e = err(&["--wsl", "--boost", "cmd"]);
+        assert!(e.contains("--boost") && e.contains("--wsl"));
     }
 }

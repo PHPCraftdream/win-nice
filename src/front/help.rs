@@ -13,9 +13,11 @@ wnice waits for the command and exits with its exit code.
 options:
   -p, --priority <class>   priority class for the whole tree:
                            idle | belownormal | normal | abovenormal | high | realtime
-                           high/realtime need SeIncreaseBasePriorityPrivilege
-                           (elevated shell); without it only the root process
-                           gets HIGH and a note is printed to stderr
+                           high/realtime (and abovenormal) need
+                           SeIncreaseBasePriorityPrivilege (an elevated shell)
+                           for a job-wide limit; without it wnice starts the
+                           priority booster, which applies the class to every
+                           process of the tree itself (see --boost)
   -c, --cpu <1-100>        hard CPU cap, percent of the whole machine's CPU
                            (throttles even when the machine is otherwise idle)
   -t, --threads <n>        run on the first <n> logical processors only
@@ -33,6 +35,11 @@ options:
                            or wsl.exe's default) under a systemd scope; the
                            other options become cgroup v2 limits in the guest
                            (see WSL MODE below)
+  --boost                  skip the job priority limit; apply -p to every
+                           process of the tree via the booster (job completion
+                           port + SetPriorityClass per new process; usually
+                           sub-millisecond, up to a few ms in spawn bursts);
+                           requires -p/--priority
   -h, --help               this help
   -V, --version            print the version
 
@@ -120,8 +127,8 @@ examples:
   {tool} capc 50 cargo test        (chained: {tool} priority plus a 50% CPU cap)"#;
 
 const NOTE_LOW: &str = "\nUse it to keep long builds/tests from making the desktop sluggish.\n";
-const NOTE_HIGH: &str = "\nHIGH/REALTIME as a job limit need SeIncreaseBasePriorityPrivilege\n(an elevated shell). Without it only the root process gets HIGH and a note\nis printed to stderr.\n";
-const NOTE_REALTIME: &str = "\nDANGEROUS: realtime outranks the system's own input, audio and UI threads; a\nbusy realtime process can freeze the whole desktop. Needs\nSeIncreaseBasePriorityPrivilege (an elevated shell); without it only the\nroot process gets HIGH and a note is printed to stderr.\n";
+const NOTE_HIGH: &str = "\nHIGH/REALTIME as a job limit need SeIncreaseBasePriorityPrivilege\n(an elevated shell). Without it the job refuses (Win32 error 1314)\nand the priority booster applies HIGH to every process of the\ntree; a note on stderr says so.\n";
+const NOTE_REALTIME: &str = "\nDANGEROUS: realtime outranks the system's own input, audio and UI threads; a\nbusy realtime process can freeze the whole desktop. Needs\nSeIncreaseBasePriorityPrivilege (an elevated shell); without it the job\nrefuses (Win32 error 1314) and the priority booster applies HIGH to every\nprocess of the tree; a note on stderr says so.\n";
 
 const CAPC: &str = r#"capc - hard CPU cap for a whole process tree
 
@@ -314,6 +321,7 @@ mod tests {
             "--procs",
             "--timeout",
             "--wsl",
+            "--boost",
             "--help",
             "--version",
         ] {
@@ -332,5 +340,14 @@ mod tests {
         assert!(wants_help(&a(&["/?"])));
         assert!(!wants_help(&a(&["cmd", "--help"])));
         assert!(!wants_help(&a(&[])));
+    }
+
+    #[test]
+    fn boost_flag_documented_with_priority_requirement() {
+        let t = text("wnice").unwrap();
+        assert!(t.contains("--boost"));
+        assert!(t.contains("requires -p"));
+        assert!(!text("high").unwrap().contains("root process"));
+        assert!(!text("realtime").unwrap().contains("root process"));
     }
 }

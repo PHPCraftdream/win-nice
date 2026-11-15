@@ -16,6 +16,7 @@
 
 use std::env;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use wnice::run::wsl::{translate_windows_cwd, WslMode};
@@ -86,7 +87,7 @@ macro_rules! gated {
 fn wsl_true_exits_0() {
     gated!();
     let cfg = wsl_cfg(vec!["/bin/true".to_string()]);
-    assert_eq!(run::run(&cfg, &RealSys), 0);
+    assert_eq!(run::run(&cfg, Arc::new(RealSys)), 0);
 }
 
 #[test]
@@ -99,7 +100,7 @@ fn wsl_exit_code_propagates() {
         "-c".to_string(),
         "exit 7".to_string(),
     ]);
-    assert_eq!(run::run(&cfg, &RealSys), 7);
+    assert_eq!(run::run(&cfg, Arc::new(RealSys)), 7);
 }
 
 #[test]
@@ -132,7 +133,7 @@ fn wsl_arguments_reach_the_guest_verbatim() {
         "Ø—日本".to_string(),
         "-n".to_string(),
     ]);
-    let code = run::run(&cfg, &RealSys);
+    let code = run::run(&cfg, Arc::new(RealSys));
     let contents = std::fs::read_to_string(&out).unwrap_or_default();
     cleanup(&out);
     assert_eq!(code, 0);
@@ -170,7 +171,7 @@ fn wsl_working_directory_is_translated() {
         "-c".to_string(),
         format!("pwd > {guest_path}"),
     ]);
-    let code = run::run(&cfg, &RealSys);
+    let code = run::run(&cfg, Arc::new(RealSys));
     let contents = std::fs::read_to_string(&out).unwrap_or_default();
     cleanup(&out);
     assert_eq!(code, 0);
@@ -192,7 +193,7 @@ fn wsl_timeout_returns_124_quickly() {
     let mut cfg = wsl_cfg(vec!["/bin/sleep".to_string(), "30".to_string()]);
     cfg.timeout_ms = Some(2000);
     let started = Instant::now();
-    let code = run::run(&cfg, &RealSys);
+    let code = run::run(&cfg, Arc::new(RealSys));
     let elapsed = started.elapsed();
     assert_eq!(code, 124);
     assert!(
@@ -217,12 +218,13 @@ fn wsl_systemd_accepts_every_mapped_property() {
         threads: Some(1),
         procs: Some(50),
         timeout_ms: Some(60_000),
+        boost: false,
         wsl: Some(WslMode {
             distro: distro_override(),
         }),
         command: vec!["/bin/true".to_string()],
     };
-    assert_eq!(run::run(&cfg, &RealSys), 0);
+    assert_eq!(run::run(&cfg, Arc::new(RealSys)), 0);
 }
 
 #[test]
@@ -234,7 +236,7 @@ fn wsl_unknown_distro_fails_fast() {
         Some("wnice-no-such-distro-xyz"),
         vec!["/bin/true".to_string()],
     );
-    assert_eq!(run::run(&cfg, &RealSys), 1);
+    assert_eq!(run::run(&cfg, Arc::new(RealSys)), 1);
 }
 
 #[test]
@@ -247,5 +249,5 @@ fn wsl_realtime_refused() {
         priority: Some(PriorityClass::Realtime),
         ..cfg
     };
-    assert_eq!(run::run(&cfg, &RealSys), 1);
+    assert_eq!(run::run(&cfg, Arc::new(RealSys)), 1);
 }

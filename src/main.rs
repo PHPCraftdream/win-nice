@@ -12,8 +12,8 @@ fn main() -> ExitCode {
 
     if stem == "wnice" {
         let argv: Vec<String> = std::env::args().skip(1).collect();
-        let sys = wnice::RealSys;
-        match wnice::cli::parse_args(&argv, wnice::Sys::logical_processor_count(&sys)) {
+        let sys = std::sync::Arc::new(wnice::RealSys);
+        match wnice::cli::parse_args(&argv, wnice::Sys::logical_processor_count(&*sys)) {
             Ok(wnice::cli::Action::Help) => {
                 println!("{}", wnice::front::help::text("wnice").unwrap_or_default());
                 return ExitCode::from(0);
@@ -23,7 +23,7 @@ fn main() -> ExitCode {
                 return ExitCode::from(0);
             }
             Ok(wnice::cli::Action::Run(cfg)) => {
-                let code = wnice::run::run(&cfg, &sys);
+                let code = wnice::run::run(&cfg, sys);
                 // process::exit passes the full 32-bit code on Windows, so a
                 // negative NTSTATUS from run() passes through bit-cast.
                 std::process::exit(code);

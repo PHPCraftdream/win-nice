@@ -54,13 +54,13 @@ pub fn main(args: &[String]) -> i32 {
         eprintln!("{}", super::help::hint("admin"));
         return 1;
     }
-    let sys = RealSys;
+    let sys = std::sync::Arc::new(RealSys);
     if native::is_elevated() {
         let cfg = Config {
             command: args.to_vec(),
             ..Config::default()
         };
-        return crate::run::run(&cfg, &sys);
+        return crate::run::run(&cfg, sys);
     }
     let (file, params) = match route(&path_dirs(), args) {
         Route::Direct { file, params } => (file, params),

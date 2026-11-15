@@ -22,12 +22,12 @@ pub struct Handle {
 
 /// Test-only drop counter: incremented once per fake (no-close) handle drop,
 /// so tests can assert RAII single-close behavior without real kernel objects.
+/// A global atomic (not thread-local) because the priority booster thread
+/// drops fake handles on its own thread.
 #[cfg(test)]
 pub(crate) mod handle_test {
-    use std::cell::Cell;
-    thread_local! {
-        pub static FAKE_HANDLE_DROPS: Cell<u32> = const { Cell::new(0) };
-    }
+    pub static FAKE_HANDLE_DROPS: std::sync::atomic::AtomicU32 =
+        std::sync::atomic::AtomicU32::new(0);
 }
 
 impl Handle {
@@ -72,7 +72,7 @@ impl Drop for Handle {
         }
         #[cfg(test)]
         if !self.close_on_drop {
-            handle_test::FAKE_HANDLE_DROPS.with(|c| c.set(c.get() + 1));
+            handle_test::FAKE_HANDLE_DROPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         self.raw = std::ptr::null_mut();
     }
@@ -122,6 +122,7 @@ pub struct Config {
     pub memory: Option<MemSpec>,
     pub procs: Option<u32>,
     pub timeout_ms: Option<u32>,
+    pub boost: bool,
     pub command: Vec<String>,
     /// WSL mode: when set, `run` dispatches to the WSL guest engine
     /// (`run::wsl`) instead of the Job Object engine. `None` (the default)
@@ -144,14 +145,27 @@ pub const JOB_OBJECT_CPU_RATE_CONTROL_ENABLE: u32 = 0x1;
 pub const JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP: u32 = 0x4;
 pub const CREATE_SUSPENDED: u32 = 0x4;
 pub const ERROR_PRIVILEGE_NOT_HELD: u32 = 1314;
+// windows-sys 0.59 does not export the JOB_OBJECT_MSG_* constants (the W1
+// spike used the literal 6); message id 4 is ACTIVE_PROCESS_ZERO, NOT
+// END_OF_JOB_TIME.
+pub const JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO: u32 = 4;
+pub const JOB_OBJECT_MSG_NEW_PROCESS: u32 = 6;
+#[allow(non_upper_case_globals)]
+pub const JobObjectAssociateCompletionPortInformation: u32 = 7;
+pub const PROCESS_SET_INFORMATION: u32 = 0x0200;
+pub const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+/// GetQueuedCompletionStatus timeout: no packet within the deadline.
+pub const WAIT_TIMEOUT: u32 = 0x102;
 
 /// Format a Win32 error as `<Fn> failed: <code>`.
 pub fn win32_err(fn_name: &str, code: u32) -> String {
     format!("{fn_name} failed: {code}")
 }
 
-/// Abstraction over the fallible native calls (object-safe).
-pub trait Sys {
+/// Abstraction over the fallible native calls (object-safe). Implementations
+/// must be Send + Sync because the priority booster thread uses the same
+/// implementation.
+pub trait Sys: Send + Sync {
     fn create_job_object(&self) -> Result<Handle, u32>;
     fn set_information_job_object(
         &self,
@@ -177,12 +191,34 @@ pub trait Sys {
     fn global_memory_status_ex(&self) -> Result<u64, u32>;
     fn logical_processor_count(&self) -> u32;
     fn system_directory(&self) -> String;
+    /// Create a new I/O completion port (the booster's job-message queue).
+    fn create_completion_port(&self) -> Result<Handle, u32>;
+    /// Associate a Job Object with a completion port so job notifications are
+    /// queued there (`JOBOBJECT_ASSOCIATE_COMPLETION_PORT` via
+    /// SetInformationJobObject). The key is 0 and unused.
+    fn associate_job_with_completion_port(&self, job: &Handle, port: &Handle) -> Result<(), u32>;
+    /// Dequeue one job notification from a completion port. `Ok((message, pid))`
+    /// is a dequeued packet where `message` is the JOB_OBJECT_MSG_* id (read from
+    /// the transferred-byte-count out parameter) and `pid` is the new process id
+    /// (read from the lpOverlapped VALUE, not from what it points at — the
+    /// runtime behavior confirmed by the W1 spike differs from the old MSDN
+    /// wording). `Err(WAIT_TIMEOUT)` means no packet arrived within `timeout_ms`;
+    /// any other error is a real port failure.
+    fn get_queued_completion_status(
+        &self,
+        port: &Handle,
+        timeout_ms: u32,
+    ) -> Result<(u32, usize), u32>;
+    /// Open a process by id with the given access mask.
+    fn open_process(&self, pid: u32, access: u32) -> Result<Handle, u32>;
+    /// Set a process's priority class (`class` is a PRIORITY_CLASS_* value).
+    fn set_priority_class(&self, p: &Handle, class: u32) -> Result<(), u32>;
 }
 
 /// Real implementation backed by windows-sys.
 pub struct RealSys;
 
-use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject, TerminateJobObject,
 };
@@ -190,9 +226,12 @@ use windows_sys::Win32::System::SystemInformation::{
     GetSystemInfo, GlobalMemoryStatusEx, MEMORYSTATUSEX, SYSTEM_INFO,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, CreateWaitableTimerW, GetExitCodeProcess, GetProcessTimes, ResumeThread,
-    SetWaitableTimer, TerminateProcess, WaitForMultipleObjects, INFINITE, PROCESS_INFORMATION,
-    STARTUPINFOW,
+    CreateProcessW, CreateWaitableTimerW, GetExitCodeProcess, GetProcessTimes, OpenProcess,
+    ResumeThread, SetPriorityClass, SetWaitableTimer, TerminateProcess, WaitForMultipleObjects,
+    INFINITE, PROCESS_INFORMATION, STARTUPINFOW,
+};
+use windows_sys::Win32::System::IO::{
+    CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED,
 };
 
 impl Sys for RealSys {
@@ -422,6 +461,103 @@ impl Sys for RealSys {
                 return String::new();
             }
             String::from_utf16_lossy(&buf[..len as usize])
+        }
+    }
+
+    fn create_completion_port(&self) -> Result<Handle, u32> {
+        unsafe {
+            // NULL template/file handle + 0 max-threads creates a NEW port.
+            let h = CreateIoCompletionPort(INVALID_HANDLE_VALUE, std::ptr::null_mut(), 0, 0);
+            if h.is_null() {
+                Err(windows_sys::Win32::Foundation::GetLastError())
+            } else {
+                Ok(Handle::from_raw(h))
+            }
+        }
+    }
+
+    fn associate_job_with_completion_port(&self, job: &Handle, port: &Handle) -> Result<(), u32> {
+        // Serialize JOBOBJECT_ASSOCIATE_COMPLETION_PORT field by field into a
+        // zeroed buffer (same discipline as limits::extended_bytes — the struct's
+        // repr(C) padding must never be viewed as raw bytes).
+        use std::mem::{offset_of, size_of};
+        use windows_sys::Win32::System::JobObjects::JOBOBJECT_ASSOCIATE_COMPLETION_PORT as A;
+        let mut buf = vec![0u8; size_of::<A>()];
+        let put = |buf: &mut [u8], off: usize, bytes: &[u8]| {
+            buf[off..off + bytes.len()].copy_from_slice(bytes);
+        };
+        // CompletionKey is 0 (unused); CompletionPort is the port handle. Both
+        // fields are pointer-sized; write their raw usize values.
+        put(
+            &mut buf,
+            offset_of!(A, CompletionKey),
+            &0usize.to_le_bytes(),
+        );
+        put(
+            &mut buf,
+            offset_of!(A, CompletionPort),
+            &(port.raw() as usize).to_le_bytes(),
+        );
+        unsafe {
+            if SetInformationJobObject(
+                job.raw(),
+                crate::JobObjectAssociateCompletionPortInformation as i32,
+                buf.as_ptr().cast(),
+                buf.len() as u32,
+            ) == 0
+            {
+                Err(windows_sys::Win32::Foundation::GetLastError())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn get_queued_completion_status(
+        &self,
+        port: &Handle,
+        timeout_ms: u32,
+    ) -> Result<(u32, usize), u32> {
+        unsafe {
+            let mut bytes: u32 = 0;
+            let mut key: usize = 0;
+            let mut overlapped: *mut OVERLAPPED = std::ptr::null_mut();
+            if GetQueuedCompletionStatus(
+                port.raw(),
+                &mut bytes,
+                &mut key,
+                &mut overlapped,
+                timeout_ms,
+            ) == 0
+            {
+                Err(windows_sys::Win32::Foundation::GetLastError())
+            } else {
+                // The job queues the NEW process id as the lpOverlapped VALUE
+                // (W1 spike, 92/92 processes): cast the pointer value, never
+                // dereference it.
+                Ok((bytes, overlapped as usize))
+            }
+        }
+    }
+
+    fn open_process(&self, pid: u32, access: u32) -> Result<Handle, u32> {
+        unsafe {
+            let h = OpenProcess(access, 0, pid);
+            if h.is_null() {
+                Err(windows_sys::Win32::Foundation::GetLastError())
+            } else {
+                Ok(Handle::from_raw(h))
+            }
+        }
+    }
+
+    fn set_priority_class(&self, p: &Handle, class: u32) -> Result<(), u32> {
+        unsafe {
+            if SetPriorityClass(p.raw(), class) == 0 {
+                Err(windows_sys::Win32::Foundation::GetLastError())
+            } else {
+                Ok(())
+            }
         }
     }
 }

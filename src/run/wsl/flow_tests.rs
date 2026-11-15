@@ -127,6 +127,7 @@ fn all_flags_cfg() -> Config {
         threads: Some(4),
         procs: Some(64),
         timeout_ms: Some(2500),
+        boost: false,
         command: vecs(&["sleep", "1"]),
     }
 }

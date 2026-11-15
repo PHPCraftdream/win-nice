@@ -2,6 +2,7 @@
 use super::fakesys::{Call, FakeSys};
 use super::*;
 use crate::PriorityClass;
+use std::sync::Arc;
 
 static PROBE_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -18,15 +19,15 @@ fn probe_dir(files: &[&str]) -> (Vec<String>, std::path::PathBuf) {
     (vec![d.to_string_lossy().into_owned()], d)
 }
 
-fn collect_in(sys: &FakeSys, cfg: &Config, dirs: &[String]) -> (i32, Vec<String>) {
+fn collect_in(sys: &Arc<FakeSys>, cfg: &Config, dirs: &[String]) -> (i32, Vec<String>) {
     let mut msgs: Vec<String> = Vec::new();
-    let code = run_with_writer_in(cfg, sys, dirs, &mut |m| msgs.push(m.to_string()));
+    let code = run_with_writer_in(cfg, sys.clone(), dirs, &mut |m| msgs.push(m.to_string()));
     (code, msgs)
 }
 
 /// Like `collect_in` but with a fresh probe dir holding an empty
 /// `tool.exe`; returns (code, msgs, resolved abs path of tool.exe).
-fn collect(sys: &FakeSys, cfg: &Config) -> (i32, Vec<String>, String) {
+fn collect(sys: &Arc<FakeSys>, cfg: &Config) -> (i32, Vec<String>, String) {
     let (dirs, dir) = probe_dir(&["tool.exe"]);
     let abs = dir.join("tool.exe").to_string_lossy().into_owned();
     let (code, msgs) = collect_in(sys, cfg, &dirs);
@@ -53,13 +54,13 @@ fn name(c: &Call) -> String {
 /// [`assert_handles_balance`] after `collect` returns (all minted handles
 /// have dropped by then).
 fn reset_handle_drops() {
-    crate::handle_test::FAKE_HANDLE_DROPS.with(|c| c.set(0));
+    crate::handle_test::FAKE_HANDLE_DROPS.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Assert the drops counter equals the FakeSys's minted-handle count.
 fn assert_handles_balance(sys: &FakeSys, ctx: &str) {
-    let minted = sys.handles_minted.get();
-    let drops = crate::handle_test::FAKE_HANDLE_DROPS.with(|c| c.get());
+    let minted = sys.handles_minted.load(std::sync::atomic::Ordering::SeqCst);
+    let drops = crate::handle_test::FAKE_HANDLE_DROPS.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         drops, minted as u32,
         "{ctx}: fake handles minted {minted} but only {drops} dropped"
@@ -68,16 +69,19 @@ fn assert_handles_balance(sys: &FakeSys, ctx: &str) {
 
 #[test]
 fn drop_of_fake_handle_counts_once() {
-    crate::handle_test::FAKE_HANDLE_DROPS.with(|c| c.set(0));
-    let sys = FakeSys::new();
+    crate::handle_test::FAKE_HANDLE_DROPS.store(0, std::sync::atomic::Ordering::SeqCst);
+    let sys = Arc::new(FakeSys::new());
     let h = sys.handle();
     drop(h);
-    crate::handle_test::FAKE_HANDLE_DROPS.with(|c| assert_eq!(c.get(), 1));
+    assert_eq!(
+        crate::handle_test::FAKE_HANDLE_DROPS.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
 }
 
 #[test]
 fn happy_path_no_timeout_exact_sequence() {
-    let sys = FakeSys::new().exit_code(3);
+    let sys = Arc::new(FakeSys::new().exit_code(3));
     let (code, msgs, tool_abs) = collect(&sys, &basic_cfg());
     assert_eq!(code, 3);
     assert!(msgs.is_empty());
@@ -107,7 +111,7 @@ fn happy_path_no_timeout_exact_sequence() {
 
 #[test]
 fn happy_all_limits_set_flags_and_release() {
-    let sys = FakeSys::new().exit_code(0);
+    let sys = Arc::new(FakeSys::new().exit_code(0));
     let cfg = Config {
         threads: Some(4),
         memory: Some(crate::MemSpec::Bytes(1024)),
@@ -147,7 +151,7 @@ fn happy_all_limits_set_flags_and_release() {
 
 #[test]
 fn priority_happy_two_applies() {
-    let sys = FakeSys::new().exit_code(0);
+    let sys = Arc::new(FakeSys::new().exit_code(0));
     let cfg = Config {
         priority: Some(PriorityClass::AboveNormal),
         command: vec!["tool.exe".to_string()],
@@ -180,59 +184,80 @@ fn priority_happy_two_applies() {
         Call::CreateProcess { flags, .. }
             if *flags == crate::CREATE_SUSPENDED | PriorityClass::AboveNormal.to_u32()
     )));
+    // Probe succeeded: the booster never starts.
+    assert!(!calls.iter().any(|c| matches!(c, Call::CreatePort)));
 }
 
 #[test]
 fn priority_1314_note_and_creation_flags() {
-    let sys = FakeSys::new()
-        // skip the no-priority baseline apply; hit the with-priority probe
-        .fail_nth("SetInformationJobObject", 1, 1314)
-        .exit_code(0);
+    let sys = Arc::new(
+        FakeSys::new()
+            // skip the no-priority baseline apply; hit the with-priority probe
+            .fail_nth("SetInformationJobObject", 1, 1314)
+            .exit_code(0),
+    );
     let cfg = Config {
         priority: Some(PriorityClass::AboveNormal),
         command: vec!["tool.exe".to_string()],
         ..Default::default()
     };
-    let (code, msgs, _) = collect(&sys, &cfg);
+    reset_handle_drops();
+    let (code, msgs, tool_abs) = collect(&sys, &cfg);
     assert_eq!(code, 0);
+    // 1314 on an above-normal class starts the booster: its note replaces
+    // the old root-process-only note.
     assert_eq!(
-            msgs,
-            vec![
-                "wnice: note: abovenormal priority applies to the root process only (the job refused tree-wide priority: Win32 error 1314)".to_string()
-            ]
-        );
+        msgs,
+        vec![booster::booster_note(PriorityClass::AboveNormal)]
+    );
     let calls = sys.take();
-    let setj: Vec<(u32, u32)> = calls
-        .iter()
-        .filter_map(|c| match c {
-            Call::SetJobInfo { class, flags } => Some((*class, *flags)),
-            _ => None,
-        })
-        .collect();
     // Two logged applies (baseline + release); the failed probe leaves no
     // log entry. The release re-asserts the no-priority baseline with the
-    // kill-on-close guard cleared (all other flags kept).
-    assert_eq!(setj.len(), 2);
-    assert_eq!(setj[0], (EXT, KILL)); // without prio
-    assert_eq!(setj[1], (EXT, 0)); // release of the no-prio baseline
-    assert!(calls.iter().any(|c| matches!(
-        c,
-        Call::CreateProcess { flags, .. }
-            if *flags == crate::CREATE_SUSPENDED | PriorityClass::AboveNormal.to_u32()
-    )));
+    // kill-on-close guard cleared (all other flags kept). The booster's
+    // port comes up between the baseline apply and the launch. No
+    // OpenProcess/SetPriorityClass asserts: the booster thread runs
+    // concurrently with this test (booster.rs owns that logic
+    // deterministically).
+    assert_eq!(
+        calls,
+        vec![
+            Call::SetJobInfo {
+                class: EXT,
+                flags: KILL
+            },
+            Call::CreatePort,
+            Call::AssociatePort,
+            Call::CreateProcess {
+                app: Some(tool_abs.clone()),
+                cmdline: tool_abs.clone(),
+                flags: crate::CREATE_SUSPENDED | PriorityClass::AboveNormal.to_u32()
+            },
+            Call::Assign,
+            Call::Resume,
+            Call::Wait,
+            Call::GetExitCode,
+            Call::SetJobInfo {
+                class: EXT,
+                flags: 0
+            },
+        ]
+    );
     assert_handles_balance(&sys, "priority_1314_note_and_creation_flags");
 }
 
 #[test]
 fn priority_realtime_1314_becomes_high_0x80() {
-    let sys = FakeSys::new()
-        .fail_nth("SetInformationJobObject", 1, 1314)
-        .exit_code(0);
+    let sys = Arc::new(
+        FakeSys::new()
+            .fail_nth("SetInformationJobObject", 1, 1314)
+            .exit_code(0),
+    );
     let cfg = Config {
         priority: Some(PriorityClass::Realtime),
         command: vec!["tool.exe".to_string()],
         ..Default::default()
     };
+    reset_handle_drops();
     let (code, _, _) = collect(&sys, &cfg);
     assert_eq!(code, 0);
     let calls = sys.take();
@@ -240,12 +265,18 @@ fn priority_realtime_1314_becomes_high_0x80() {
         c,
         Call::CreateProcess { flags, .. } if *flags == crate::CREATE_SUSPENDED | 0x80
     )));
+    // The booster started for the refused realtime class.
+    assert_eq!(calls.iter().filter(|c| **c == Call::CreatePort).count(), 1);
+    assert_eq!(
+        calls.iter().filter(|c| **c == Call::AssociatePort).count(),
+        1
+    );
     assert_handles_balance(&sys, "priority_realtime_1314_becomes_high_0x80");
 }
 
 #[test]
 fn priority_other_error_is_fatal() {
-    let sys = FakeSys::new().fail_nth("SetInformationJobObject", 1, 5); // the with-priority probe
+    let sys = Arc::new(FakeSys::new().fail_nth("SetInformationJobObject", 1, 5)); // the with-priority probe
     let cfg = Config {
         priority: Some(PriorityClass::High),
         command: vec!["tool.exe".to_string()],
@@ -261,7 +292,152 @@ fn priority_other_error_is_fatal() {
         c,
         Call::CreateProcess { .. } | Call::TerminateProcess | Call::TerminateJobObject
     )));
+    // Fatal probe error precedes any booster setup: no port was created.
+    assert!(!calls
+        .iter()
+        .any(|c| matches!(c, Call::CreatePort | Call::AssociatePort)));
     assert_handles_balance(&sys, "priority_other_error_is_fatal");
+}
+
+#[test]
+fn boost_flag_skips_probe_and_starts_booster() {
+    let sys = Arc::new(FakeSys::new().exit_code(0));
+    let cfg = Config {
+        boost: true,
+        priority: Some(PriorityClass::High),
+        command: vec!["tool.exe".to_string()],
+        ..Default::default()
+    };
+    reset_handle_drops();
+    let (code, msgs, _) = collect(&sys, &cfg);
+    assert_eq!(code, 0);
+    assert_eq!(msgs, vec![booster::booster_note(PriorityClass::High)]);
+    let calls = sys.take();
+    // The with-priority probe must NOT appear: baseline + release only.
+    let setj: Vec<(u32, u32)> = calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::SetJobInfo { class, flags } => Some((*class, *flags)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(setj.len(), 2);
+    assert_eq!(setj[0], (EXT, KILL));
+    assert_eq!(setj[1], (EXT, 0));
+    assert!(setj
+        .iter()
+        .all(|(_, f)| f & crate::JOB_OBJECT_LIMIT_PRIORITY_CLASS == 0));
+    assert_eq!(calls.iter().filter(|c| **c == Call::CreatePort).count(), 1);
+    assert_eq!(
+        calls.iter().filter(|c| **c == Call::AssociatePort).count(),
+        1
+    );
+    assert!(calls.iter().any(|c| matches!(
+        c,
+        Call::CreateProcess { flags, .. }
+            if *flags == crate::CREATE_SUSPENDED | PriorityClass::High.to_u32()
+    )));
+    assert_handles_balance(&sys, "boost_flag_skips_probe_and_starts_booster");
+}
+
+#[test]
+fn boost_port_create_failure_is_fatal_before_launch() {
+    let sys = Arc::new(FakeSys::new().fail_next("CreateIoCompletionPort", 8));
+    let cfg = Config {
+        boost: true,
+        priority: Some(PriorityClass::High),
+        command: vec!["tool.exe".to_string()],
+        ..Default::default()
+    };
+    reset_handle_drops();
+    let (code, msgs, _) = collect(&sys, &cfg);
+    assert_eq!(code, 1);
+    assert_eq!(msgs, vec!["CreateIoCompletionPort failed: 8"]);
+    assert_eq!(sys.count(|c| matches!(c, Call::CreateProcess { .. })), 0);
+    assert_handles_balance(&sys, "boost_port_create_failure_is_fatal_before_launch");
+}
+
+#[test]
+fn boost_associate_failure_is_fatal_before_launch() {
+    let sys = Arc::new(FakeSys::new().fail_next("AssociateJobWithCompletionPort", 87));
+    let cfg = Config {
+        boost: true,
+        priority: Some(PriorityClass::High),
+        command: vec!["tool.exe".to_string()],
+        ..Default::default()
+    };
+    reset_handle_drops();
+    let (code, msgs, _) = collect(&sys, &cfg);
+    assert_eq!(code, 1);
+    assert_eq!(msgs, vec!["SetInformationJobObject failed: 87"]);
+    assert_eq!(sys.count(|c| matches!(c, Call::CreateProcess { .. })), 0);
+    assert_handles_balance(&sys, "boost_associate_failure_is_fatal_before_launch");
+}
+
+#[test]
+fn fallback_1314_with_port_failure_degrades_to_root_only_note() {
+    // Probe refused (1314) AND the booster port cannot be created: degrade
+    // gracefully to the legacy root-only fallback instead of failing.
+    let sys = Arc::new(
+        FakeSys::new()
+            .fail_nth("SetInformationJobObject", 1, 1314)
+            .fail_next("CreateIoCompletionPort", 8)
+            .exit_code(0),
+    );
+    let cfg = Config {
+        priority: Some(PriorityClass::AboveNormal),
+        command: vec!["tool.exe".to_string()],
+        ..Default::default()
+    };
+    reset_handle_drops();
+    let (code, msgs, _) = collect(&sys, &cfg);
+    assert_eq!(code, 0);
+    assert_eq!(
+        msgs,
+        vec!["wnice: note: abovenormal priority applies to the root process only (the job refused tree-wide priority: Win32 error 1314)"]
+    );
+    let calls = sys.take();
+    assert_eq!(calls.iter().filter(|c| **c == Call::CreatePort).count(), 0);
+    assert!(calls.iter().any(|c| matches!(
+        c,
+        Call::CreateProcess { flags, .. }
+            if *flags == crate::CREATE_SUSPENDED | PriorityClass::AboveNormal.to_u32()
+    )));
+    assert_handles_balance(&sys, "fallback_1314_with_port_failure_degrades");
+}
+
+#[test]
+fn below_normal_1314_keeps_root_only_note_without_booster() {
+    let sys = Arc::new(
+        FakeSys::new()
+            .fail_nth("SetInformationJobObject", 1, 1314)
+            .exit_code(0),
+    );
+    let cfg = Config {
+        priority: Some(PriorityClass::BelowNormal),
+        command: vec!["tool.exe".to_string()],
+        ..Default::default()
+    };
+    reset_handle_drops();
+    let (code, msgs, _) = collect(&sys, &cfg);
+    assert_eq!(code, 0);
+    assert_eq!(
+        msgs,
+        vec!["wnice: note: belownormal priority applies to the root process only (the job refused tree-wide priority: Win32 error 1314)"]
+    );
+    let calls = sys.take();
+    // Below-normal never attempts the booster.
+    assert_eq!(calls.iter().filter(|c| **c == Call::CreatePort).count(), 0);
+    assert_eq!(
+        calls.iter().filter(|c| **c == Call::AssociatePort).count(),
+        0
+    );
+    assert!(calls.iter().any(|c| matches!(
+        c,
+        Call::CreateProcess { flags, .. }
+            if *flags == crate::CREATE_SUSPENDED | PriorityClass::BelowNormal.to_u32()
+    )));
+    assert_handles_balance(&sys, "below_normal_1314_keeps_root_only_note");
 }
 
 #[test]
@@ -311,11 +487,11 @@ fn each_fallible_call_failing_one_at_a_time() {
         ),
     ];
     for (fname, code, expected, expect_kill) in cases {
-        let mut sys = FakeSys::new().fail_next(fname, *code);
+        let mut fake = FakeSys::new().fail_next(fname, *code);
         if *fname == "CreateProcess" {
             // The first failure hits the direct attempt; the second one
             // must hit the cmd.exe fallback so the error surfaces.
-            sys = sys.fail_next(fname, *code);
+            fake = fake.fail_next(fname, *code);
         }
         // These paths only run when a timeout timer exists.
         let needs_timer = matches!(
@@ -329,7 +505,7 @@ fn each_fallible_call_failing_one_at_a_time() {
         if needs_timer {
             // GetProcessTimes is only called on the tie-break (index 0);
             // the others exercise the timeout path (index 1).
-            sys = sys.wait_on(if *fname == "GetProcessTimes" { 0 } else { 1 });
+            fake = fake.wait_on(if *fname == "GetProcessTimes" { 0 } else { 1 });
         }
         let cfg = if needs_timer {
             Config {
@@ -339,6 +515,7 @@ fn each_fallible_call_failing_one_at_a_time() {
         } else {
             basic_cfg()
         };
+        let sys = Arc::new(fake);
         reset_handle_drops();
         let (exit, msgs, _) = collect(&sys, &cfg);
         assert_eq!(exit, 1, "{fname}");
@@ -354,7 +531,7 @@ fn each_fallible_call_failing_one_at_a_time() {
 
 #[test]
 fn create_waitable_timer_failure_kills_only_via_job_drop() {
-    let sys = FakeSys::new().fail_next("CreateWaitableTimer", 5);
+    let sys = Arc::new(FakeSys::new().fail_next("CreateWaitableTimer", 5));
     let cfg = Config {
         timeout_ms: Some(1000),
         ..basic_cfg()
@@ -376,9 +553,11 @@ fn create_waitable_timer_failure_kills_only_via_job_drop() {
 #[test]
 fn assign_and_resume_double_failure_suffix() {
     for fname in ["AssignProcessToJobObject", "ResumeThread"] {
-        let sys = FakeSys::new()
-            .fail_next(fname, 5)
-            .fail_next("TerminateProcess", 6);
+        let sys = Arc::new(
+            FakeSys::new()
+                .fail_next(fname, 5)
+                .fail_next("TerminateProcess", 6),
+        );
         reset_handle_drops();
         let (code, msgs, _) = collect(&sys, &basic_cfg());
         assert_eq!(code, 1);
@@ -394,9 +573,11 @@ fn assign_and_resume_double_failure_suffix() {
 
 #[test]
 fn wait_failure_double_failure_suffix() {
-    let sys = FakeSys::new()
-        .fail_next("WaitForMultipleObjects", 6)
-        .fail_next("TerminateProcess", 87);
+    let sys = Arc::new(
+        FakeSys::new()
+            .fail_next("WaitForMultipleObjects", 6)
+            .fail_next("TerminateProcess", 87),
+    );
     reset_handle_drops();
     let (code, msgs, _) = collect(&sys, &basic_cfg());
     assert_eq!(code, 1);
@@ -409,7 +590,7 @@ fn wait_failure_double_failure_suffix() {
 
 #[test]
 fn direct_create_process_fails_falls_back_to_shell() {
-    let sys = FakeSys::new().fail_next("CreateProcess", 2).exit_code(0);
+    let sys = Arc::new(FakeSys::new().fail_next("CreateProcess", 2).exit_code(0));
     let (code, msgs, _) = collect(&sys, &basic_cfg());
     assert_eq!(code, 0);
     assert!(msgs.is_empty());
@@ -430,7 +611,7 @@ fn direct_create_process_fails_falls_back_to_shell() {
 
 #[test]
 fn bare_name_not_in_dirs_exit_127_command_not_found() {
-    let sys = FakeSys::new();
+    let sys = Arc::new(FakeSys::new());
     let (dirs, dir) = probe_dir(&[]);
     let cfg = Config {
         command: vec!["tool.exe".to_string()],
@@ -449,7 +630,7 @@ fn bare_name_not_in_dirs_exit_127_command_not_found() {
 
 #[test]
 fn bat_resolution_launches_shell_with_abs_path() {
-    let sys = FakeSys::new().exit_code(0);
+    let sys = Arc::new(FakeSys::new().exit_code(0));
     let (dirs, dir) = probe_dir(&["foo.bat"]);
     let cfg = Config {
         command: vec!["foo.bat".to_string(), "arg".to_string()],
@@ -470,7 +651,7 @@ fn bat_resolution_launches_shell_with_abs_path() {
 
 #[test]
 fn percent_refusal_on_fallback_before_launch() {
-    let sys = FakeSys::new().fail_next("CreateProcess", 2);
+    let sys = Arc::new(FakeSys::new().fail_next("CreateProcess", 2));
     let cfg = Config {
         command: vec!["tool.exe".to_string(), "100%OFF".to_string()],
         ..Default::default()
@@ -485,7 +666,7 @@ fn percent_refusal_on_fallback_before_launch() {
 
 #[test]
 fn bat_with_percent_refused_before_any_create_process() {
-    let sys = FakeSys::new();
+    let sys = Arc::new(FakeSys::new());
     let (dirs, dir) = probe_dir(&["foo.bat"]);
     let cfg = Config {
         command: vec!["foo.bat".to_string(), "100%".to_string()],
@@ -505,7 +686,7 @@ fn bat_with_percent_refused_before_any_create_process() {
 
 #[test]
 fn timeout_path_terminates_job_exit_124() {
-    let sys = FakeSys::new().wait_on(1).exit_code(0);
+    let sys = Arc::new(FakeSys::new().wait_on(1).exit_code(0));
     let cfg = Config {
         timeout_ms: Some(2000),
         ..basic_cfg()
@@ -547,7 +728,7 @@ fn timeout_display_formats() {
 
 #[test]
 fn tie_break_exit_after_due_is_timeout() {
-    let sys = FakeSys::new().wait_on(0).exit_time_delta(1); // exited strictly after the deadline
+    let sys = Arc::new(FakeSys::new().wait_on(0).exit_time_delta(1)); // exited strictly after the deadline
     let cfg = Config {
         timeout_ms: Some(500),
         ..basic_cfg()
@@ -561,7 +742,7 @@ fn tie_break_exit_after_due_is_timeout() {
 
 #[test]
 fn tie_break_exit_at_or_before_due_is_normal() {
-    let sys = FakeSys::new().wait_on(0).exit_code(9).exit_time_delta(0); // exactly at the deadline counts as on-time
+    let sys = Arc::new(FakeSys::new().wait_on(0).exit_code(9).exit_time_delta(0)); // exactly at the deadline counts as on-time
     let cfg = Config {
         timeout_ms: Some(500),
         ..basic_cfg()
@@ -575,7 +756,7 @@ fn tie_break_exit_at_or_before_due_is_normal() {
 
 #[test]
 fn get_process_times_failure_on_tie_break() {
-    let sys = FakeSys::new().wait_on(0).fail_next("GetProcessTimes", 87);
+    let sys = Arc::new(FakeSys::new().wait_on(0).fail_next("GetProcessTimes", 87));
     let cfg = Config {
         timeout_ms: Some(500),
         ..basic_cfg()
@@ -588,7 +769,7 @@ fn get_process_times_failure_on_tie_break() {
 
 #[test]
 fn get_exit_code_failure_on_timeout_path() {
-    let sys = FakeSys::new().wait_on(1).fail_next("GetExitCodeProcess", 6);
+    let sys = Arc::new(FakeSys::new().wait_on(1).fail_next("GetExitCodeProcess", 6));
     let cfg = Config {
         timeout_ms: Some(500),
         ..basic_cfg()
@@ -604,9 +785,11 @@ fn get_exit_code_failure_on_timeout_path() {
 fn release_failure_warns_keeps_exit_code() {
     // No priority -> only one initial SetJobInfo call, so the single
     // queued failure lands on the release call.
-    let sys = FakeSys::new()
-        .exit_code(7)
-        .fail_nth("SetInformationJobObject", 1, 5); // skip baseline, hit release
+    let sys = Arc::new(
+        FakeSys::new()
+            .exit_code(7)
+            .fail_nth("SetInformationJobObject", 1, 5), // skip baseline, hit release
+    );
     let cfg = basic_cfg();
     let (code, msgs, _) = collect(&sys, &cfg);
     assert_eq!(code, 7);
@@ -619,7 +802,7 @@ fn release_failure_warns_keeps_exit_code() {
 
 #[test]
 fn empty_config_kill_only_then_zero_release() {
-    let sys = FakeSys::new().exit_code(0);
+    let sys = Arc::new(FakeSys::new().exit_code(0));
     let cfg = Config {
         command: vec!["tool.exe".to_string()],
         ..Default::default()
@@ -632,7 +815,7 @@ fn empty_config_kill_only_then_zero_release() {
 
 #[test]
 fn compose_error_reported_exit_1() {
-    let sys = FakeSys::new();
+    let sys = Arc::new(FakeSys::new());
     let cfg = Config {
         threads: Some(99),
         command: vec!["tool.exe".to_string()],
@@ -647,7 +830,7 @@ fn compose_error_reported_exit_1() {
 
 #[test]
 fn launch_plan_error_reported_exit_1() {
-    let sys = FakeSys::new();
+    let sys = Arc::new(FakeSys::new());
     let (code, msgs, _) = collect(&sys, &Config::default());
     assert_eq!(code, 1);
     assert_eq!(msgs, vec!["no command given"]);
@@ -667,7 +850,7 @@ fn launch_plan_error_reported_exit_1() {
 fn set_information_job_object_limits_failure_before_priority_launch() {
     // The FIRST apply (no-priority baseline) failing is fatal before any
     // child exists.
-    let sys = FakeSys::new().fail_next("SetInformationJobObject", 87);
+    let sys = Arc::new(FakeSys::new().fail_next("SetInformationJobObject", 87));
     let cfg = Config {
         priority: Some(PriorityClass::High),
         ..basic_cfg()
@@ -686,7 +869,7 @@ fn set_information_job_object_limits_failure_before_priority_launch() {
 fn cpu_rate_failure_is_fatal() {
     // Target the CPU-rate apply (info class 15) specifically, NOT the
     // extended-limits apply.
-    let sys = FakeSys::new().fail_next("SetInformationJobObject:15", 87);
+    let sys = Arc::new(FakeSys::new().fail_next("SetInformationJobObject:15", 87));
     let cfg = Config {
         cpu_percent: Some(50),
         ..basic_cfg()
@@ -716,7 +899,7 @@ fn cpu_rate_failure_is_fatal() {
 /// would never fire and this would be the only signal.
 #[test]
 fn cpu_rate_success_applies_class_15() {
-    let sys = FakeSys::new().exit_code(0);
+    let sys = Arc::new(FakeSys::new().exit_code(0));
     let cfg = Config {
         cpu_percent: Some(50),
         ..basic_cfg()
@@ -737,14 +920,14 @@ fn cpu_rate_success_applies_class_15() {
 
 #[test]
 fn negative_ntstatus_passes_through() {
-    let sys = FakeSys::new().exit_code(0xC000_013A);
+    let sys = Arc::new(FakeSys::new().exit_code(0xC000_013A));
     let (code, _, _) = collect(&sys, &basic_cfg());
     assert_eq!(code, -1073741510i32);
 }
 
 #[test]
 fn call_order_smoke() {
-    let sys = FakeSys::new().exit_code(1);
+    let sys = Arc::new(FakeSys::new().exit_code(1));
     let cfg = Config {
         timeout_ms: Some(1000),
         ..basic_cfg()
