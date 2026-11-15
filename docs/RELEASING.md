@@ -54,7 +54,7 @@ pipeline in one job, in order:
 
 - release build of `wnice.exe` with the pinned recipe
   (`RELEASE_TOOLCHAIN=1.97.0`, `--remap-path-prefix=<workspace>=/src`,
-  `--locked`);
+  `-C link-arg=/Brepro`, `--locked`);
 - `npm test`, then the Pester suite, then the repo's release-check script;
 - `npm pack --pack-destination release-assets` - the tarball is packed once
   (`win-nice-<version>.tgz`, npm pinned at 11.5.1);
@@ -133,16 +133,19 @@ What is pinned, and why it is pinned there:
   ignores it), and `npm pack` does not honor it either - so the npm tarball
   is not byte-reproducible. Its integrity is anchored by `SHA256SUMS` and
   npm's registry integrity (`dist.integrity`) instead.
-- `wnice.exe` reproducibility is measured by ci.yml's `repro` job: two clean
-  builds from different directories with the pinned toolchain and identical
-  `RUSTFLAGS`, SHA-256 compared, verdict in the GitHub Step Summary -
-  deliberately informative (non-blocking). The achieved-identity result is
-  added here only after the first CI run has measured it; no result is
-  claimed until then.
+- `wnice.exe` bit-identity is measured by ci.yml's `repro` job, and it was
+  measured (commit bd4e365): two builds from clean trees at different paths
+  differed without `/Brepro` and were bit-identical with
+  `-C link-arg=/Brepro`, so the release recipe carries `-C link-arg=/Brepro`.
+  The job repeats the measurement on every CI run and records the verdict in
+  its Step Summary (informative, non-blocking). This is a same-runner
+  measurement - bit-identity on other machines or in other environments is
+  not claimed.
 - `--remap-path-prefix=<workspace>=/src`: rustc embeds the absolute path of
   the build workspace into the binary; remapping it to `/src` erases the
   machine-specific prefix, so builds from different directories produce
-  identical bytes.
+  identical bytes. `-C link-arg=/Brepro` completes the recipe by dropping
+  the MSVC linker's timestamp from the PE header.
 
 ## Authenticode signing (owner decision, not implemented)
 
@@ -166,8 +169,8 @@ What the owner would need:
 - A purchased code-signing certificate (OV or EV). OV runs ~$100-400/yr and
   requires a hardware token or HSM, so key storage becomes the owner's
   operational burden. EV historically got faster SmartScreen reputation,
-  but Microsoft has moved to reputation-based models where that advantage
-  is no longer guaranteed; for OV, SmartScreen behaves like the other
+  but Microsoft has moved to reputation-based models where that advantage may
+  no longer hold; for OV, SmartScreen behaves like the other
   options.
 
 Common to all three: signing removes the SmartScreen attribution warning,

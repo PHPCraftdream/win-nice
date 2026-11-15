@@ -225,21 +225,24 @@ jobs:
         with:
           command: check
 
-  # Bit-identity experiment (informative, deliberately NON-BLOCKING - a
-  # mismatch must be visible but must not fail CI; verdicts are measurement
-  # results, not claims). The same commit is built twice from two clean
-  # source copies at different absolute paths, in two recipe variants:
-  #   A - the release recipe from publish.yml (pinned toolchain, --locked,
-  #       each tree's own root remapped to /src via --remap-path-prefix, in
-  #       both path spellings the toolchain could embed);
-  #   B - variant A plus `-C link-arg=/Brepro`, testing the hypothesis that
-  #       the MSVC linker's default PE timestamp is what breaks bit-identity.
-  # Each of the four builds writes to its own fresh --target-dir under
-  # $RUNNER_TEMP (no target dir is shared, the trees stay pristine). On a
-  # mismatch the step prints the number of differing bytes and the first
-  # differing offsets in hex, so a PE-header difference (first hundreds of
-  # bytes, e.g. the COFF TimeDateStamp field) can be told apart from body
-  # differences. Nothing publishes here.
+  # Bit-identity measurement (informative, deliberately NON-BLOCKING - a
+  # mismatch must be visible but must not fail CI; verdicts are measured
+  # results). The same commit is built twice from two clean source copies at
+  # different absolute paths, in two recipe variants:
+  #   A - the CONTROL, the recipe as it was without `-C link-arg=/Brepro`:
+  #       pinned toolchain, --locked, each tree's own root remapped to /src.
+  #       Measured on commit bd4e365: its divergence is EXPECTED and is not a
+  #       problem - it isolates the linker-timestamp effect;
+  #   B - the RELEASE recipe mirroring publish.yml (pinned toolchain, --locked,
+  #       per-tree remap to /src, `-C link-arg=/Brepro`) - measured
+  #       bit-identical on commit bd4e365.
+  # The job repeats this measurement on every CI run and records verdicts in
+  # the Step Summary; diagnostics print on any divergence. Each of the four
+  # builds writes to its own fresh --target-dir under $RUNNER_TEMP (no target
+  # dir is shared, the trees stay pristine). On a mismatch the step prints the
+  # number of differing bytes and the first differing offsets in hex, so a
+  # PE-header difference (first hundreds of bytes, e.g. the COFF TimeDateStamp
+  # field) can be told apart from body differences. Nothing publishes here.
   repro:
     runs-on: windows-latest
     # Four short release builds plus diagnostics; capped well below the
@@ -273,7 +276,7 @@ jobs:
       # path in the binary by design). Both path spellings (backslash,
       # forward slash) are remapped to /src; paths reach the build via env,
       # never via workflow expressions in run scripts.
-      - name: Variant A - build #1 (checkout tree)
+      - name: Control (no /Brepro) - build #1 (checkout tree)
         shell: bash
         run: |
           root="$GITHUB_WORKSPACE"
@@ -281,7 +284,7 @@ jobs:
           export RUSTFLAGS="--remap-path-prefix=$root=/src --remap-path-prefix=$root_fwd=/src"
           cargo build --release --locked --target-dir "$RUNNER_TEMP/target-a1"
 
-      - name: Variant A - build #2 (cloned tree)
+      - name: Control (no /Brepro) - build #2 (cloned tree)
         shell: bash
         run: |
           cd "$RUNNER_TEMP/repro-build-two"
@@ -290,7 +293,7 @@ jobs:
           export RUSTFLAGS="--remap-path-prefix=$root=/src --remap-path-prefix=$root_fwd=/src --remap-path-prefix=$RUNNER_TEMP/repro-build-two=/src"
           cargo build --release --locked --target-dir "$RUNNER_TEMP/target-a2"
 
-      - name: Variant A - compare and record the verdict
+      - name: Control (no /Brepro) - compare and record the verdict
         shell: bash
         run: |
           a="$RUNNER_TEMP/target-a1/release/wnice.exe"
@@ -300,7 +303,7 @@ jobs:
           s1="$(wc -c < "$a")"
           s2="$(wc -c < "$b")"
           {
-            echo '### Variant A - release recipe (pinned toolchain, --locked, per-tree remap to /src)'
+            echo '### Control (no /Brepro) - the recipe as it was before the measured fix'
             echo
             echo '| build | sha256 | size (bytes) |'
             echo '| --- | --- | --- |'
@@ -310,7 +313,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$h1" = "$h2" ]; then
             echo 'verdict: **bit-identical**' >> "$GITHUB_STEP_SUMMARY"
-            echo '::notice::variant A: the two builds are bit-identical'
+            echo '::notice::control without /Brepro matched - unexpected, /Brepro may not be the only differentiator'
           else
             echo 'verdict: **MISMATCH**' >> "$GITHUB_STEP_SUMMARY"
             {
@@ -329,13 +332,15 @@ jobs:
               echo 'Offsets below ~0x400 are in the PE header region (e.g. the COFF TimeDateStamp field); larger offsets point at body differences.'
               echo
             } >> "$GITHUB_STEP_SUMMARY"
-            echo '::warning::variant A: the two builds differ - see the summary for offsets'
+            echo '::notice::control without /Brepro diverged - expected, measured on commit bd4e365'
           fi
           # Informative by design: the verdict is recorded either way and the
           # job stays green.
           exit 0
 
-      - name: Variant B - build #1 (checkout tree, plus /Brepro)
+      # Same flags as publish.yml's build step (remap + /Brepro) - keep in sync.
+      # Measured bit-identical on commit bd4e365.
+      - name: Release recipe (mirrors publish.yml) - build #1 (checkout tree)
         shell: bash
         run: |
           root="$GITHUB_WORKSPACE"
@@ -343,7 +348,7 @@ jobs:
           export RUSTFLAGS="--remap-path-prefix=$root=/src --remap-path-prefix=$root_fwd=/src -C link-arg=/Brepro"
           cargo build --release --locked --target-dir "$RUNNER_TEMP/target-b1"
 
-      - name: Variant B - build #2 (cloned tree, plus /Brepro)
+      - name: Release recipe (mirrors publish.yml) - build #2 (cloned tree)
         shell: bash
         run: |
           cd "$RUNNER_TEMP/repro-build-two"
@@ -352,7 +357,7 @@ jobs:
           export RUSTFLAGS="--remap-path-prefix=$root=/src --remap-path-prefix=$root_fwd=/src --remap-path-prefix=$RUNNER_TEMP/repro-build-two=/src -C link-arg=/Brepro"
           cargo build --release --locked --target-dir "$RUNNER_TEMP/target-b2"
 
-      - name: Variant B - compare and record the verdict
+      - name: Release recipe (mirrors publish.yml) - compare and record the verdict
         shell: bash
         run: |
           a="$RUNNER_TEMP/target-b1/release/wnice.exe"
@@ -362,7 +367,7 @@ jobs:
           s1="$(wc -c < "$a")"
           s2="$(wc -c < "$b")"
           {
-            echo '### Variant B - release recipe plus /Brepro (tests the linker-timestamp hypothesis)'
+            echo '### Release recipe (mirrors publish.yml: pinned toolchain, --locked, per-tree remap, /Brepro)'
             echo
             echo '| build | sha256 | size (bytes) |'
             echo '| --- | --- | --- |'
@@ -372,7 +377,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$h1" = "$h2" ]; then
             echo 'verdict: **bit-identical**' >> "$GITHUB_STEP_SUMMARY"
-            echo '::notice::variant B: the two builds are bit-identical'
+            echo '::notice::release recipe: the two builds are bit-identical'
           else
             echo 'verdict: **MISMATCH**' >> "$GITHUB_STEP_SUMMARY"
             {
@@ -391,7 +396,7 @@ jobs:
               echo 'Offsets below ~0x400 are in the PE header region (e.g. the COFF TimeDateStamp field); larger offsets point at body differences.'
               echo
             } >> "$GITHUB_STEP_SUMMARY"
-            echo '::warning::variant B: the two builds differ - see the summary for offsets'
+            echo '::warning::release recipe (with /Brepro) diverged - see the summary for offsets'
           fi
           # Informative by design: the verdict is recorded either way and the
           # job stays green.

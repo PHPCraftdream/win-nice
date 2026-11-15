@@ -151,12 +151,13 @@ identifiers against vulnerability feeds without unpacking the artifacts.
   they say nothing about a draft's publication status.
 - The npm tarball is **not** claimed to be byte-reproducible (`npm pack` does
   not honor `SOURCE_DATE_EPOCH`).
-- `wnice.exe` reproducibility is **checked, not claimed**: CI's `repro` job
-  builds `wnice.exe` twice from two clean directories with the pinned recipe
-  and records whether the sha256 digests match in its GitHub Step Summary.
-  Until that job has run and reported a verdict, treat reproducibility as
-  unmeasured. The job is deliberately non-blocking - read the summary and do
-  not infer from green.
+- `wnice.exe` bit-identity was **measured** in one CI run (commit bd4e365):
+  two builds from clean trees at different absolute paths differed without
+  `/Brepro` and were bit-identical with `-C link-arg=/Brepro`; the release
+  recipe includes `/Brepro`. The `repro` job repeats this measurement on
+  every CI run and records the verdict in its GitHub Step Summary. This is a
+  same-runner measurement - no claim is made about other machines, toolchains
+  or environments.
 - `wnice.exe` carries no Authenticode signature (owner decision, deferred;
   see docs/RELEASING.md), so fresh downloads trigger the SmartScreen
   "unknown publisher" warning.

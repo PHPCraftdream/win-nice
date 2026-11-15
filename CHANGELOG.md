@@ -80,11 +80,12 @@ update).
   `SHA256SUMS`, npm provenance, the signed release tag), and docs/RELEASING.md,
   the maintainer release procedure including signed tags and the
   draft-release verification checklist.
-- A CI `repro` job: two clean release builds of `wnice.exe` from different
-  directories with the pinned release toolchain and identical `RUSTFLAGS`,
-  compared by SHA-256, verdict in the job summary. Deliberately informative
-  (non-blocking). The verdict - not a claimed result - is recorded in the
-  job summary.
+- A CI `repro` job: two recipe variants, each built twice from clean trees
+  at different absolute paths - a control without `/Brepro` and the release
+  recipe with `-C link-arg=/Brepro` - compared by SHA-256, with differing-byte
+  counts and offsets printed on a mismatch. Measured on one CI run (commit
+  bd4e365): the control diverged, the `/Brepro` recipe was bit-identical.
+  Informative (non-blocking); the verdict lands in the job summary.
 
 ### Changed
 
@@ -105,9 +106,11 @@ update).
   pull-request runs via `concurrency`, cap every job with `timeout-minutes`,
   and drop the checkouts' persisted git credentials
   (`persist-credentials: false` - nothing in CI pushes).
-- The publish workflow builds `wnice.exe` with a pinned toolchain (1.97.0)
-  and the `--remap-path-prefix` recipe that ci.yml's `repro` job mirrors
-  with two clean builds (verdict in its summary); ci.yml's other jobs keep
+- The publish workflow builds `wnice.exe` with a pinned toolchain (1.97.0),
+  `--remap-path-prefix` and `-C link-arg=/Brepro` - the recipe ci.yml's
+  `repro` job mirrors and measured (commit bd4e365): without `/Brepro` the
+  builds differed, with it they were bit-identical within one CI run;
+  bit-identity is not claimed beyond that scope. ci.yml's other jobs keep
   tracking floating stable on purpose.
 
 ## [0.3.0] - 2026-10-25

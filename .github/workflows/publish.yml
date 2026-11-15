@@ -99,9 +99,12 @@ jobs:
         shell: bash
         timeout-minutes: 20
         env:
-          # ci.yml's repro job measures exactly this recipe: the binary must
-          # not depend on the runner's absolute checkout path.
-          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/src
+          # Measured by ci.yml's repro job (commit bd4e365, one CI run, two
+          # clean trees at different paths): without /Brepro the builds
+          # differed, with /Brepro they were bit-identical. The remap keeps
+          # the binary independent of the runner's absolute checkout path;
+          # /Brepro drops the linker's timestamp from the PE header.
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/src -C link-arg=/Brepro
         run: |
           rustup toolchain install "$RELEASE_TOOLCHAIN" --profile minimal
           rustup default "$RELEASE_TOOLCHAIN"
