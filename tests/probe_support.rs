@@ -301,6 +301,67 @@ pub fn probe_main(mode: &str) -> ! {
             std::thread::sleep(Duration::from_millis(ms.parse().unwrap_or(5_000)));
             std::process::exit(0);
         }
+        "boostmid" => {
+            // Middle of a REAL 3-generation chain under booster mode: spawn
+            // one sleep grandchild, wait `report_ms` so the asynchronous
+            // booster's SetPriorityClass has landed, then print
+            // "<childprio> <grandprio> <grandpid>" for boostchain (root) to
+            // re-emit. The grandchild sleeps 2x report_ms, so it is alive
+            // (and boostable) when the priorities are read and
+            // self-terminates afterwards.
+            let report_ms: u64 = need(&rest, 0).parse().expect("report ms");
+            let grand = spawn_probe("sleep", &[&(2 * report_ms).to_string()], false);
+            std::thread::sleep(Duration::from_millis(report_ms));
+            raw_println(&format!(
+                "{} {} {}",
+                unsafe { GetPriorityClass(GetCurrentProcess()) },
+                pid_priority(grand.id()).unwrap_or(0),
+                grand.id()
+            ));
+            std::io::stdout().flush().ok();
+            std::process::exit(0);
+        }
+        "boostchain" => {
+            // Root of a REAL 3-generation chain under booster mode: spawn ONE
+            // boostmid probe (which spawns the sleep grandchild, waits
+            // `report_ms` for the booster, and prints
+            // "<childprio> <grandprio> <grandpid>"), read that line from its
+            // piped stdout, and re-print the standard contract
+            // "<rootpid> <childpid> <grandpid> <rootprio> <childprio>
+            // <grandprio>" with root's own pid/prio first. Root's prio is
+            // read AFTER the line arrives so the booster's root update is
+            // visible too. Root exits at once: the grandchild self-terminates
+            // after its 2x sleep.
+            let report_ms: u64 = need(&rest, 0).parse().expect("report ms");
+            let mut child = spawn_probe_piped("boostmid", &[&report_ms.to_string()]);
+            let line = BufReader::new(child.stdout.take().expect("piped stdout"))
+                .lines()
+                .next()
+                .transpose()
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            // boostmid line: <childprio> <grandprio> <grandpid>
+            let tail: Vec<&str> = line.split_whitespace().collect();
+            if tail.len() < 3 {
+                eprintln!("boostmid line unreadable: {line:?}");
+                std::process::exit(2);
+            }
+            let childprio: u32 = tail[0].parse().unwrap_or(0);
+            let grandprio: u32 = tail[1].parse().unwrap_or(0);
+            let grandpid: u32 = tail[2].parse().unwrap_or(0);
+            raw_println(&format!(
+                "{} {} {} {} {} {}",
+                std::process::id(),
+                child.id(),
+                grandpid,
+                unsafe { GetPriorityClass(GetCurrentProcess()) },
+                childprio,
+                grandprio
+            ));
+            std::io::stdout().flush().ok();
+            std::process::exit(0);
+        }
         "guardedspawn" => {
             // Runs at WNICE_PROBE_DEPTH = MAX_PROBE_DEPTH: the inner spawn must
             // be refused by the recursion guard (panic caught here).

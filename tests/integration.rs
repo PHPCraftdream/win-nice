@@ -166,14 +166,41 @@ fn test_priority_fallback_note_or_elevated() {
     let o = wnice_probe(&["-p", "high"], "priority", &[]);
     assert_eq!(o.status.code(), Some(0), "stderr={}", stderr(&o));
     let got: u32 = last_line(&o).parse().expect("priority");
-    if stderr(&o).contains("wnice: note: high priority applies to the root process only") {
-        // Job refused tree-wide priority: wnice ORs HIGH_PRIORITY_CLASS into
-        // the root's creation flags, so the root is High even unprivileged.
-        assert_eq!(got, 0x80, "expected High (0x80) for the root");
-    } else {
-        // Elevated: job accepted priority, root is High.
-        assert_eq!(got, 0x80, "expected High when elevated");
+    if stderr(&o).contains("via the booster") {
+        // Un-elevated: the job refused (1314) and the booster is applying
+        // HIGH to the whole tree; the root also gets it via its creation
+        // flags.
+    } else if stderr(&o).contains("applies to the root process only") {
+        // Booster setup failed un-elevated: legacy root-only fallback. Job
+        // refused tree-wide priority: wnice ORs HIGH_PRIORITY_CLASS into the
+        // root's creation flags, so the root is High even unprivileged.
+    } // else: elevated - the job accepted the tree-wide limit, no note.
+    assert_eq!(got, 0x80, "root must be High in every branch");
+}
+
+fn test_boost_flag_boosts_whole_tree() {
+    if guard_job_forces_idle() {
+        skip("sandbox job forces IDLE priority class; the booster's SetPriorityClass cannot raise above the cap");
+        return;
     }
+    // --boost forces booster mode (job-limit probe skipped), so the booster
+    // note always prints. The 400 ms report delay gives the booster far more
+    // time than it needs to land on the whole tree (no timing assertion).
+    let o = wnice_probe(&["--boost", "-p", "high"], "boostchain", &["400"]);
+    assert_eq!(o.status.code(), Some(0), "stderr={}", stderr(&o));
+    assert!(
+        stderr(&o).contains("via the booster"),
+        "booster note missing: stderr={}",
+        stderr(&o)
+    );
+    let fields: Vec<u32> = last_line(&o)
+        .split_whitespace()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    assert!(fields.len() >= 6, "boostchain output: {}", stdout(&o));
+    assert_eq!(fields[3], 0x80, "root prio (creation flag)");
+    assert_eq!(fields[4], 0x80, "child prio (booster)");
+    assert_eq!(fields[5], 0x80, "grandchild prio (booster)");
 }
 
 fn test_affinity_single_cpu() {
@@ -592,6 +619,10 @@ const TESTS: &[(&str, fn())] = &[
     (
         "priority_fallback_note_or_elevated",
         test_priority_fallback_note_or_elevated,
+    ),
+    (
+        "boost_flag_boosts_whole_tree",
+        test_boost_flag_boosts_whole_tree,
     ),
     ("affinity_single_cpu", test_affinity_single_cpu),
     ("memory_limit_enforced", test_memory_limit_enforced),

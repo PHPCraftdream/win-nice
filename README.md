@@ -39,6 +39,7 @@ wnice -p idle -c 50 -t 4 -m 50 -n 64 -s 600 -- npm run build
 | `-m, --memory <size>` | `capm` | job memory ceiling (`50` = 50% of RAM, `512m`, `2g`) |
 | `-n, --procs <n>` | `capn` | maximum simultaneously active processes |
 | `-s, --timeout <seconds>` | `caps` | wall-clock deadline, exit 124 |
+| `--boost` | — | with `-p`: skip the job priority limit and apply the priority to every process via the booster (see "Priority above NORMAL without elevation") |
 | `-h` / `-V` | | help / version |
 
 Options are parsed only up to the first non-option token or `--`; everything
@@ -241,17 +242,62 @@ Same as `idle`, at `ABOVE_NORMAL_PRIORITY_CLASS` — also for the whole tree
 Same shape, at `HIGH_PRIORITY_CLASS`. Windows only accepts `HIGH` as a job
 limit from a process holding `SeIncreaseBasePriorityPrivilege` (elevated
 processes have it). Without it the job refuses (Win32 error 1314) and `high`
-falls back to setting `HIGH` on the root process only, printing
-`wnice: note: high priority applies to the root process only ...` to stderr;
-the children then run at their default priority.
+starts the booster instead, which applies `HIGH` to every process of the tree
+— typically sub-millisecond per process — and a `wnice: note: ...` line on
+stderr says so (see "Priority above NORMAL without elevation" below).
 
 ### `realtime <command> [args...]`
 Same shape, at `REALTIME_PRIORITY_CLASS`. **Dangerous, use with caution:**
 `REALTIME` outranks the OS's own input/audio/UI threads — a busy realtime-priority
 process can make the entire desktop (mouse, keyboard, everything) stop responding,
 which is the exact failure mode this project otherwise exists to prevent. It needs
-the same privilege as `high`; without it you get `HIGH` on the root process only,
-with the same stderr note.
+the same privilege as `high`; without it the job refuses (error 1314) and the
+booster applies `HIGH` — `REALTIME` still downgrades — to every process of the
+tree, typically sub-millisecond, with the same stderr note (see "Priority
+above NORMAL without elevation" below).
+
+### Priority above NORMAL without elevation (`--boost`)
+
+A job priority limit above `NORMAL` needs `SeIncreaseBasePriorityPrivilege`
+(Win32 error 1314 without it), and Windows children do not inherit `HIGH` by
+default — they inherit `NORMAL` (only `IDLE`/`BELOW_NORMAL` propagate).
+Without elevation there is therefore no way to hold an above-normal priority
+tree-wide through a job limit alone.
+
+So when the job refuses the tree-wide limit (error 1314), `wnice` starts the
+**priority booster**: the job is associated with an I/O completion port, a
+thread watches for the job's new-process notifications
+(`JOB_OBJECT_MSG_NEW_PROCESS`), and for every process the job creates it
+opens the process and calls `SetPriorityClass` with the chosen class. The
+root process gets the class through its `CreateProcess` flags; `realtime`
+still downgrades to `HIGH`; no elevation is needed, and the booster behaves
+the same elevated or not. Per-process booster errors (a process that already
+exited, an access denial) are ignored and never change the exit code, and
+the other job limits are unaffected — the CPU cap stays the same hard-cap
+limit, and memory, process-count, affinity and timeout work exactly as
+before.
+
+The boundaries, honestly: a boost usually lands in well under a millisecond
+(median ~0.004 ms measured), but a spawn burst stretches it — ~35 ms was
+observed when ~8 processes spawned at once; children run at `NORMAL` until
+their boost lands; a leaf that lives ~5 ms or less can exit before it is
+ever boosted; and a process that exits before the booster reaches it is
+simply skipped.
+
+`--boost` skips the job priority limit entirely and always uses the booster —
+deterministic on machines where the job limit would have succeeded anyway
+(elevated shells, CI runners), and it's what the test suite uses. It requires
+`-p/--priority`, and no job priority limit is ever set in that mode.
+Priorities below `normal` (`idle`/`belownormal`) keep using the plain job
+limit, which needs no privilege there; and when the booster setup itself
+fails, the old root-only fallback remains — only `--boost` turns a setup
+failure into a hard error (exit 1).
+
+When the booster takes over, stderr explains it:
+`wnice: note: high priority applies to every process in the tree via the
+booster (job completion port + SetPriorityClass, not a job limit); boost is
+usually sub-millisecond (up to a few ms in spawn bursts), so very short-lived
+children may exit before it lands`.
 
 ### `capc <percent> <command> [args...]`
 Hard CPU quota (1-100) for the whole process tree, enforced by a Windows Job
@@ -283,7 +329,12 @@ combine depends on the limit type, not one universal "smaller wins" rule. For
 CPU rate control specifically, a nested job's rate is relative to what its
 parent already lets through, so equal caps **multiply**: `capc 50 capc 50 ...`
 yields roughly 25% of total system CPU, not 50% (see "Chaining these tools
-together" below for the full picture across limit types).
+together" below for the full picture across limit types). The same
+multiplication applies when the tool itself runs *inside* an outer Job Object
+that already has a CPU rate limit — a CI agent or wrapper shell that
+job-wraps everything it starts: measured example, a 10% cap inside a parent
+job capped at 10% yields ~0.9% of the machine (10% of 10%), so check whether
+your shell is already job-wrapped before trusting a cap percentage.
 
 Blocks until the command exits, propagates its exit code.
 
@@ -478,7 +529,10 @@ each limit type combines differently:**
   minimum — `capc 50 capc 50 ...` yields roughly 25% of total system CPU, not
   50%. This is documented Windows behavior for
   [`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information),
-  not a bug here.
+  not a bug here. The same goes for an outer job you didn't create yourself:
+  running these tools from a shell or agent that is already inside a
+  CPU-rate-limited job makes the tool's own rate relative to that parent's
+  (measured: 10% inside a 10% parent ≈ 0.9% of the machine).
 - **Memory (`capm`)**: each ceiling applies independently to its own
   accounting scope, and those scopes are *not* the same size — a job's
   committed-memory accounting includes its own processes **plus every child

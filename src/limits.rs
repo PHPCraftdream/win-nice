@@ -350,6 +350,21 @@ mod tests {
         fn system_directory(&self) -> String {
             String::new()
         }
+        fn create_completion_port(&self) -> Result<Handle, u32> {
+            unimplemented!()
+        }
+        fn associate_job_with_completion_port(&self, _: &Handle, _: &Handle) -> Result<(), u32> {
+            unimplemented!()
+        }
+        fn get_queued_completion_status(&self, _: &Handle, _: u32) -> Result<(u32, usize), u32> {
+            unimplemented!()
+        }
+        fn open_process(&self, _: u32, _: u32) -> Result<Handle, u32> {
+            unimplemented!()
+        }
+        fn set_priority_class(&self, _: &Handle, _: u32) -> Result<(), u32> {
+            unimplemented!()
+        }
     }
 
     #[test]
@@ -504,6 +519,10 @@ mod tests {
 
     #[test]
     fn total_ram_percent_errors() {
+        // Return-type aliases keep the boilerplate trait impls below inside
+        // rustfmt's width limit.
+        type UnitRes = Result<(), u32>;
+        type QueuedRes = Result<(u32, usize), u32>;
         struct ZeroSys;
         impl Sys for ZeroSys {
             fn create_job_object(&self) -> Result<Handle, u32> {
@@ -555,6 +574,21 @@ mod tests {
             }
             fn system_directory(&self) -> String {
                 String::new()
+            }
+            fn create_completion_port(&self) -> Result<Handle, u32> {
+                unimplemented!()
+            }
+            fn associate_job_with_completion_port(&self, _: &Handle, _: &Handle) -> UnitRes {
+                unimplemented!()
+            }
+            fn get_queued_completion_status(&self, _: &Handle, _: u32) -> QueuedRes {
+                unimplemented!()
+            }
+            fn open_process(&self, _: u32, _: u32) -> Result<Handle, u32> {
+                unimplemented!()
+            }
+            fn set_priority_class(&self, _: &Handle, _: u32) -> Result<(), u32> {
+                unimplemented!()
             }
         }
         let sys = ZeroSys;
@@ -613,6 +647,21 @@ mod tests {
             }
             fn system_directory(&self) -> String {
                 String::new()
+            }
+            fn create_completion_port(&self) -> Result<Handle, u32> {
+                unimplemented!()
+            }
+            fn associate_job_with_completion_port(&self, _: &Handle, _: &Handle) -> UnitRes {
+                unimplemented!()
+            }
+            fn get_queued_completion_status(&self, _: &Handle, _: u32) -> QueuedRes {
+                unimplemented!()
+            }
+            fn open_process(&self, _: u32, _: u32) -> Result<Handle, u32> {
+                unimplemented!()
+            }
+            fn set_priority_class(&self, _: &Handle, _: u32) -> Result<(), u32> {
+                unimplemented!()
             }
         }
         let sys = FailSys;
