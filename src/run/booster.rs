@@ -324,7 +324,9 @@ mod tests {
             9,
             class
         ));
-        assert_eq!(sys.count(|c| matches!(c, Call::OpenProcess { .. })), 1);
+        // A failed call is not logged (the FakeSys-wide journal convention), and
+        // with the open refused there is nothing to boost: no SetPriorityClass.
+        assert_eq!(sys.count(|c| matches!(c, Call::OpenProcess { .. })), 0);
         assert_eq!(sys.count(|c| matches!(c, Call::SetPriorityClass { .. })), 0);
     }
 
@@ -339,7 +341,8 @@ mod tests {
             class
         ));
         assert_eq!(sys.count(|c| matches!(c, Call::OpenProcess { .. })), 1);
-        assert_eq!(sys.count(|c| matches!(c, Call::SetPriorityClass { .. })), 1);
+        // The open succeeded and IS logged; the refused SetPriorityClass is not.
+        assert_eq!(sys.count(|c| matches!(c, Call::SetPriorityClass { .. })), 0);
     }
 
     #[test]
