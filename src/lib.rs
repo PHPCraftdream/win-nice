@@ -10,24 +10,31 @@ pub mod run;
 ///
 /// `Drop` calls `CloseHandle` exactly once, directly via windows-sys.
 /// CloseHandle is intentionally NOT part of the `Sys` trait — RAII owns
-/// closing.
+/// closing. Test builds additionally carry a per-instance accounting book
+/// on fake handles (see `FakeHandleBook`); there is no global drop counter.
 pub struct Handle {
     raw: windows_sys::Win32::Foundation::HANDLE,
     /// Test-only: fake handles minted by `FakeSys` must never reach the real
-    /// `CloseHandle`; when `false`, `Drop` only clears the pointer. Real
-    /// constructors always set `true`.
+    /// `CloseHandle`; when `false`, `Drop` skips the real close (booked
+    /// handles increment their book instead). Real constructors set `true`.
     #[cfg(test)]
     close_on_drop: bool,
+    /// Test-only: per-instance accounting for fake handles (`FakeSys`-minted
+    /// handles carry `Some`); `Drop` increments `dropped` instead of touching
+    /// any global.
+    #[cfg(test)]
+    book: Option<std::sync::Arc<FakeHandleBook>>,
 }
 
-/// Test-only drop counter: incremented once per fake (no-close) handle drop,
-/// so tests can assert RAII single-close behavior without real kernel objects.
-/// A global atomic (not thread-local) because the priority booster thread
-/// drops fake handles on its own thread.
+/// Test-only, per-`FakeSys`-instance handle accounting: every fake handle
+/// minted by one `FakeSys` shares its `Arc<FakeHandleBook>`, so mint/drop
+/// counts stay isolated per test even when `cargo test` runs tests in
+/// parallel threads, and drops on the priority booster thread land in the
+/// owning test's book (an `Arc` is Send + Sync; no global counters).
 #[cfg(test)]
-pub(crate) mod handle_test {
-    pub static FAKE_HANDLE_DROPS: std::sync::atomic::AtomicU32 =
-        std::sync::atomic::AtomicU32::new(0);
+pub(crate) struct FakeHandleBook {
+    pub(crate) minted: std::sync::atomic::AtomicU64,
+    pub(crate) dropped: std::sync::atomic::AtomicU64,
 }
 
 impl Handle {
@@ -37,18 +44,47 @@ impl Handle {
             raw,
             #[cfg(test)]
             close_on_drop: true,
+            #[cfg(test)]
+            book: None,
         }
     }
 
     /// Test-only constructor for `FakeSys`: stores the raw value but never
-    /// passes it to the real `CloseHandle` on drop.
+    /// passes it to the real `CloseHandle` on drop; no accounting — used for
+    /// re-owned raw values that arrive without a book.
     #[cfg(test)]
     pub(crate) fn from_raw_no_close(raw: windows_sys::Win32::Foundation::HANDLE) -> Handle {
         Handle {
             raw,
             #[cfg(test)]
             close_on_drop: false,
+            #[cfg(test)]
+            book: None,
         }
+    }
+
+    /// Test-only constructor for `FakeSys`-minted handles: never reaches the
+    /// real `CloseHandle` on drop; its drop is counted in the owning
+    /// instance's book.
+    #[cfg(test)]
+    pub(crate) fn from_raw_no_close_booked(
+        raw: windows_sys::Win32::Foundation::HANDLE,
+        book: std::sync::Arc<FakeHandleBook>,
+    ) -> Handle {
+        Handle {
+            raw,
+            #[cfg(test)]
+            close_on_drop: false,
+            #[cfg(test)]
+            book: Some(book),
+        }
+    }
+
+    /// The book this fake handle reports its drop to (`None` for real
+    /// handles).
+    #[cfg(test)]
+    pub(crate) fn book(&self) -> Option<std::sync::Arc<FakeHandleBook>> {
+        self.book.clone()
     }
 
     pub fn raw(&self) -> windows_sys::Win32::Foundation::HANDLE {
@@ -71,8 +107,11 @@ impl Drop for Handle {
             }
         }
         #[cfg(test)]
-        if !self.close_on_drop {
-            handle_test::FAKE_HANDLE_DROPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(book) = &self.book {
+            // Fake handle: never a real kernel object — only its instance's
+            // drop counter moves (works from any thread, incl. the booster's).
+            book.dropped
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         self.raw = std::ptr::null_mut();
     }

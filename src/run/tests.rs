@@ -49,34 +49,24 @@ fn name(c: &Call) -> String {
     format!("{c:?}")
 }
 
-/// Reset the fake-handle drop counter; returns a guard reading it later —
-/// use by resetting to 0 right before `collect`, then calling
-/// [`assert_handles_balance`] after `collect` returns (all minted handles
-/// have dropped by then).
-fn reset_handle_drops() {
-    crate::handle_test::FAKE_HANDLE_DROPS.store(0, std::sync::atomic::Ordering::SeqCst);
-}
-
-/// Assert the drops counter equals the FakeSys's minted-handle count.
+/// Assert this instance's minted handle count equals its dropped count —
+/// per-instance (each FakeSys owns a book), so parallel tests cannot bleed
+/// into each other and booster-thread drops are still counted (shared Arc).
 fn assert_handles_balance(sys: &FakeSys, ctx: &str) {
-    let minted = sys.handles_minted.load(std::sync::atomic::Ordering::SeqCst);
-    let drops = crate::handle_test::FAKE_HANDLE_DROPS.load(std::sync::atomic::Ordering::SeqCst);
+    let minted = sys.handles_minted();
+    let drops = sys.handles_dropped();
     assert_eq!(
-        drops, minted as u32,
+        minted, drops,
         "{ctx}: fake handles minted {minted} but only {drops} dropped"
     );
 }
 
 #[test]
 fn drop_of_fake_handle_counts_once() {
-    crate::handle_test::FAKE_HANDLE_DROPS.store(0, std::sync::atomic::Ordering::SeqCst);
-    let sys = Arc::new(FakeSys::new());
+    let sys = FakeSys::new();
     let h = sys.handle();
     drop(h);
-    assert_eq!(
-        crate::handle_test::FAKE_HANDLE_DROPS.load(std::sync::atomic::Ordering::SeqCst),
-        1
-    );
+    assert_eq!(sys.handles_dropped(), 1);
 }
 
 #[test]
@@ -201,7 +191,6 @@ fn priority_1314_note_and_creation_flags() {
         command: vec!["tool.exe".to_string()],
         ..Default::default()
     };
-    reset_handle_drops();
     let (code, msgs, tool_abs) = collect(&sys, &cfg);
     assert_eq!(code, 0);
     // 1314 on an above-normal class starts the booster: its note replaces
@@ -257,7 +246,6 @@ fn priority_realtime_1314_becomes_high_0x80() {
         command: vec!["tool.exe".to_string()],
         ..Default::default()
     };
-    reset_handle_drops();
     let (code, _, _) = collect(&sys, &cfg);
     assert_eq!(code, 0);
     let calls = sys.take();
@@ -282,7 +270,6 @@ fn priority_other_error_is_fatal() {
         command: vec!["tool.exe".to_string()],
         ..Default::default()
     };
-    reset_handle_drops();
     let (code, msgs, _) = collect(&sys, &cfg);
     assert_eq!(code, 1);
     assert_eq!(msgs, vec!["SetInformationJobObject failed: 5"]);
@@ -308,7 +295,6 @@ fn boost_flag_skips_probe_and_starts_booster() {
         command: vec!["tool.exe".to_string()],
         ..Default::default()
     };
-    reset_handle_drops();
     let (code, msgs, _) = collect(&sys, &cfg);
     assert_eq!(code, 0);
     assert_eq!(msgs, vec![booster::booster_note(PriorityClass::High)]);
@@ -349,7 +335,6 @@ fn boost_port_create_failure_is_fatal_before_launch() {
         command: vec!["tool.exe".to_string()],
         ..Default::default()
     };
-    reset_handle_drops();
     let (code, msgs, _) = collect(&sys, &cfg);
     assert_eq!(code, 1);
     assert_eq!(msgs, vec!["CreateIoCompletionPort failed: 8"]);
@@ -366,7 +351,6 @@ fn boost_associate_failure_is_fatal_before_launch() {
         command: vec!["tool.exe".to_string()],
         ..Default::default()
     };
-    reset_handle_drops();
     let (code, msgs, _) = collect(&sys, &cfg);
     assert_eq!(code, 1);
     assert_eq!(msgs, vec!["SetInformationJobObject failed: 87"]);
@@ -389,7 +373,6 @@ fn fallback_1314_with_port_failure_degrades_to_root_only_note() {
         command: vec!["tool.exe".to_string()],
         ..Default::default()
     };
-    reset_handle_drops();
     let (code, msgs, _) = collect(&sys, &cfg);
     assert_eq!(code, 0);
     assert_eq!(
@@ -418,7 +401,6 @@ fn below_normal_1314_keeps_root_only_note_without_booster() {
         command: vec!["tool.exe".to_string()],
         ..Default::default()
     };
-    reset_handle_drops();
     let (code, msgs, _) = collect(&sys, &cfg);
     assert_eq!(code, 0);
     assert_eq!(
@@ -516,7 +498,6 @@ fn each_fallible_call_failing_one_at_a_time() {
             basic_cfg()
         };
         let sys = Arc::new(fake);
-        reset_handle_drops();
         let (exit, msgs, _) = collect(&sys, &cfg);
         assert_eq!(exit, 1, "{fname}");
         assert_eq!(msgs, vec![expected.to_string()], "{fname}");
@@ -558,7 +539,6 @@ fn assign_and_resume_double_failure_suffix() {
                 .fail_next(fname, 5)
                 .fail_next("TerminateProcess", 6),
         );
-        reset_handle_drops();
         let (code, msgs, _) = collect(&sys, &basic_cfg());
         assert_eq!(code, 1);
         assert_eq!(
@@ -578,7 +558,6 @@ fn wait_failure_double_failure_suffix() {
             .fail_next("WaitForMultipleObjects", 6)
             .fail_next("TerminateProcess", 87),
     );
-    reset_handle_drops();
     let (code, msgs, _) = collect(&sys, &basic_cfg());
     assert_eq!(code, 1);
     assert_eq!(
@@ -874,7 +853,6 @@ fn cpu_rate_failure_is_fatal() {
         cpu_percent: Some(50),
         ..basic_cfg()
     };
-    reset_handle_drops();
     let (code, msgs, _) = collect(&sys, &cfg);
     assert_eq!(code, 1);
     assert_eq!(msgs, vec!["SetInformationJobObject failed: 87"]);
