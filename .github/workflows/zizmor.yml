@@ -1,0 +1,39 @@
+# Static security audit of this repository's GitHub Actions workflows
+# (template injection, over-broad permissions, credential persistence,
+# pwn-request patterns, unpinned uses, ...). Chosen over CodeQL here because
+# zizmor is purpose-built for Actions with Actions-specific audits and runs
+# in seconds without compiling anything; the repo's Rust/JS code is already
+# covered by clippy/cargo-deny/npm-test.
+# SARIF lands in code scanning. Action pin is a commit SHA; Dependabot keeps
+# the SHA and its version comment up to date.
+name: zizmor (GitHub Actions security audit)
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    - cron: '17 4 * * 1'
+
+permissions: {}
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Uploads SARIF to code scanning.
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          # Upload the SARIF report to GitHub code scanning.
+          advanced-security: true

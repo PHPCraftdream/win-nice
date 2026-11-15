@@ -1,0 +1,37 @@
+version: 2
+updates:
+  # The Rust dependency tree is tiny (windows-sys and its target-only
+  # plumbing); grouping keeps it one reviewable lockfile PR per week.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # No npm dependencies exist today ("no dependencies" is a project
+  # property); this stays silent unless one appears, and then it is watched.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # All GitHub Actions are pinned by commit SHA; Dependabot updates the pin
+  # (SHA + the trailing "# vX.Y.Z" comment) in one grouped PR, so pins stay
+  # pins.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - '*'
