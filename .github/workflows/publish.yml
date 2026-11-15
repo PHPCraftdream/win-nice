@@ -253,22 +253,24 @@ jobs:
       # --access public: still required even with a package that already
       # exists - npm's provenance check wants it explicit, not just implied by
       # being unscoped.
+      # The tarball argument starts with ./: without ./ npm parses an owner/repo-like path as a git (GitHub) shorthand spec and fetches it via ssh.
       - name: Publish the attested tarball to npm (last step, irreversible)
         if: github.event_name == 'push'
         timeout-minutes: 5
         shell: bash
         run: |
           version=$(node -p "require('./package.json').version")
-          npm publish "release-assets/win-nice-$version.tgz" --provenance --access public
+          npm publish "./release-assets/win-nice-$version.tgz" --provenance --access public
 
       # Rehearsal: everything publish does except the upload - no registry
       # write, no OIDC exchange. Exercises the same tarball path and flags.
+      # The tarball argument starts with ./: without ./ npm parses an owner/repo-like path as a git (GitHub) shorthand spec and fetches it via ssh.
       - name: Rehearse publish (dry run)
         if: github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
           version=$(node -p "require('./package.json').version")
-          npm publish "release-assets/win-nice-$version.tgz" --dry-run --access public
+          npm publish "./release-assets/win-nice-$version.tgz" --dry-run --access public
 
       - name: Summary
         if: always()
