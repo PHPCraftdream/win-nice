@@ -186,7 +186,7 @@ fn output_snippet(res: &ExecResult) -> String {
 
 /// Entry point used by `run::run_with_writer_in`: resolves wsl.exe from the
 /// real system directory and the real current directory, then delegates to
-/// [`run_wsl_in`].
+/// `run_wsl_in`.
 pub fn run_wsl(cfg: &Config, err: &mut dyn FnMut(&str)) -> i32 {
     let wsl_exe = system32_wsl_path(&crate::RealSys.system_directory());
     let cwd = std::env::current_dir()
