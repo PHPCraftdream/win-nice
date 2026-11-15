@@ -146,15 +146,27 @@ impl BoosterGuard {
         // Move the port into the thread without closing it here. usize is
         // Send; the raw HANDLE pointer is not.
         let raw = port.raw() as usize;
+        #[cfg(test)]
+        let book = port.book();
         std::mem::forget(port);
         let sys_for_thread = Arc::clone(sys);
         let stop_for_thread = Arc::clone(&stop);
+        // Test-only: the thread's port drop must land in the minting
+        // instance's book. The closure gets a cheap Arc clone of it so the
+        // spawn-failure arm below can still re-own through `book` itself.
+        #[cfg(test)]
+        let book_for_thread = book.clone();
         let thread = std::thread::Builder::new()
             .name("wnice-boost".to_string())
             .spawn(move || {
+                #[cfg(test)]
+                let port = reown_port(raw, book_for_thread);
+                #[cfg(not(test))]
                 let port = reown_port(raw);
                 let _exit = booster_loop(sys_for_thread.as_ref(), &port, class, &stop_for_thread);
-                // `port` drops here: exactly one CloseHandle on this thread.
+                // `port` drops here: exactly one CloseHandle on this thread
+                // (and, in test builds, its drop lands in the owning
+                // instance's book).
             });
         match thread {
             Ok(t) => Ok(BoosterGuard {
@@ -166,6 +178,9 @@ impl BoosterGuard {
             // CloseHandle below could clobber last-error.
             Err(_) => {
                 let code = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+                #[cfg(test)]
+                drop(reown_port(raw, book));
+                #[cfg(not(test))]
                 drop(reown_port(raw));
                 Err(BoosterSetupError::Thread(code))
             }
@@ -176,13 +191,22 @@ impl BoosterGuard {
 /// Re-own the raw port handle after crossing the thread boundary. Real
 /// builds close it via RAII exactly once; test builds use the no-close
 /// constructor so a fake handle never reaches the real `CloseHandle` and
-/// still counts its drop (the same contract as every FakeSys-minted handle).
+/// still counts its drop (the same contract as every FakeSys-minted
+/// handle): when the minting instance's book is known it is re-attached,
+/// keeping the port's drop counted per instance.
+#[cfg(test)]
+fn reown_port(raw: usize, book: Option<std::sync::Arc<crate::FakeHandleBook>>) -> Handle {
+    match book {
+        Some(b) => Handle::from_raw_no_close_booked(raw as *mut core::ffi::c_void, b),
+        None => Handle::from_raw_no_close(raw as *mut core::ffi::c_void),
+    }
+}
+
+/// Real-build `reown_port`: plain RAII close, exactly once, no book (see
+/// the test variant for the fake-handle contract).
+#[cfg(not(test))]
 fn reown_port(raw: usize) -> Handle {
-    #[cfg(test)]
-    let h = Handle::from_raw_no_close(raw as *mut core::ffi::c_void);
-    #[cfg(not(test))]
-    let h = Handle::from_raw(raw as *mut core::ffi::c_void);
-    h
+    Handle::from_raw(raw as *mut core::ffi::c_void)
 }
 
 impl Drop for BoosterGuard {
@@ -210,17 +234,14 @@ mod tests {
     use crate::run::fakesys::{Call, FakeSys};
     use crate::PriorityClass;
 
-    /// Reset the fake-handle drop counter (same convention as run/tests.rs).
-    fn reset_handle_drops() {
-        crate::handle_test::FAKE_HANDLE_DROPS.store(0, Ordering::SeqCst);
-    }
-
-    /// Assert the drops counter equals the FakeSys's minted-handle count.
+    /// Assert this instance's minted handle count equals its dropped count —
+    /// per-instance (each FakeSys owns a book), so parallel tests cannot bleed
+    /// into each other and booster-thread drops are still counted (shared Arc).
     fn assert_handles_balance(sys: &FakeSys, ctx: &str) {
-        let minted = sys.handles_minted.load(Ordering::SeqCst);
-        let drops = crate::handle_test::FAKE_HANDLE_DROPS.load(Ordering::SeqCst);
+        let minted = sys.handles_minted();
+        let drops = sys.handles_dropped();
         assert_eq!(
-            drops, minted as u32,
+            minted, drops,
             "{ctx}: fake handles minted {minted} but only {drops} dropped"
         );
     }
@@ -272,7 +293,6 @@ mod tests {
 
     #[test]
     fn new_process_message_opens_and_sets_priority_once() {
-        reset_handle_drops();
         let sys = FakeSys::new();
         let class = PriorityClass::High.to_u32();
         let access = crate::PROCESS_QUERY_LIMITED_INFORMATION | crate::PROCESS_SET_INFORMATION;
@@ -289,11 +309,9 @@ mod tests {
                 Call::SetPriorityClass { class },
             ]
         );
-        // The opened fake process handle dropped exactly once (RAII).
-        assert_eq!(
-            crate::handle_test::FAKE_HANDLE_DROPS.load(Ordering::SeqCst),
-            1
-        );
+        // The opened fake process handle dropped exactly once (RAII), into
+        // this instance's own book.
+        assert_eq!(sys.handles_dropped(), 1);
     }
 
     #[test]
@@ -346,7 +364,6 @@ mod tests {
 
     #[test]
     fn loop_drains_queue_then_stops_on_active_zero() {
-        reset_handle_drops();
         let sys = FakeSys::new()
             .queue_boost(crate::JOB_OBJECT_MSG_NEW_PROCESS, 111)
             .queue_boost(crate::JOB_OBJECT_MSG_NEW_PROCESS, 222)
@@ -400,7 +417,6 @@ mod tests {
 
     #[test]
     fn guard_start_associates_boosts_queued_processes_and_joins_on_drop() {
-        reset_handle_drops();
         let fake = Arc::new(
             FakeSys::new()
                 .queue_boost(crate::JOB_OBJECT_MSG_NEW_PROCESS, 4242)
@@ -421,9 +437,8 @@ mod tests {
         // promptly instead of burning the budget.
         drop(guard);
         drop(job);
-        let minted = fake_ref.handles_minted.load(Ordering::SeqCst);
         spin_until("all fake handles dropped", || {
-            crate::handle_test::FAKE_HANDLE_DROPS.load(Ordering::SeqCst) == minted as u32
+            fake_ref.handles_dropped() == fake_ref.handles_minted()
         });
         assert_eq!(
             fake_ref.take(),
@@ -445,7 +460,6 @@ mod tests {
 
     #[test]
     fn guard_drop_stops_thread_when_no_messages_come() {
-        reset_handle_drops();
         let fake = Arc::new(FakeSys::new());
         let job = fake.handle();
         let fake_ref = Arc::clone(&fake);
@@ -456,9 +470,8 @@ mod tests {
         // the FakeSys poll timeout returns instantly, so the join is prompt.
         drop(guard);
         drop(job);
-        let minted = fake_ref.handles_minted.load(Ordering::SeqCst);
         spin_until("all fake handles dropped", || {
-            crate::handle_test::FAKE_HANDLE_DROPS.load(Ordering::SeqCst) == minted as u32
+            fake_ref.handles_dropped() == fake_ref.handles_minted()
         });
         assert_eq!(fake_ref.take(), vec![Call::CreatePort, Call::AssociatePort]);
         assert_eq!(fake_ref.count(|c| matches!(c, Call::OpenProcess { .. })), 0);

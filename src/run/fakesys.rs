@@ -42,7 +42,9 @@ pub(crate) enum Call {
 }
 
 pub(crate) struct FakeSys {
-    pub(crate) handles_minted: AtomicU64,
+    /// Per-instance mint/drop accounting shared with every handle this
+    /// instance mints (see `crate::FakeHandleBook`).
+    book: std::sync::Arc<crate::FakeHandleBook>,
     calls: Mutex<Vec<Call>>,
     /// Each entry fails the (skip+1)-th NEXT call to the named fn, once,
     /// with `code`; earlier calls pass through untouched.
@@ -67,7 +69,10 @@ impl FakeSys {
             calls: Mutex::new(Vec::new()),
             fail: Mutex::new(Vec::new()),
             next_handle: AtomicU64::new(0x1000_0000),
-            handles_minted: AtomicU64::new(0),
+            book: std::sync::Arc::new(crate::FakeHandleBook {
+                minted: std::sync::atomic::AtomicU64::new(0),
+                dropped: std::sync::atomic::AtomicU64::new(0),
+            }),
             wait_result: Ok(0),
             exit_time: 0,
             exit_time_delta: None,
@@ -110,9 +115,23 @@ impl FakeSys {
         self
     }
     pub(crate) fn handle(&self) -> Handle {
-        self.handles_minted.fetch_add(1, Ordering::SeqCst);
+        self.book.minted.fetch_add(1, Ordering::SeqCst);
         let v = self.next_handle.fetch_add(1, Ordering::SeqCst) + 1;
-        Handle::from_raw_no_close(v as usize as *mut core::ffi::c_void)
+        Handle::from_raw_no_close_booked(
+            v as usize as *mut core::ffi::c_void,
+            std::sync::Arc::clone(&self.book),
+        )
+    }
+
+    /// Fake handles minted by this instance so far.
+    pub(crate) fn handles_minted(&self) -> u64 {
+        self.book.minted.load(Ordering::SeqCst)
+    }
+
+    /// Minted handles that have dropped so far (across all threads — the
+    /// booster thread's drops land here too, via the shared `Arc`).
+    pub(crate) fn handles_dropped(&self) -> u64 {
+        self.book.dropped.load(Ordering::SeqCst)
     }
     pub(crate) fn log(&self, c: Call) {
         self.calls.lock().unwrap().push(c);
