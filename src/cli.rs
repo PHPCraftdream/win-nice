@@ -3,6 +3,7 @@
 //! Options are parsed ONLY before the first non-option token or `--`;
 //! everything after belongs verbatim to the wrapped command.
 
+use crate::run::wsl::WslMode;
 use crate::{Config, MemSpec, PriorityClass};
 
 pub const USAGE: &str = "\
@@ -14,6 +15,7 @@ options:
   -m, --memory <size>   (<1-100> percent of RAM, or <n>[.d](m|g) bytes, e.g. 512m, 0.5g)
   -n, --procs <1-4294967295>
   -s, --timeout <seconds>  (decimal seconds > 0, floored to whole ms, max 4294967294 ms)
+  --wsl[=<distro>]   run the command inside WSL2 under a systemd scope (see --help)
   -h, --help
   -V, --version
 options end at the first non-option token or at '--'; everything after
@@ -187,6 +189,21 @@ pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, String> 
         }
         if arg == "-V" || arg == "--version" {
             want_version = true;
+            i += 1;
+            continue;
+        }
+        if arg == "--wsl" {
+            cfg.wsl = Some(WslMode { distro: None });
+            i += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--wsl=") {
+            if rest.is_empty() {
+                return Err("invalid --wsl value (empty distro name)".to_string());
+            }
+            cfg.wsl = Some(WslMode {
+                distro: Some(rest.to_string()),
+            });
             i += 1;
             continue;
         }
@@ -546,5 +563,69 @@ mod tests {
     fn duplicate_options_last_wins() {
         let c = run(&["-c", "10", "-c", "20", "cmd"]);
         assert_eq!(c.cpu_percent, Some(20));
+    }
+
+    #[test]
+    fn wsl_bare_flag() {
+        let c = run(&["--wsl", "cmd"]);
+        assert_eq!(c.wsl, Some(WslMode { distro: None }));
+        assert_eq!(c.command, vec!["cmd"]);
+    }
+
+    #[test]
+    fn wsl_distro() {
+        let c = run(&["--wsl=Ubuntu-24.04", "cmd"]);
+        assert_eq!(
+            c.wsl,
+            Some(WslMode {
+                distro: Some("Ubuntu-24.04".to_string())
+            })
+        );
+        assert_eq!(c.command, vec!["cmd"]);
+    }
+
+    #[test]
+    fn wsl_with_other_options() {
+        let c = run(&["-c", "10", "--wsl=Debian-12", "-p", "idle", "--", "x", "y"]);
+        assert_eq!(c.cpu_percent, Some(10));
+        assert_eq!(c.priority, Some(PriorityClass::Idle));
+        assert_eq!(
+            c.wsl,
+            Some(WslMode {
+                distro: Some("Debian-12".to_string())
+            })
+        );
+        assert_eq!(c.command, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn wsl_empty_distro_rejected() {
+        assert!(!err(&["--wsl=", "cmd"]).is_empty());
+    }
+
+    #[test]
+    fn wsl_after_command_belongs_to_command() {
+        let c = run(&["cmd", "--wsl"]);
+        assert!(c.wsl.is_none());
+        assert_eq!(c.command, vec!["cmd", "--wsl"]);
+    }
+
+    #[test]
+    fn wsl_before_double_dash() {
+        let c = run(&["--wsl", "--", "-p", "idle"]);
+        assert_eq!(c.wsl, Some(WslMode { distro: None }));
+        assert_eq!(c.command, vec!["-p", "idle"]);
+    }
+
+    #[test]
+    fn wsl_distro_with_spaces_kept_verbatim() {
+        let c = run(&["--wsl=Ubuntu 22.04 LTS", "cmd"]);
+        assert_eq!(
+            c.wsl,
+            Some(WslMode {
+                distro: Some("Ubuntu 22.04 LTS".to_string())
+            })
+        );
+        assert_eq!(c.command, vec!["cmd"]);
     }
 }

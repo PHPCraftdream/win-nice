@@ -160,6 +160,39 @@ fires first kills the whole subtree including the inner wrapper, whose own
 sees 124 either way. See README.md's
 "Chaining these tools together" for the full explanation.
 
+## WSL mode
+
+`wnice --wsl[=<distro>] [options] -- <command> [args...]` runs the command
+inside a WSL2 distro as the guest's default user. Windows-mode Job Objects
+cannot limit Linux processes (they run in the VM), so this mode translates
+the same flags into systemd/cgroup-v2 limits inside the guest via a
+transient systemd scope started by root (`nice` sets the nice level,
+`runuser` drops to the user):
+
+- `-c N` → `CPUQuota=<N*vcpu>%` (N percent of all guest vCPUs)
+- `-p idle/belownormal/normal/abovenormal/high` → Nice
+  19/10/0/-5/-20 + CPUWeight 1/50/100/500/10000
+- `-m <size>` → `MemoryMax` (percent of the guest's RAM, or m/g)
+- `-t N` → `AllowedCPUs=0-<N-1>` (first N guest vCPUs; N > vCPU refused)
+- `-n N` → `TasksMax=N`
+- `-s N` → `RuntimeMaxSec` + cgroup-wide SIGKILL; exit 124
+
+Requirements (checked up front, exit 1 with a clear message on failure):
+WSL2 distro (WSL1 refused), systemd as PID 1 (`[boot] systemd=true` in
+`/etc/wsl.conf`), cgroup v2, systemd-run, runuser/nice; the Windows cwd is
+translated to `/mnt/<drive>/...` and must exist in the guest. Exit codes
+match Windows mode (command's code, 124 timeout, 1 usage/precheck).
+
+Caveats: no shell on either side (raw argv through `wsl.exe --exec` and
+systemd-run/runuser `--`), so `%` and all shell metacharacters are inert
+here — the Windows-mode `%` refusal does not apply; `-p realtime` is
+refused (the Linux nice/weight model has no realtime band); startup runs a
+few wsl.exe probes, adding a second or two; the VM's total vCPUs/RAM come
+from `.wslconfig` (`processors=`/`memory=`) and are the hard ceiling for
+`-c`/`-t`/`-m` — wnice never edits that file; if wnice itself is killed,
+the scope keeps running in the guest until
+`systemctl stop wnice-*.scope`.
+
 ## Elevation / desktop responsiveness
 
 - `admin <command> [args...]` — runs elevated (as Administrator); triggers the

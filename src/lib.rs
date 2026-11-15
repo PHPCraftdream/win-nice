@@ -123,6 +123,10 @@ pub struct Config {
     pub procs: Option<u32>,
     pub timeout_ms: Option<u32>,
     pub command: Vec<String>,
+    /// WSL mode: when set, `run` dispatches to the WSL guest engine
+    /// (`run::wsl`) instead of the Job Object engine. `None` (the default)
+    /// keeps Windows behavior untouched.
+    pub wsl: Option<crate::run::wsl::WslMode>,
 }
 
 // Constants

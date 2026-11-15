@@ -23,6 +23,10 @@ use crate::limits;
 use crate::win32_err;
 use crate::{Config, Sys};
 
+/// WSL mode: the command runs inside a WSL2 distro under a systemd scope
+/// instead of in a Job Object. Public so `Config` can name its mode type.
+pub mod wsl;
+
 /// FILETIME epoch offset: 100ns units between 1601-01-01 and 1970-01-01.
 const FILETIME_EPOCH_OFFSET_100NS: u64 = 116_444_736_000_000_000;
 
@@ -73,6 +77,13 @@ pub fn run_with_writer_in(
     dirs: &[String],
     err: &mut dyn FnMut(&str),
 ) -> i32 {
+    // WSL mode bypasses the Job Object engine entirely: the command runs in
+    // a WSL2 distro under a systemd scope (see run::wsl). Windows behavior
+    // below is untouched when `cfg.wsl` is None.
+    if cfg.wsl.is_some() {
+        return crate::run::wsl::run_wsl(cfg, err);
+    }
+
     let limits = match limits::compose(cfg, sys) {
         Ok(l) => l,
         Err(msg) => {
