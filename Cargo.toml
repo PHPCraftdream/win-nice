@@ -16,7 +16,7 @@ name = "integration"
 harness = false
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Foundation",
     "Win32_System_JobObjects",
@@ -30,7 +30,7 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Foundation",
     "Win32_System_JobObjects",
