@@ -1,4 +1,4 @@
-//! Thin multicall dispatcher: dispatch on argv[0] file stem.
+//! Thin multicall dispatcher: dispatch on `argv[0]` file stem.
 
 use std::process::ExitCode;
 
