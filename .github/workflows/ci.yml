@@ -225,25 +225,31 @@ jobs:
         with:
           command: check
 
-  # Reproducible-build check: builds wnice.exe twice from two clean source
-  # trees at DIFFERENT absolute paths, with the same pinned toolchain and the
-  # same RUSTFLAGS remap the release recipe (publish.yml) uses,
-  # then compares sha256. It mirrors the release recipe and is deliberately
-  # NON-BLOCKING: a mismatch must be visible but must not fail CI - per
-  # project policy this is decided deliberately, see docs/RELEASING.md.
+  # Bit-identity experiment (informative, deliberately NON-BLOCKING - a
+  # mismatch must be visible but must not fail CI; verdicts are measurement
+  # results, not claims). The same commit is built twice from two clean
+  # source copies at different absolute paths, in two recipe variants:
+  #   A - the release recipe from publish.yml (pinned toolchain, --locked,
+  #       each tree's own root remapped to /src via --remap-path-prefix, in
+  #       both path spellings the toolchain could embed);
+  #   B - variant A plus `-C link-arg=/Brepro`, testing the hypothesis that
+  #       the MSVC linker's default PE timestamp is what breaks bit-identity.
+  # Each of the four builds writes to its own fresh --target-dir under
+  # $RUNNER_TEMP (no target dir is shared, the trees stay pristine). On a
+  # mismatch the step prints the number of differing bytes and the first
+  # differing offsets in hex, so a PE-header difference (first hundreds of
+  # bytes, e.g. the COFF TimeDateStamp field) can be told apart from body
+  # differences. Nothing publishes here.
   repro:
     runs-on: windows-latest
-    # Cap for two full release builds (build-exe's single build gets 30).
+    # Four short release builds plus diagnostics; capped well below the
+    # runner default.
     timeout-minutes: 40
     env:
       # Pinned release toolchain - keep in sync with publish.yml. ci.yml's
-      # other jobs intentionally keep tracking floating
-      # `stable` (early-warning); only this job pins.
+      # other jobs intentionally keep tracking floating `stable`
+      # (early-warning); only this job pins.
       RELEASE_TOOLCHAIN: '1.97.0'
-      # The release recipe builds with this remap, so the binary must not
-      # depend on the checkout's absolute path. Proving that requires the two
-      # clean builds below to happen in DIFFERENT absolute paths.
-      RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/src
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -255,47 +261,141 @@ jobs:
           rustup toolchain install "$RELEASE_TOOLCHAIN" --profile minimal
           rustup default "$RELEASE_TOOLCHAIN"
 
-      - name: Build #1 (checkout dir)
-        shell: bash
-        run: cargo build --release --locked
-
-      # Second independent source tree at a different absolute path.
+      # Second independent source tree at a different absolute path. Both
+      # trees stay pristine: every build below writes to its own --target-dir
+      # under $RUNNER_TEMP, never into a tree and never into a shared dir.
       - name: Second clean checkout
         shell: bash
         run: git clone --no-hardlinks --quiet . "$RUNNER_TEMP/repro-build-two"
 
-      - name: Build #2 (independent dir)
-        shell: bash
-        run: cd "$RUNNER_TEMP/repro-build-two" && cargo build --release --locked
-
-      - name: Compare sha256 and record the verdict
+      # The remap FROM is each tree's own root (build #2's root differs from
+      # build #1's - one shared remap would leave the second tree's absolute
+      # path in the binary by design). Both path spellings (backslash,
+      # forward slash) are remapped to /src; paths reach the build via env,
+      # never via workflow expressions in run scripts.
+      - name: Variant A - build #1 (checkout tree)
         shell: bash
         run: |
-          h1=$(sha256sum target/release/wnice.exe | cut -d' ' -f1)
-          h2=$(sha256sum "$RUNNER_TEMP/repro-build-two/target/release/wnice.exe" | cut -d' ' -f1)
+          root="$GITHUB_WORKSPACE"
+          root_fwd="$(printf '%s' "$root" | tr '\\' '/')"
+          export RUSTFLAGS="--remap-path-prefix=$root=/src --remap-path-prefix=$root_fwd=/src"
+          cargo build --release --locked --target-dir "$RUNNER_TEMP/target-a1"
+
+      - name: Variant A - build #2 (cloned tree)
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/repro-build-two"
+          root="$RUNNER_TEMP\\repro-build-two"
+          root_fwd="$(printf '%s' "$root" | tr '\\' '/')"
+          export RUSTFLAGS="--remap-path-prefix=$root=/src --remap-path-prefix=$root_fwd=/src --remap-path-prefix=$RUNNER_TEMP/repro-build-two=/src"
+          cargo build --release --locked --target-dir "$RUNNER_TEMP/target-a2"
+
+      - name: Variant A - compare and record the verdict
+        shell: bash
+        run: |
+          a="$RUNNER_TEMP/target-a1/release/wnice.exe"
+          b="$RUNNER_TEMP/target-a2/release/wnice.exe"
+          h1="$(sha256sum "$a" | cut -d' ' -f1)"
+          h2="$(sha256sum "$b" | cut -d' ' -f1)"
+          s1="$(wc -c < "$a")"
+          s2="$(wc -c < "$b")"
           {
-            echo '| build | sha256 of wnice.exe |'
-            echo '| --- | --- |'
-            echo "| #1 (checkout dir) | \`$h1\` |"
-            echo "| #2 ($RUNNER_TEMP/repro-build-two) | \`$h2\` |"
+            echo '### Variant A - release recipe (pinned toolchain, --locked, per-tree remap to /src)'
+            echo
+            echo '| build | sha256 | size (bytes) |'
+            echo '| --- | --- | --- |'
+            echo "| #1 (checkout tree) | \`$h1\` | $s1 |"
+            echo "| #2 (cloned tree) | \`$h2\` | $s2 |"
             echo
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$h1" = "$h2" ]; then
-            echo 'result: **bit-identical**' >> "$GITHUB_STEP_SUMMARY"
-            echo '::notice::two clean release builds produced bit-identical wnice.exe'
+            echo 'verdict: **bit-identical**' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::variant A: the two builds are bit-identical'
           else
+            echo 'verdict: **MISMATCH**' >> "$GITHUB_STEP_SUMMARY"
             {
-              echo 'result: **MISMATCH**'
+              echo 'Diagnostics (measurement, not a verdict):'
               echo
-              echo "- build #1: \`$h1\`"
-              echo "- build #2: \`$h2\`"
+              echo '```'
+              if command -v cmp >/dev/null 2>&1; then
+                echo "differing bytes: $(cmp -l "$a" "$b" 2>/dev/null | wc -l)"
+                echo 'first differing offsets (hex, 0-based; byte values octal, as cmp prints them):'
+                cmp -l "$a" "$b" 2>/dev/null | head -n 40 | awk '{ printf "0x%08x  %s %s\n", $1 - 1, $2, $3 }'
+              else
+                node -e "const fs=require('fs');const a=fs.readFileSync(process.argv[1],null);const b=fs.readFileSync(process.argv[2],null);const n=Math.min(a.length,b.length);let c=0;const o=[];for(let i=0;i<n;i++){if(a[i]!==b[i]){c++;if(o.length<40)o.push('0x'+i.toString(16));}}console.log('differing bytes (within the common length): '+c);console.log(o.join(' '));" "$a" "$b"
+              fi
+              echo '```'
+              echo
+              echo 'Offsets below ~0x400 are in the PE header region (e.g. the COFF TimeDateStamp field); larger offsets point at body differences.'
+              echo
             } >> "$GITHUB_STEP_SUMMARY"
-            echo '::warning::release builds are not bit-identical - see the summary table'
+            echo '::warning::variant A: the two builds differ - see the summary for offsets'
           fi
-          # Informative by design: exit 0 in BOTH cases - a mismatch must be
-          # visible but must not block CI (see the job comment above).
+          # Informative by design: the verdict is recorded either way and the
+          # job stays green.
           exit 0
 
+      - name: Variant B - build #1 (checkout tree, plus /Brepro)
+        shell: bash
+        run: |
+          root="$GITHUB_WORKSPACE"
+          root_fwd="$(printf '%s' "$root" | tr '\\' '/')"
+          export RUSTFLAGS="--remap-path-prefix=$root=/src --remap-path-prefix=$root_fwd=/src -C link-arg=/Brepro"
+          cargo build --release --locked --target-dir "$RUNNER_TEMP/target-b1"
+
+      - name: Variant B - build #2 (cloned tree, plus /Brepro)
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/repro-build-two"
+          root="$RUNNER_TEMP\\repro-build-two"
+          root_fwd="$(printf '%s' "$root" | tr '\\' '/')"
+          export RUSTFLAGS="--remap-path-prefix=$root=/src --remap-path-prefix=$root_fwd=/src --remap-path-prefix=$RUNNER_TEMP/repro-build-two=/src -C link-arg=/Brepro"
+          cargo build --release --locked --target-dir "$RUNNER_TEMP/target-b2"
+
+      - name: Variant B - compare and record the verdict
+        shell: bash
+        run: |
+          a="$RUNNER_TEMP/target-b1/release/wnice.exe"
+          b="$RUNNER_TEMP/target-b2/release/wnice.exe"
+          h1="$(sha256sum "$a" | cut -d' ' -f1)"
+          h2="$(sha256sum "$b" | cut -d' ' -f1)"
+          s1="$(wc -c < "$a")"
+          s2="$(wc -c < "$b")"
+          {
+            echo '### Variant B - release recipe plus /Brepro (tests the linker-timestamp hypothesis)'
+            echo
+            echo '| build | sha256 | size (bytes) |'
+            echo '| --- | --- | --- |'
+            echo "| #1 (checkout tree) | \`$h1\` | $s1 |"
+            echo "| #2 (cloned tree) | \`$h2\` | $s2 |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$h1" = "$h2" ]; then
+            echo 'verdict: **bit-identical**' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::variant B: the two builds are bit-identical'
+          else
+            echo 'verdict: **MISMATCH**' >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo 'Diagnostics (measurement, not a verdict):'
+              echo
+              echo '```'
+              if command -v cmp >/dev/null 2>&1; then
+                echo "differing bytes: $(cmp -l "$a" "$b" 2>/dev/null | wc -l)"
+                echo 'first differing offsets (hex, 0-based; byte values octal, as cmp prints them):'
+                cmp -l "$a" "$b" 2>/dev/null | head -n 40 | awk '{ printf "0x%08x  %s %s\n", $1 - 1, $2, $3 }'
+              else
+                node -e "const fs=require('fs');const a=fs.readFileSync(process.argv[1],null);const b=fs.readFileSync(process.argv[2],null);const n=Math.min(a.length,b.length);let c=0;const o=[];for(let i=0;i<n;i++){if(a[i]!==b[i]){c++;if(o.length<40)o.push('0x'+i.toString(16));}}console.log('differing bytes (within the common length): '+c);console.log(o.join(' '));" "$a" "$b"
+              fi
+              echo '```'
+              echo
+              echo 'Offsets below ~0x400 are in the PE header region (e.g. the COFF TimeDateStamp field); larger offsets point at body differences.'
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo '::warning::variant B: the two builds differ - see the summary for offsets'
+          fi
+          # Informative by design: the verdict is recorded either way and the
+          # job stays green.
+          exit 0
   # Doc-build gate: rustdoc lints (broken intra-doc links, etc.) fail the job
   # via -D warnings. Windows runner: the crate's Win32 code is not cfg-gated,
   # so the crate only builds on a Windows host.
