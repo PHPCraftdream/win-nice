@@ -1,0 +1,32 @@
+[package]
+name = "w1-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "w1-spike"
+path = "src/main.rs"
+
+# Standalone crate: empty [workspace] keeps cargo from ever attaching this
+# spike to any parent workspace.
+[workspace]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_System_IO",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_SystemInformation",
+    # Deviations from the spec'd feature list, both verified in the
+    # windows-sys 0.59.0 registry source:
+    # - Win32_System_Performance: QueryPerformanceCounter/Frequency live in
+    #   Win32::System::Performance in 0.59 (not Threading/Foundation).
+    # - Win32_Storage_FileSystem: CreateFileW for wnrun's wnice stdout/stderr
+    #   capture files.
+    "Win32_System_Performance",
+    "Win32_Storage_FileSystem",
+] }
