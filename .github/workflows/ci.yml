@@ -219,6 +219,77 @@ jobs:
         with:
           command: check
 
+  # Reproducible-build check: builds wnice.exe twice from two clean source
+  # trees at DIFFERENT absolute paths, with the same pinned toolchain and the
+  # same RUSTFLAGS remap the release recipe (release.yml/publish.yml) uses,
+  # then compares sha256. It mirrors the release recipe and is deliberately
+  # NON-BLOCKING: a mismatch must be visible but must not fail CI - per
+  # project policy this is decided deliberately, see docs/RELEASING.md.
+  repro:
+    runs-on: windows-latest
+    # Cap for two full release builds (build-exe's single build gets 30).
+    timeout-minutes: 40
+    env:
+      # Pinned release toolchain - keep in sync with release.yml and
+      # publish.yml. ci.yml's other jobs intentionally keep tracking floating
+      # `stable` (early-warning); only this job pins.
+      RELEASE_TOOLCHAIN: '1.97.0'
+      # The release recipe builds with this remap, so the binary must not
+      # depend on the checkout's absolute path. Proving that requires the two
+      # clean builds below to happen in DIFFERENT absolute paths.
+      RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/src
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned release toolchain
+        shell: bash
+        run: |
+          rustup toolchain install "$RELEASE_TOOLCHAIN" --profile minimal
+          rustup default "$RELEASE_TOOLCHAIN"
+
+      - name: Build #1 (checkout dir)
+        shell: bash
+        run: cargo build --release --locked
+
+      # Second independent source tree at a different absolute path.
+      - name: Second clean checkout
+        shell: bash
+        run: git clone --no-hardlinks --quiet . "$RUNNER_TEMP/repro-build-two"
+
+      - name: Build #2 (independent dir)
+        shell: bash
+        run: cd "$RUNNER_TEMP/repro-build-two" && cargo build --release --locked
+
+      - name: Compare sha256 and record the verdict
+        shell: bash
+        run: |
+          h1=$(sha256sum target/release/wnice.exe | cut -d' ' -f1)
+          h2=$(sha256sum "$RUNNER_TEMP/repro-build-two/target/release/wnice.exe" | cut -d' ' -f1)
+          {
+            echo '| build | sha256 of wnice.exe |'
+            echo '| --- | --- |'
+            echo "| #1 (checkout dir) | \`$h1\` |"
+            echo "| #2 ($RUNNER_TEMP/repro-build-two) | \`$h2\` |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$h1" = "$h2" ]; then
+            echo 'result: **bit-identical**' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::two clean release builds produced bit-identical wnice.exe'
+          else
+            {
+              echo 'result: **MISMATCH**'
+              echo
+              echo "- build #1: \`$h1\`"
+              echo "- build #2: \`$h2\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo '::warning::release builds are not bit-identical - see the summary table'
+          fi
+          # Informative by design: exit 0 in BOTH cases - a mismatch must be
+          # visible but must not block CI (see the job comment above).
+          exit 0
+
   # Doc-build gate: rustdoc lints (broken intra-doc links, etc.) fail the job
   # via -D warnings. Windows runner: the crate's Win32 code is not cfg-gated,
   # so the crate only builds on a Windows host.

@@ -673,6 +673,10 @@ of their own — the flag names describe exactly what they do.
 npm install -g win-nice
 ```
 
+GitHub Releases ship `SHA256SUMS`, two CycloneDX SBOMs and artifact
+attestations, and the npm package is published with provenance - see
+[docs/VERIFYING.md](docs/VERIFYING.md) for concrete verification commands.
+
 This installs `wnice.exe` plus one `<tool>.exe` per tool name (hardlinks of
 the same binary, so they cost no extra disk space; a plain copy where
 hardlinks aren't supported) and the Git Bash shims into

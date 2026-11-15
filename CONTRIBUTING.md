@@ -122,6 +122,14 @@ sizes may shrink but never grow, and the linter prints a note when an entry can 
 tightened or removed. Fix a violation by splitting the file or grouping files into
 subdirectories, not by raising a limit.
 
+## Releasing
+
+Releases are maintainer-only: a signed `v*.*.*` tag push builds the Release
+assets, attests them and opens a draft release; npm publishing with
+provenance runs from the same tag. The full procedure - release PR, signed
+tag, draft-release review and verification checklist - lives in
+[docs/RELEASING.md](docs/RELEASING.md).
+
 ## Reporting bugs
 
 Open a GitHub issue. Include your Windows version, `wnice -V`, the shell you

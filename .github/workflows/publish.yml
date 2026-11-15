@@ -15,6 +15,11 @@ concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # Pinned release toolchain - keep in sync with release.yml and ci.yml's
+  # repro job.
+  RELEASE_TOOLCHAIN: '1.97.0'
+
 jobs:
   publish:
     runs-on: windows-latest
@@ -58,12 +63,19 @@ jobs:
       - name: Install
         run: npm install
 
+      # The npm tarball's exe must be bit-identical to the Release asset built
+      # by release.yml from the same tag, so the recipe (pinned toolchain +
+      # --remap-path-prefix + --release --locked) is kept identical across the
+      # two workflows; ci.yml's repro job verifies it.
       # release-check and prepack (stage-exe.js --check) both need the prebuilt
       # binary in bin/wnice.exe before the test suites run.
       - name: Build wnice.exe
         shell: bash
         timeout-minutes: 20
-        run: rustup toolchain install stable --profile minimal && rustup default stable && cargo build --release --locked && node install/stage-exe.js
+        env:
+          # Same path remap as release.yml - see the comment above.
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/src
+        run: rustup toolchain install "$RELEASE_TOOLCHAIN" --profile minimal && rustup default "$RELEASE_TOOLCHAIN" && cargo build --release --locked && node install/stage-exe.js
 
       - name: Node test suite (installer logic)
         run: npm test
