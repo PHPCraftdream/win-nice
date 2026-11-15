@@ -108,9 +108,15 @@ jobs:
           path: bin
 
       - name: Install
+        # npm run scripts execute under npm's own script shell either way; the
+        # explicit bash makes every run step in this file shell-explicit.
+        shell: bash
         run: npm install
 
       - name: Node test suite (installer logic)
+        # npm run scripts execute under npm's own script shell either way; the
+        # explicit bash makes every run step in this file shell-explicit.
+        shell: bash
         run: npm test
 
       - name: Pester test suite (real tool behavior)
@@ -221,7 +227,7 @@ jobs:
 
   # Reproducible-build check: builds wnice.exe twice from two clean source
   # trees at DIFFERENT absolute paths, with the same pinned toolchain and the
-  # same RUSTFLAGS remap the release recipe (release.yml/publish.yml) uses,
+  # same RUSTFLAGS remap the release recipe (publish.yml) uses,
   # then compares sha256. It mirrors the release recipe and is deliberately
   # NON-BLOCKING: a mismatch must be visible but must not fail CI - per
   # project policy this is decided deliberately, see docs/RELEASING.md.
@@ -230,8 +236,8 @@ jobs:
     # Cap for two full release builds (build-exe's single build gets 30).
     timeout-minutes: 40
     env:
-      # Pinned release toolchain - keep in sync with release.yml and
-      # publish.yml. ci.yml's other jobs intentionally keep tracking floating
+      # Pinned release toolchain - keep in sync with publish.yml. ci.yml's
+      # other jobs intentionally keep tracking floating
       # `stable` (early-warning); only this job pins.
       RELEASE_TOOLCHAIN: '1.97.0'
       # The release recipe builds with this remap, so the binary must not

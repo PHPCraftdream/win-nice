@@ -62,24 +62,29 @@ update).
   zizmor-based GitHub Actions security audit.
 - `cargo doc` with `RUSTDOCFLAGS=-D warnings` as a CI job.
 - CODEOWNERS and SUPPORT.md.
-- A tag-triggered draft-release workflow (`.github/workflows/release.yml`):
-  pushing `v*.*.*` builds `wnice.exe` with the pinned release toolchain,
-  packs the npm tarball (`npm pack`), writes `rust-deps.cdx.json` (Rust
-  dependencies from `Cargo.lock`, via cargo-cyclonedx) and
-  `npm-deps.cdx.json` (npm package, via built-in `npm sbom`), covers the
-  four build outputs with `SHA256SUMS` and attests all five files as GitHub
-  artifact attestations. The release text is extracted from the matching
-  `CHANGELOG.md` section and the release is created as a draft for manual
-  review; `workflow_dispatch` runs the same pipeline as a dry-run rehearsal.
+- The publish pipeline (`.github/workflows/publish.yml`) covers the whole
+  release chain with ONE build: `wnice.exe` is built once (pinned release
+  toolchain), the npm tarball is packed once (`npm pack`),
+  `rust-deps.cdx.json` (Rust dependencies from `Cargo.lock`, via
+  cargo-cyclonedx) and `npm-deps.cdx.json` (npm package, via built-in
+  `npm sbom`) are written, the four build outputs are covered by
+  `SHA256SUMS`, all five files are attested as GitHub artifact attestations,
+  a draft GitHub Release is created with the text extracted from the
+  matching `CHANGELOG.md` section (re-runs recreate a stale draft), and
+  `npm publish --provenance` runs LAST with that exact tarball - so the
+  registry package and the Release assets are the same bytes, and a failure
+  before the publish step publishes nothing. `workflow_dispatch` rehearses
+  the pipeline on a branch through `npm publish --dry-run`.
 - docs/VERIFYING.md, a user-facing guide for tracing every release artifact
   and the npm package back to a git commit (artifact attestations,
-  `SHA256SUMS`, npm provenance, the GPG-signed tag), and docs/RELEASING.md,
+  `SHA256SUMS`, npm provenance, the signed release tag), and docs/RELEASING.md,
   the maintainer release procedure including signed tags and the
   draft-release verification checklist.
 - A CI `repro` job: two clean release builds of `wnice.exe` from different
   directories with the pinned release toolchain and identical `RUSTFLAGS`,
   compared by SHA-256, verdict in the job summary. Deliberately informative
-  (non-blocking).
+  (non-blocking). The verdict - not a claimed result - is recorded in the
+  job summary.
 
 ### Changed
 
@@ -100,11 +105,10 @@ update).
   pull-request runs via `concurrency`, cap every job with `timeout-minutes`,
   and drop the checkouts' persisted git credentials
   (`persist-credentials: false` - nothing in CI pushes).
-- The npm publish build now compiles `wnice.exe` with the same pinned
-  toolchain (1.97.0) and `--remap-path-prefix` recipe as the release
-  workflow, so the binary shipped in the npm package and the Release asset
-  are built identically. ci.yml's other jobs keep tracking floating stable
-  on purpose.
+- The publish workflow builds `wnice.exe` with a pinned toolchain (1.97.0)
+  and the `--remap-path-prefix` recipe that ci.yml's `repro` job mirrors
+  with two clean builds (verdict in its summary); ci.yml's other jobs keep
+  tracking floating stable on purpose.
 
 ## [0.3.0] - 2026-10-25
 

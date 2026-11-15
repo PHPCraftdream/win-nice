@@ -15,11 +15,10 @@ and write the changelog section.
 - `Cargo.lock`: run `cargo check` once without `--locked`; that refreshes the
   `wnice` entry. Commit the updated lockfile.
 - `CHANGELOG.md`: add the `## [X.Y.Z] - YYYY-MM-DD` section and the compare
-  link line at the bottom of the file. For a release after the current
-  0.3.0, that line is:
+  link line at the bottom of the file:
 
   ```
-  [0.4.0]: https://github.com/PHPCraftdream/win-nice/compare/v0.3.0...v0.4.0
+  [X.Y.Z]: https://github.com/PHPCraftdream/win-nice/compare/v<PREV>...vX.Y.Z
   ```
 
   `scripts/release-check.js` (run in CI) enforces the heading format, date
@@ -29,9 +28,12 @@ and write the changelog section.
 
 ### 3. Optional rehearsal
 
-Run the "Release (draft)" workflow via `workflow_dispatch` on master. It
-builds the artifacts exactly as a tag push would, but creates no release.
-Useful before the first tagged release or after workflow changes.
+Run publish.yml via `workflow_dispatch` on master. It runs everything a tag
+push would run - through `SHA256SUMS`, extracting the release text (the
+version is taken from `package.json`) and ending with `npm publish
+--dry-run` of the same tarball. Only the attestation, the draft-release
+creation, the real publish and the tag=version check are skipped. Useful
+before the first tagged release or after workflow changes.
 
 ### 4. Create and push the signed tag
 
@@ -41,38 +43,48 @@ git tag -v vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-`-s` needs a GPG key configured for git signing; `git tag -v` is the local
-self-check before pushing.
+`git tag -s vX.Y.Z -m "win-nice vX.Y.Z"` signs the tag (release tags are
+signed as policy; `-s` needs a GPG key configured for git signing), and
+`git tag -v` is the local self-check before pushing.
 
 ### 5. What runs automatically on a tag push
 
-The tag push triggers both workflows. They are independent runs of the same
-commit, each building `wnice.exe` with the identical pinned recipe
-(`RELEASE_TOOLCHAIN=1.97.0`, `--remap-path-prefix=<workspace>=/src`,
-`--locked`).
+The tag push triggers one workflow, publish.yml, which runs the whole
+pipeline in one job, in order:
 
-- `publish.yml` (first-come): publishes `win-nice@X.Y.Z` to npm via Trusted
-  Publishing (OIDC) with `npm publish --provenance`.
-- `release.yml`: builds the release assets and creates the draft release:
-  - `wnice.exe` from the pinned-recipe release build, gated by the repo's
-    release-check script;
-  - the npm tarball via `npm pack` (npm pinned at 11.5.1);
-  - `rust-deps.cdx.json` via `cargo cyclonedx -f json --spec-version 1.5
-    --override-filename 'rust-deps.cdx'` (cargo-cyclonedx 0.5.10) and
-    `npm-deps.cdx.json` via
-    `npm sbom --sbom-format cyclonedx --sbom-type application`;
-  - `SHA256SUMS` (basenames only, `sha256sum`) over those four files;
-  - all five files attested with actions/attest-build-provenance v4.2.2
-    (GitHub artifact attestations, SLSA provenance);
-  - release text extracted from the matching `CHANGELOG.md` section by
-    `scripts/release-notes.js`, then:
+- release build of `wnice.exe` with the pinned recipe
+  (`RELEASE_TOOLCHAIN=1.97.0`, `--remap-path-prefix=<workspace>=/src`,
+  `--locked`);
+- `npm test`, then the Pester suite, then the repo's release-check script;
+- `npm pack --pack-destination release-assets` - the tarball is packed once
+  (`win-nice-<version>.tgz`, npm pinned at 11.5.1);
+- `rust-deps.cdx.json` via `cargo cyclonedx -f json --spec-version 1.5
+  --override-filename 'rust-deps.cdx'` (cargo-cyclonedx 0.5.10) and
+  `npm-deps.cdx.json` via
+  `npm sbom --sbom-format cyclonedx --sbom-type application`;
+- `SHA256SUMS` (basenames only, `sha256sum`) over the four build outputs;
+- all five files attested with actions/attest-build-provenance v4.2.2
+  (GitHub artifact attestations, SLSA provenance);
+- draft GitHub Release: release text extracted from the matching
+  `CHANGELOG.md` section by `scripts/release-notes.js`, then:
 
-    ```
-    gh release create "$TAG" --draft --verify-tag --title "win-nice $TAG" --notes-file <file> <assets...>
-    ```
+  ```
+  gh release create "$TAG" --draft --verify-tag --title "win-nice $TAG" --notes-file <file> <assets...>
+  ```
 
-Publishing the draft is a manual owner action (step 7); npm publishing has
-already happened by then.
+  On a re-run a stale DRAFT of the same tag is deleted and recreated; a
+  published release is never touched;
+- `npm publish release-assets/win-nice-<version>.tgz --provenance --access
+  public` via Trusted Publishing (OIDC) - the LAST step.
+
+The registry tarball and the Release tarball are the same bytes by
+construction (the published file is the packed tarball itself), and any
+failure before the last step publishes nothing to npm. npm Trusted Publisher
+is bound to the publish.yml workflow name, which is why publishing stays in
+that file.
+
+Publishing the draft is a manual owner action (step 7); it happens after npm
+publishing.
 
 ci.yml's `repro` job is not part of the release, but it reports whether two
 clean builds with the pinned recipe are bit-identical - the verdict lands in
@@ -89,6 +101,9 @@ assets:
 - `npm audit signatures` in a scratch install of the published package;
 - the draft's release notes match the `CHANGELOG.md` section;
 - the pushed tag shows "Verified" on GitHub.
+
+On a re-run after a failed attempt the draft is recreated (idempotent), but
+a published release of the same tag is an explicit error.
 
 ### 7. Publish the draft
 
@@ -114,14 +129,16 @@ What is pinned, and why it is pinned there:
   current-stable tracking - losing the early warning when a new Rust release
   breaks something - and force every contributor onto the pinned compiler.
   The pin exists for release artifacts, so it lives in the release recipe.
-- `SOURCE_DATE_EPOCH` is not used: rustc ignores it, and neither `cargo
-  package` nor an npm-pack-based shipping flow is in play for the tarball.
-- The npm tarball's byte-reproducibility is not claimed (`npm pack` does not
-  honor `SOURCE_DATE_EPOCH`). Only `wnice.exe` bit-reproducibility is
-  claimed, and the `repro` job checks it empirically: two clean builds from
-  different directories with the pinned toolchain and identical `RUSTFLAGS`,
-  SHA-256 compared, verdict in the GitHub Step Summary - deliberately
-  informative (non-blocking).
+- `SOURCE_DATE_EPOCH` is not used anywhere in the release recipe (rustc
+  ignores it), and `npm pack` does not honor it either - so the npm tarball
+  is not byte-reproducible. Its integrity is anchored by `SHA256SUMS` and
+  npm's registry integrity (`dist.integrity`) instead.
+- `wnice.exe` reproducibility is measured by ci.yml's `repro` job: two clean
+  builds from different directories with the pinned toolchain and identical
+  `RUSTFLAGS`, SHA-256 compared, verdict in the GitHub Step Summary -
+  deliberately informative (non-blocking). The achieved-identity result is
+  added here only after the first CI run has measured it; no result is
+  claimed until then.
 - `--remap-path-prefix=<workspace>=/src`: rustc embeds the absolute path of
   the build workspace into the binary; remapping it to `/src` erases the
   machine-specific prefix, so builds from different directories produce
@@ -138,7 +155,7 @@ What the owner would need:
 - Azure Trusted Signing. Microsoft-managed certificates; an individual
   developer tier at ~$9.99/month; Microsoft validates the identity. The
   certificates are time-stamped and short-lived, so key handling
-  disappears. Integration is a signing step in release.yml using the Azure
+  disappears. Integration is a signing step in publish.yml using the Azure
   CLI or the Trusted Signing action. SmartScreen: reputation builds per
   publisher over time; a fresh certificate starts like any other new one.
 - SignPath Foundation. Free for approved open-source projects, but the
@@ -155,6 +172,6 @@ What the owner would need:
 
 Common to all three: signing removes the SmartScreen attribution warning,
 but reputation still accrues per publisher. Where it would slot in: a
-release.yml step after the build, before `SHA256SUMS` and the attestation,
-so the checksums and attestations cover the signed file. Until a
-certificate exists, this stays unimplemented.
+publish.yml step after the build, before the assets are collected,
+`SHA256SUMS`'d, attested and published, so the checksums and attestations
+cover the signed file. Until a certificate exists, this stays unimplemented.

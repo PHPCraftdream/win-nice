@@ -124,10 +124,11 @@ subdirectories, not by raising a limit.
 
 ## Releasing
 
-Releases are maintainer-only: a signed `v*.*.*` tag push builds the Release
-assets, attests them and opens a draft release; npm publishing with
-provenance runs from the same tag. The full procedure - release PR, signed
-tag, draft-release review and verification checklist - lives in
+Releases are maintainer-only: a signed `v*.*.*` tag push runs the whole
+pipeline in publish.yml - one build of `wnice.exe`, attestations, a draft
+GitHub Release, then `npm publish --provenance` as the last step, so the npm
+package and the Release assets are the same bytes. The draft is reviewed and
+published manually. The full procedure lives in
 [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Reporting bugs

@@ -2,8 +2,8 @@
 
 Every published win-nice artifact can be traced back to a specific git commit
 in `PHPCraftdream/win-nice` without trusting the download page: the GitHub
-Release assets carry artifact attestations produced by this repository's own
-workflows, a checksum file covers all four build outputs, and the npm package
+Release assets carry artifact attestations produced by this repository's
+release workflow, a checksum file covers all four build outputs, and the npm package
 is published with npm provenance from the same commit. This document shows
 how to check each of those claims yourself.
 
@@ -18,9 +18,13 @@ how to check each of those claims yourself.
 | `SHA256SUMS` | GitHub Release | artifact attestation |
 | `win-nice@<version>` | npm registry | registry signature + npm provenance |
 
-The npm package and the Release tarball are two separate builds (independent
-workflow runs of the same commit, identical pinned build recipe), so their
-bytes are not expected to match; each is verified through its own mechanism.
+The release workflow packs the npm tarball once, attests it, attaches it to
+the draft GitHub Release and, as its last step, publishes that exact file to
+npm - so the Release tarball and the npm registry package are the same bytes
+by construction. Each copy is still verified through its own mechanism.
+
+Artifact attestations and Release assets exist starting with version 0.4.0 -
+earlier releases predate this pipeline, so these checks do not apply to them.
 
 ## Verify the GitHub artifact attestations
 
@@ -33,13 +37,13 @@ command set is generally available since gh v2.63 (checked against the gh
 gh attestation verify wnice.exe --repo PHPCraftdream/win-nice
 ```
 
-and repeat for the other four files (`win-nice-0.3.0.tgz`,
+and repeat for the other four files (`win-nice-<version>.tgz`,
 `rust-deps.cdx.json`, `npm-deps.cdx.json`, `SHA256SUMS`). The stricter form
 pins the signer workflow, so an attestation produced by any other workflow in
 the repository fails:
 
 ```
-gh attestation verify wnice.exe --repo PHPCraftdream/win-nice --signer-workflow "PHPCraftdream/win-nice/.github/workflows/release.yml"
+gh attestation verify wnice.exe --repo PHPCraftdream/win-nice --signer-workflow "PHPCraftdream/win-nice/.github/workflows/publish.yml"
 ```
 
 `--format json` switches to machine-readable output:
@@ -62,16 +66,35 @@ signatures` verifies both for every downloaded package in a project; it works
 with npm 11 (checked against the npm 11.21.1 CLI docs):
 
 ```
-mkdir verify && cd verify && npm init -y && npm install win-nice@0.3.0 && npm audit signatures
+mkdir verify && cd verify && npm init -y && npm install win-nice@<version> && npm audit signatures
 ```
 
 `npm audit signatures --json --include-attestations` includes the full
 sigstore bundles in the output.
 
-This verifies the tarball served by the npm registry - a different build from
-the Release tarball (see "What exists"), but from the same commit and the
-same workflow. The published package page also displays the provenance
-attestation.
+### Verify the tarball matches the registry
+
+`npm view win-nice@<version> dist.integrity` prints the registry's integrity
+string for the published version: `sha512-` followed by the SHA-512 digest
+of the tarball, base64-encoded (SRI format; the same `dist.integrity` field
+npm's audit-signature template references). Compare it with the Release
+tarball by computing the same digest. In Git Bash on Windows (which ships
+openssl):
+
+```
+openssl dgst -sha512 -binary win-nice-<version>.tgz | openssl base64 -A
+```
+
+Prepend `sha512-` when comparing. PowerShell alternative:
+
+```
+$sha512 = [System.Security.Cryptography.SHA512]::Create(); 'sha512-' + [Convert]::ToBase64String($sha512.ComputeHash([System.IO.File]::ReadAllBytes((Resolve-Path '.\win-nice-<version>.tgz').Path)))
+```
+
+Equal strings mean the registry copy is byte-identical to the Release
+tarball.
+
+The published package page also displays the provenance attestation.
 
 ## Verify SHA256SUMS
 
@@ -93,9 +116,9 @@ PowerShell alternative: hash a single file and compare against the value in
 ## Compare the installed binary with the Release asset
 
 A global npm install keeps the package - binary included - under npm's global
-prefix. Its digest should match the Release asset's: both are built with the
-identical pinned recipe from the same tag, and CI's `repro` job empirically
-reports that two such builds are bit-identical.
+prefix. Its digest must match the Release asset's: the exe in the npm
+package and the Release asset are copies of ONE build - the release workflow
+stages a single binary and packs/attaches it.
 
 ```
 sha256sum "$(npm prefix -g)/node_modules/win-nice/bin/wnice.exe"
@@ -128,11 +151,12 @@ identifiers against vulnerability feeds without unpacking the artifacts.
   they say nothing about a draft's publication status.
 - The npm tarball is **not** claimed to be byte-reproducible (`npm pack` does
   not honor `SOURCE_DATE_EPOCH`).
-- `wnice.exe` **is** claimed to be bit-reproducible, and the claim is checked
-  empirically: CI's `repro` job performs two clean builds with the pinned
-  toolchain (1.97.0) and the same `RUSTFLAGS` and reports the verdict in its
-  GitHub Step Summary. The job is deliberately non-blocking - read the
-  summary instead of assuming green means identical.
+- `wnice.exe` reproducibility is **checked, not claimed**: CI's `repro` job
+  builds `wnice.exe` twice from two clean directories with the pinned recipe
+  and records whether the sha256 digests match in its GitHub Step Summary.
+  Until that job has run and reported a verdict, treat reproducibility as
+  unmeasured. The job is deliberately non-blocking - read the summary and do
+  not infer from green.
 - `wnice.exe` carries no Authenticode signature (owner decision, deferred;
   see docs/RELEASING.md), so fresh downloads trigger the SmartScreen
   "unknown publisher" warning.
@@ -149,12 +173,12 @@ build ran on. Two ways to read it:
 - GitHub UI: each release page has an "Attestations" view listing the
   attestations per artifact, with the commit and the workflow run linked.
 
-The release tag itself is GPG-signed by the maintainer. To verify it against
+Release tags are signed (see docs/RELEASING.md). To verify the tag against
 your local clone:
 
 ```
 git fetch origin tag vX.Y.Z && git tag -v vX.Y.Z
 ```
 
-A good signature means the tag - and therefore the commit both workflows
-built from - was created by the maintainer's key.
+A good signature means the tag - and therefore the commit the workflow built
+from - was created by the maintainer's key.
