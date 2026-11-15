@@ -18,6 +18,8 @@
 
 mod exec;
 #[cfg(test)]
+mod flow_tests;
+#[cfg(test)]
 mod tests;
 
 pub use exec::run_wsl;
@@ -77,8 +79,12 @@ fn priority_guest_values(p: PriorityClass) -> (&'static str, u32) {
 
 /// Translate a Windows current directory to its WSL guest path
 /// (`C:\a\b` -> `/mnt/c/a/b`, drive lowercased, backslashes -> slashes,
-/// `C:\` -> `/mnt/c`). A `\\?\` prefix is stripped; UNC paths and anything
-/// without drive-letter + separator semantics are refused — wnice never
+/// `C:\` -> `/mnt/c`). The verbatim prefix is stripped BEFORE
+/// classification: `\\?\C:\x` (what `canonicalize` returns, and
+/// `current_dir` sometimes) is a plain drive in verbatim form and must
+/// translate like `C:\x`. What is refused: verbatim UNC
+/// (`\\?\UNC\server\share`), bare UNC (`\\server\share`, `//server/share`)
+/// and anything without drive-letter + separator semantics — wnice never
 /// guesses a mapping it cannot verify, and `test -d` in the guest would
 /// only catch a wrong guess later with a confusing message.
 pub fn translate_windows_cwd(cwd: &str) -> Result<String, String> {
@@ -87,10 +93,15 @@ pub fn translate_windows_cwd(cwd: &str) -> Result<String, String> {
     };
     let not_drive =
         || format!("wnice: --wsl: current directory is not a Windows drive path: {cwd}");
-    if cwd.starts_with(r"\\?\UNC\") || cwd.starts_with(r"\\") {
+    if cwd.starts_with(r"\\?\UNC\") {
         return Err(unc());
     }
     let body = cwd.strip_prefix(r"\\?\").unwrap_or(cwd);
+    // Still separator-initial after the optional verbatim strip: a bare
+    // UNC path (or a non-drive verbatim form) — no guest mapping, refuse.
+    if body.starts_with('\\') || body.starts_with('/') {
+        return Err(unc());
+    }
     let mut chars = body.chars();
     let Some(drive) = chars.next() else {
         return Err(not_drive());
