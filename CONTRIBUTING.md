@@ -23,7 +23,10 @@ run without it. End users never compile anything.
 ### WSL integration tests (manual, real WSL2 required)
 
 `tests/wsl_integration.rs` launches a real distro, so it is skipped unless
-`WNICE_TEST_WSL=1` is set — CI (windows-latest) stays green without it.
+`WNICE_TEST_WSL=1` is set — CI (the windows-2022/windows-2025 matrix)
+stays green without it. The flag-to-systemd-property mapping itself
+(`src/run/wsl`) is pure logic covered by ordinary `cargo test` without
+WSL - only the probe/integration flow needs a real distro.
 Run it manually on a WSL2-capable machine:
 
 ```
@@ -60,6 +63,8 @@ pass in CI. One Pester case covers `admin`'s already-elevated branch and needs
 the whole runner elevated: `npm run test:elevated`
 (`test/pester/run-elevated.ps1`) asks for elevation once and runs the suite in
 that session. Run both a normal and an elevated pass for full coverage.
+The booster's own unit tests (fake `Sys` handles, real child processes under a
+plain un-elevated run) are part of ordinary `cargo test` and skip nowhere.
 
 Neither suite touches your real system PATH/registry by default; the Node
 tests redirect installs via `WIN_NICE_HOME` and registry tests use a scratch
