@@ -122,6 +122,15 @@ sizes may shrink but never grow, and the linter prints a note when an entry can 
 tightened or removed. Fix a violation by splitting the file or grouping files into
 subdirectories, not by raising a limit.
 
+## Releasing
+
+Releases are maintainer-only: a signed `v*.*.*` tag push runs the whole
+pipeline in publish.yml - one build of `wnice.exe`, attestations, a draft
+GitHub Release, then `npm publish --provenance` as the last step, so the npm
+package and the Release assets are the same bytes. The draft is reviewed and
+published manually. The full procedure lives in
+[docs/RELEASING.md](docs/RELEASING.md).
+
 ## Reporting bugs
 
 Open a GitHub issue. Include your Windows version, `wnice -V`, the shell you

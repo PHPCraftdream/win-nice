@@ -62,6 +62,30 @@ update).
   zizmor-based GitHub Actions security audit.
 - `cargo doc` with `RUSTDOCFLAGS=-D warnings` as a CI job.
 - CODEOWNERS and SUPPORT.md.
+- The publish pipeline (`.github/workflows/publish.yml`) covers the whole
+  release chain with ONE build: `wnice.exe` is built once (pinned release
+  toolchain), the npm tarball is packed once (`npm pack`),
+  `rust-deps.cdx.json` (Rust dependencies from `Cargo.lock`, via
+  cargo-cyclonedx) and `npm-deps.cdx.json` (npm package, via built-in
+  `npm sbom`) are written, the four build outputs are covered by
+  `SHA256SUMS`, all five files are attested as GitHub artifact attestations,
+  a draft GitHub Release is created with the text extracted from the
+  matching `CHANGELOG.md` section (re-runs recreate a stale draft), and
+  `npm publish --provenance` runs LAST with that exact tarball - so the
+  registry package and the Release assets are the same bytes, and a failure
+  before the publish step publishes nothing. `workflow_dispatch` rehearses
+  the pipeline on a branch through `npm publish --dry-run`.
+- docs/VERIFYING.md, a user-facing guide for tracing every release artifact
+  and the npm package back to a git commit (artifact attestations,
+  `SHA256SUMS`, npm provenance, the signed release tag), and docs/RELEASING.md,
+  the maintainer release procedure including signed tags and the
+  draft-release verification checklist.
+- A CI `repro` job: two recipe variants, each built twice from clean trees
+  at different absolute paths - a control without `/Brepro` and the release
+  recipe with `-C link-arg=/Brepro` - compared by SHA-256, with differing-byte
+  counts and offsets printed on a mismatch. Measured on one CI run (commit
+  bd4e365): the control diverged, the `/Brepro` recipe was bit-identical.
+  Informative (non-blocking); the verdict lands in the job summary.
 
 ### Changed
 
@@ -82,6 +106,12 @@ update).
   pull-request runs via `concurrency`, cap every job with `timeout-minutes`,
   and drop the checkouts' persisted git credentials
   (`persist-credentials: false` - nothing in CI pushes).
+- The publish workflow builds `wnice.exe` with a pinned toolchain (1.97.0),
+  `--remap-path-prefix` and `-C link-arg=/Brepro` - the recipe ci.yml's
+  `repro` job mirrors and measured (commit bd4e365): without `/Brepro` the
+  builds differed, with it they were bit-identical within one CI run;
+  bit-identity is not claimed beyond that scope. ci.yml's other jobs keep
+  tracking floating stable on purpose.
 
 ## [0.3.0] - 2026-10-25
 

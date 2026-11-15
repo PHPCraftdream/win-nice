@@ -68,3 +68,9 @@ elevation prompt is ever shown and no privilege is requested or held.
 Only the latest published version on npm is supported - 0.4.x as of this
 writing; earlier versions (including 0.3.x) are not. This project is
 pre-1.0; no long-term-support branches exist yet.
+
+## Verifying artifacts
+
+If a `wnice.exe` or an npm package reached you through some other channel,
+[docs/VERIFYING.md](docs/VERIFYING.md) shows how to confirm it really came
+from this repository (artifact attestations, checksums, npm provenance).
