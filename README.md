@@ -51,6 +51,31 @@ Every tool has built-in help with examples: `wnice --help`, `capc --help`,
 `idle -h`, `admin /?`, ... (`cy`/`cx` pass `--help` on to `claude`/`codex`).
 A usage error prints the tool's usage line and exits `1`.
 
+### What a CPU share actually guarantees
+
+`-c <percent>` and `-p <class>` answer two different questions, and it is
+worth being precise about both:
+
+- **`-c` is a ceiling, not a reservation.** The tree never gets more than N
+  percent of the machine's total CPU no matter what else runs - measured in
+  the W1 no-UAC spike (`docs/plans/2026-11-15-w1-no-uac-spike.md`): a 10%
+  hard cap held 9.7-9.9% of a 16-CPU machine while twelve HIGH-priority
+  competitors burned the rest, and competitors' priority never moved the
+  quota. But it grants nothing: an uncapped competitor can still use
+  whatever CPU the capped tree does not.
+- **`-p <class>` decides who wins when demand exceeds supply** - scheduler
+  precedence within the cap. `wnice -p high -c 10` means "at most 10% of
+  the machine, and above-normal precedence for whatever it does run", which
+  is the common benchmarking shape.
+- **What cannot be guaranteed: "nobody preempts us" in the strict sense.**
+  Processes of other users, elevated processes, `REALTIME` workloads, and
+  non-CPU resources (memory pressure, I/O saturation, GPU/driver stalls)
+  can still cause stalls; nothing here reserves CPU against them, and
+  wnice sets only a hard cap - there is no floor/reservation flag.
+- **Nested Job Objects multiply percentages** (see the `capc` section and
+  "Chaining these tools together" below) - check whether your shell is
+  already job-wrapped before trusting a cap percentage.
+
 ## Argument handling
 
 Every tool tries to launch the wrapped command directly first (`CreateProcess`,
@@ -108,7 +133,10 @@ The npm package itself installs on Windows only (a WSL-side npm refuses it,
 `wnice --wsl[=<distro>] [options] -- <command> [args...]` runs the command
 inside a WSL2 distro. Why a separate mode: Windows mode's Job Object cannot
 limit Linux processes — they run inside the WSL2 VM, invisible to Job
-Objects. This mode translates the same wnice flags into systemd/cgroup-v2
+Objects (the VM shows up host-side as `vmmem`, which an un-elevated process
+cannot even open - `OpenProcess` is denied - so a host-side limit on it is
+impossible, not just unimplemented; measured in the same spike). This mode
+translates the same wnice flags into systemd/cgroup-v2
 constraints *inside the guest* instead: the command runs as the distro's
 default user under a transient systemd scope started by root (root is only
 used to start it — `systemd-run --scope` supplies the limits, `nice -n` sets
@@ -211,7 +239,10 @@ The guest VM's total vCPUs/RAM come from `.wslconfig` (`processors=` and
 computed against (e.g. `wnice --wsl -c 50 -t 16 -- ...` on a
 `processors=16`, `memory=23GB` VM means `CPUQuota=800%` of 16 vCPUs and the
 first 16 guest vCPUs). wnice never reads or edits `.wslconfig` — changing
-the VM's size is your manual step.
+the VM's size is your manual step. `processors=` is a vCPU *count*, not a
+percentage - it limits parallelism, not duty cycle - and there is no
+documented host-side CPU-percentage knob for WSL2 (`memory=` exists for RAM),
+which is the other reason the percentage limits live in the guest.
 
 ### Checking it by hand
 
@@ -335,6 +366,10 @@ that already has a CPU rate limit — a CI agent or wrapper shell that
 job-wraps everything it starts: measured example, a 10% cap inside a parent
 job capped at 10% yields ~0.9% of the machine (10% of 10%), so check whether
 your shell is already job-wrapped before trusting a cap percentage.
+Workarounds: set the percentage at the level that owns the outer job (the
+percentages multiply, so an inner cap just compounds the restriction), or
+launch these tools from a shell that is not itself inside a
+CPU-rate-limited job.
 
 Blocks until the command exits, propagates its exit code.
 
@@ -652,6 +687,9 @@ ones in their place. The whole upgrade is one transaction — if any step fails,
 every original file is restored. Leftover `.old-<n>` files are removed by the
 next install/uninstall once the old process has exited.
 
+To verify that an installed binary is the one a release published, see
+[docs/VERIFYING.md](docs/VERIFYING.md).
+
 `npm uninstall -g win-nice` does **not** reverse this - npm's `uninstall`
 lifecycle script was removed (npm ≥ 7 never runs it at all; there is no
 supported npm version where a `preuninstall` script would fire). Run
@@ -684,6 +722,22 @@ falls back to scanning the install directory and only removes files it can
 prove are its own (the exact shipped binary, the generated shim text, or the
 `wnice.exe.managed` sidecar), so that scan doesn't delete unrelated files
 sitting in the same directory.
+
+### Upgrading from 0.3.0
+
+Nothing to migrate by hand: `npm install -g win-nice` replaces the tools in
+place (running exes are renamed aside; the upgrade is transactional). Every
+0.3.0 tool name, option and exit code is unchanged, so existing scripts keep
+working. Two things to know:
+
+- Un-elevated `high`/`realtime`/`abovenormal` now apply the priority to the
+  *whole tree* via the booster (0.3.0 set it on the root process only), and
+  the explanatory stderr note changed its wording. Only scripts that matched
+  the old `wnice: note: ... root process only` text verbatim need a one-line
+  update.
+- The new features are opt-in per invocation: `wnice --wsl ...` (needs a WSL2
+  distro with systemd enabled) and `wnice --boost -p <class>`. Commands that
+  do not use them behave exactly as in 0.3.0.
 
 ### Claude Code / Codex skill
 
@@ -775,7 +829,9 @@ into an isolated temp directory, and verifies the real installed artifact
 Git Bash shim exit-code smoke tests, and CHANGELOG/tag consistency) - this is what `publish.yml` runs right
 before `npm publish`. It needs `scripts/` and git tag history, neither of
 which is part of the published package, so it can't run against an installed
-copy.
+copy. The gated WSL integration tests (a real WSL2 distro) are described in
+[CONTRIBUTING.md](CONTRIBUTING.md); `cargo test` and `npm test` stay green
+without them.
 
 ## License
 

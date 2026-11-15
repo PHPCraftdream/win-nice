@@ -4,9 +4,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Repository hygiene and release engineering, plus two feature additions: a new
-WSL mode and the priority booster. The installer logic is untouched and the
-runtime dependency count stays zero.
+Nothing yet.
+
+## [0.4.0] - 2026-11-15
+
+Two feature additions - a new `--wsl` mode and the priority booster - plus
+repository hygiene and release engineering. There are no breaking CLI
+changes: every tool name, option and exit code of 0.3.0 behaves exactly as
+before, and both new modes are opt-in per invocation (`--wsl`, `--boost`).
+The installer logic is untouched and the runtime dependency count stays
+zero. Upgrading from 0.3.0 is an ordinary `npm install -g win-nice`; the
+only observable interface change besides the new flags is the wording of
+the un-elevated above-normal stderr note (see Changed below - scripts
+matching the old `root process only` wording verbatim need a one-line
+update).
 
 ### Added
 
@@ -17,8 +28,10 @@ runtime dependency count stays zero.
   `-n` TasksMax, `-s` RuntimeMaxSec + cgroup-wide SIGKILL, exit 124).
   Every requirement is prechecked up front with a clear error (WSL2,
   systemd as PID 1, cgroup v2, systemd-run, default user, guest-visible
-  cwd); `-p realtime` is refused loudly (the Linux nice/weight model has no
-  realtime band). Windows mode is unchanged; arguments travel as a raw argv
+  cwd); the Windows cwd is translated verbatim to `/mnt/<drive>/...`
+  (UNC paths are refused); `-p realtime` is refused loudly (the Linux
+  nice/weight model has no realtime band). Windows mode is unchanged;
+  arguments travel as a raw argv
   array with no shell on either side, so the cmd.exe `%` refusal does not
   apply.
 - `wnice --boost` (requires `-p/--priority`): skip the job priority-limit
@@ -307,7 +320,8 @@ everything below shipped together as `0.2.0`.
 - Node test suite (installer logic) and Pester integration suite (real
   Windows process/priority/Job-Object behavior).
 
-[Unreleased]: https://github.com/PHPCraftdream/win-nice/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/PHPCraftdream/win-nice/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/PHPCraftdream/win-nice/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.0...v0.2.1
