@@ -23,11 +23,7 @@ const SKIP_DIRS = new Set(['.git', 'node_modules', 'target', 'worktrees']);
 // a note when one can be removed or tightened).
 const BASELINE = {
   files: {},
-  dirs: {
-    // src/ holds the crate's top-level modules only (cli, front, jobs,
-    // launch, lib, limits, main, run); jobs is a peer, not a submodule.
-    src: 8,
-  },
+  dirs: {},
 };
 
 function toPosix(p) {

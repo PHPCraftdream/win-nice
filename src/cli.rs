@@ -189,11 +189,15 @@ fn parse_timeout(s: &str) -> Result<u32, String> {
 ///
 /// `logical_cpus` is the machine's logical processor count, used as the upper
 /// bound for `-t/--threads`.
+///
+/// `--jobs` in the option region is valid only when it is the whole command
+/// line; any other argument next to it is a [`ParseError::JobsConflict`].
 pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, ParseError> {
     let mut cfg = Config::default();
     let mut want_help = false;
     let mut want_version = false;
     let mut want_jobs = false;
+    let mut jobs_seen = 0usize;
     let mut i = 0usize;
     let mut options_done = false;
 
@@ -221,6 +225,7 @@ pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, ParseErr
         }
         if arg == "--jobs" {
             want_jobs = true;
+            jobs_seen += 1;
             i += 1;
             continue;
         }
@@ -316,20 +321,23 @@ pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, ParseErr
         }
     }
 
-    if want_help {
-        return Ok(Action::Help);
-    }
-    if want_version {
-        return Ok(Action::Version);
-    }
     if want_jobs {
-        if cfg != Config::default() {
+        // `--jobs` counts only as the sole argument: any other token (option,
+        // option value, command, or `--`) makes this a conflict, even when a
+        // `-h`/`-V` short-circuit is also pending.
+        if jobs_seen != 1 || args.len() > jobs_seen {
             return Err(ParseError::JobsConflict(
                 "--jobs takes no command and no other options; run 'wnice --jobs' on its own"
                     .to_string(),
             ));
         }
         return Ok(Action::Jobs);
+    }
+    if want_help {
+        return Ok(Action::Help);
+    }
+    if want_version {
+        return Ok(Action::Version);
     }
     if cfg.boost && cfg.wsl.is_some() {
         return Err(ParseError::Usage(
@@ -752,28 +760,46 @@ mod tests {
     #[test]
     fn jobs_alone_is_the_jobs_action() {
         assert_eq!(parse_args(&args(&["--jobs"]), 8).ok(), Some(Action::Jobs));
-        assert_eq!(
-            parse_args(&args(&["--jobs", "--jobs"]), 8).ok(),
-            Some(Action::Jobs)
-        );
+        // Repeating the flag is not "the single argument".
+        assert_eq!(jobs_conflict(&["--jobs", "--jobs"]), JOBS_CONFLICT);
     }
 
     #[test]
     fn jobs_conflicts_with_a_command_or_options() {
         assert_eq!(jobs_conflict(&["--jobs", "cmd"]), JOBS_CONFLICT);
         assert_eq!(jobs_conflict(&["--jobs", "-c", "10"]), JOBS_CONFLICT);
+        assert_eq!(jobs_conflict(&["--jobs", "-c", "0"]), JOBS_CONFLICT);
         assert_eq!(jobs_conflict(&["--jobs", "--boost"]), JOBS_CONFLICT);
         assert_eq!(jobs_conflict(&["--jobs", "--wsl"]), JOBS_CONFLICT);
+        assert_eq!(jobs_conflict(&["--jobs", "--"]), JOBS_CONFLICT);
         assert_eq!(jobs_conflict(&["-c", "10", "--jobs", "cmd"]), JOBS_CONFLICT);
+        assert_eq!(jobs_conflict(&["--jobs", "--help"]), JOBS_CONFLICT);
+        assert_eq!(jobs_conflict(&["--jobs", "-h"]), JOBS_CONFLICT);
+        assert_eq!(jobs_conflict(&["--jobs", "--version"]), JOBS_CONFLICT);
+        assert_eq!(jobs_conflict(&["--jobs", "-V"]), JOBS_CONFLICT);
     }
 
     #[test]
-    fn jobs_yields_to_help_and_double_dash() {
+    fn help_and_version_win_without_jobs() {
+        assert_eq!(parse_args(&args(&["--help"]), 8).ok(), Some(Action::Help));
+        assert_eq!(parse_args(&args(&["-h"]), 8).ok(), Some(Action::Help));
         assert_eq!(
-            parse_args(&args(&["--jobs", "--help"]), 8).ok(),
+            parse_args(&args(&["-c", "50", "--help"]), 8).ok(),
             Some(Action::Help)
         );
+        assert_eq!(
+            parse_args(&args(&["--version"]), 8).ok(),
+            Some(Action::Version)
+        );
+        assert_eq!(parse_args(&args(&["-V"]), 8).ok(), Some(Action::Version));
+    }
+
+    #[test]
+    fn jobs_after_double_dash_is_part_of_the_command() {
+        // After the option region `--jobs` is an ordinary command token.
         let c = run(&["--", "--jobs"]);
         assert_eq!(c.command, vec!["--jobs"]);
+        let c = run(&["cmd", "--jobs"]);
+        assert_eq!(c.command, vec!["cmd", "--jobs"]);
     }
 }

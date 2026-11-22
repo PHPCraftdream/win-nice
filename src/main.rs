@@ -29,7 +29,7 @@ fn main() -> ExitCode {
                 std::process::exit(code);
             }
             Ok(wnice::cli::Action::Jobs) => {
-                std::process::exit(wnice::jobs::run());
+                std::process::exit(wnice::front::jobs::run());
             }
             Err(wnice::cli::ParseError::Usage(msg)) => {
                 eprintln!("wnice: {msg}. {}", wnice::cli::USAGE);

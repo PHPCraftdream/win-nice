@@ -1,16 +1,20 @@
-//! Read-only Win32/NT inspection primitives for [`crate::jobs`].
+//! Read-only Win32/NT inspection primitives for [`crate::front::jobs`].
 //!
-//! This is the only module under `crate::jobs` with `unsafe`. Every function
-//! is a small wrapper that opens nothing for writing and bounds every read:
-//! handle snapshots are walked only within the bytes the kernel returned.
+//! This is the only module under `crate::front::jobs` with `unsafe`. Every
+//! function is a small wrapper that opens nothing for writing and bounds every
+//! read: handle snapshots are walked only within the bytes the kernel returned.
 
-use super::CpuCap;
+use super::{CapState, CpuCap, LimitFields};
 use crate::Handle;
 use std::mem::size_of;
 use windows_sys::Wdk::System::SystemInformation::NtQuerySystemInformation;
 use windows_sys::Wdk::System::Threading::NtQueryInformationProcess;
 use windows_sys::Win32::Foundation::{
     DuplicateHandle, FILETIME, HANDLE, STATUS_INFO_LENGTH_MISMATCH,
+};
+use windows_sys::Win32::Security::{
+    CopySid, EqualSid, GetLengthSid, GetTokenInformation, IsValidSid, TokenUser, PSID,
+    SECURITY_MAX_SID_SIZE, TOKEN_QUERY, TOKEN_USER,
 };
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, IsProcessInJob, JobObjectBasicAccountingInformation,
@@ -23,7 +27,7 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetProcessTimes, OpenProcess, PROCESS_DUP_HANDLE,
+    GetCurrentProcess, GetProcessTimes, OpenProcess, OpenProcessToken, PROCESS_DUP_HANDLE,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
@@ -139,9 +143,81 @@ fn decode_command_line(buf: &[u8], written: usize) -> Option<String> {
     Some(String::from_utf16_lossy(&units))
 }
 
+/// Our own user SID, copied out of the process token so it outlives the
+/// token handle.
+pub struct OwnedSid {
+    bytes: Vec<u8>,
+}
+
+impl OwnedSid {
+    /// The copy as a SID pointer; `CopySid` validated it before storing.
+    fn as_psid(&self) -> PSID {
+        self.bytes.as_ptr() as PSID
+    }
+}
+
+/// Our own user SID; `None` when the token or the SID query failed.
+pub fn current_user() -> Option<OwnedSid> {
+    let token = token_of(unsafe { GetCurrentProcess() })?;
+    let bytes = token_sid(&token)?;
+    Some(OwnedSid { bytes })
+}
+
+/// Whether `proc` runs as the same user as `own`; `None` when the token/SID
+/// query failed, `false` for a different user.
+pub fn same_user(proc: &Handle, own: &OwnedSid) -> Option<bool> {
+    let token = token_of(proc.raw())?;
+    let other = token_sid(&token)?;
+    Some(unsafe { EqualSid(own.as_psid(), other.as_ptr() as PSID) } != 0)
+}
+
+/// A query-only handle on `process`'s token.
+fn token_of(process: HANDLE) -> Option<Handle> {
+    let mut token: HANDLE = std::ptr::null_mut();
+    let ok = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) };
+    if ok == 0 || token.is_null() {
+        None
+    } else {
+        Some(Handle::from_raw(token))
+    }
+}
+
+/// Copy of the `TokenUser` SID inside `token`, sized by `GetLengthSid`.
+fn token_sid(token: &Handle) -> Option<Vec<u8>> {
+    let mut buf = vec![0u8; size_of::<TOKEN_USER>() + SECURITY_MAX_SID_SIZE as usize];
+    let mut needed: u32 = 0;
+    let ok = unsafe {
+        GetTokenInformation(
+            token.raw(),
+            TokenUser,
+            buf.as_mut_ptr().cast(),
+            buf.len() as u32,
+            &mut needed,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let user: TOKEN_USER = unsafe { std::ptr::read_unaligned(buf.as_ptr().cast()) };
+    let sid = user.User.Sid;
+    if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
+        return None;
+    }
+    let len = unsafe { GetLengthSid(sid) } as usize;
+    if len == 0 || len > SECURITY_MAX_SID_SIZE as usize {
+        return None;
+    }
+    let mut out = vec![0u8; len];
+    if unsafe { CopySid(len as u32, out.as_mut_ptr().cast(), sid) } == 0 {
+        return None;
+    }
+    Some(out)
+}
+
 /// `SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX`: one fixed-size entry of the extended
 /// handle snapshot (40 bytes on x64, never hardcoded). Every field is part of
-/// the layout; only the pid, the handle value and the type index are read.
+/// the layout; only the object address, the pid, the handle value and the type
+/// index are read.
 #[repr(C)]
 #[allow(dead_code)]
 struct EntryInfoEx {
@@ -158,6 +234,8 @@ struct EntryInfoEx {
 /// One handle of one process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Entry {
+    /// Kernel job-object address used for de-duplication.
+    pub object: usize,
     pub handle_value: usize,
     pub object_type_index: u16,
 }
@@ -218,6 +296,7 @@ impl HandleTable {
                 unsafe { std::ptr::read_unaligned(self.buf.as_ptr().add(base).cast()) };
             if entry.unique_process_id == pid as usize {
                 out.push(Entry {
+                    object: entry.object as usize,
                     handle_value: entry.handle_value,
                     object_type_index: entry.object_type_index,
                 });
@@ -283,19 +362,56 @@ pub fn duplicate_job(owner: &Handle, handle_value: usize) -> Option<Handle> {
     }
 }
 
-/// The limits and activity counters of one job object.
+/// The limits and activity counters of one job object, each part carrying its
+/// own unknown state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JobLimits {
-    pub cpu: Option<CpuCap>,
-    pub job_memory: Option<u64>,
-    pub active_process_limit: Option<u32>,
-    pub affinity: Option<u64>,
-    pub priority: Option<u32>,
-    pub active_processes: u32,
+    /// CPU cap: known-absent, known, or not known.
+    pub cpu: CapState,
+    /// `None` when the extended-limit query failed.
+    pub extended: Option<LimitFields>,
+    /// `None` when the accounting query failed.
+    pub active: Option<u32>,
 }
 
-/// Read the limits of `job`; `None` when the extended-limit query fails.
-pub fn job_limits(job: &Handle) -> Option<JobLimits> {
+/// Read the limits of `job`. Never fails wholesale: a query that fails leaves
+/// only its own part unknown.
+pub fn job_limits(job: &Handle) -> JobLimits {
+    JobLimits {
+        cpu: cpu_state(job),
+        extended: extended_limits(job),
+        active: active_processes(job),
+    }
+}
+
+/// The CPU rate cap: `Unknown` on a failed query, `Uncapped` without `ENABLE`.
+fn cpu_state(job: &Handle) -> CapState {
+    let mut rate: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = unsafe { std::mem::zeroed() };
+    let mut returned: u32 = 0;
+    let ok = unsafe {
+        QueryInformationJobObject(
+            job.raw(),
+            JobObjectCpuRateControlInformation,
+            (&mut rate as *mut JOBOBJECT_CPU_RATE_CONTROL_INFORMATION).cast(),
+            size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
+            &mut returned,
+        )
+    };
+    if ok == 0 {
+        return CapState::Unknown;
+    }
+    if (rate.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_ENABLE) == 0 {
+        return CapState::Uncapped;
+    }
+    // SAFETY: CpuRate is the plain-u32 member the rate control path wrote.
+    CapState::Capped(CpuCap {
+        cpu_rate: unsafe { rate.Anonymous.CpuRate },
+        hard: (rate.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP) != 0,
+    })
+}
+
+/// The `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` fields; `None` on a failed query.
+fn extended_limits(job: &Handle) -> Option<LimitFields> {
     let mut ext: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
     let mut returned: u32 = 0;
     let ok = unsafe {
@@ -311,28 +427,21 @@ pub fn job_limits(job: &Handle) -> Option<JobLimits> {
         return None;
     }
     let flags = ext.BasicLimitInformation.LimitFlags;
+    Some(LimitFields {
+        job_memory: (flags & JOB_OBJECT_LIMIT_JOB_MEMORY != 0).then_some(ext.JobMemoryLimit as u64),
+        active_process_limit: (flags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS != 0)
+            .then_some(ext.BasicLimitInformation.ActiveProcessLimit),
+        affinity: (flags & JOB_OBJECT_LIMIT_AFFINITY != 0)
+            .then_some(ext.BasicLimitInformation.Affinity as u64),
+        priority: (flags & JOB_OBJECT_LIMIT_PRIORITY_CLASS != 0)
+            .then_some(ext.BasicLimitInformation.PriorityClass),
+    })
+}
 
-    let mut cpu = None;
-    let mut rate: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = unsafe { std::mem::zeroed() };
-    let ok = unsafe {
-        QueryInformationJobObject(
-            job.raw(),
-            JobObjectCpuRateControlInformation,
-            (&mut rate as *mut JOBOBJECT_CPU_RATE_CONTROL_INFORMATION).cast(),
-            size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
-            &mut returned,
-        )
-    };
-    if ok != 0 && (rate.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_ENABLE) != 0 {
-        // SAFETY: CpuRate is the plain-u32 member the rate control path wrote.
-        let cpu_rate = unsafe { rate.Anonymous.CpuRate };
-        cpu = Some(CpuCap {
-            cpu_rate,
-            hard: (rate.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP) != 0,
-        });
-    }
-
+/// `JobObjectBasicAccountingInformation::ActiveProcesses`; `None` on failure.
+fn active_processes(job: &Handle) -> Option<u32> {
     let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+    let mut returned: u32 = 0;
     let ok = unsafe {
         QueryInformationJobObject(
             job.raw(),
@@ -342,30 +451,14 @@ pub fn job_limits(job: &Handle) -> Option<JobLimits> {
             &mut returned,
         )
     };
-    let active_processes = if ok == 0 {
-        0
-    } else {
-        accounting.ActiveProcesses
-    };
-
-    Some(JobLimits {
-        cpu,
-        job_memory: (flags & JOB_OBJECT_LIMIT_JOB_MEMORY != 0).then_some(ext.JobMemoryLimit as u64),
-        active_process_limit: (flags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS != 0)
-            .then_some(ext.BasicLimitInformation.ActiveProcessLimit),
-        affinity: (flags & JOB_OBJECT_LIMIT_AFFINITY != 0)
-            .then_some(ext.BasicLimitInformation.Affinity as u64),
-        priority: (flags & JOB_OBJECT_LIMIT_PRIORITY_CLASS != 0)
-            .then_some(ext.BasicLimitInformation.PriorityClass),
-        active_processes,
-    })
+    (ok != 0).then_some(accounting.ActiveProcesses)
 }
 
-/// Whether `proc` is a member of `job`; `false` when the query itself fails.
-pub fn is_in_job(proc: &Handle, job: &Handle) -> bool {
+/// Whether `proc` is a member of `job`; `None` when the query itself failed.
+pub fn is_in_job(proc: &Handle, job: &Handle) -> Option<bool> {
     let mut result: i32 = 0;
     let ok = unsafe { IsProcessInJob(proc.raw(), job.raw(), &mut result) };
-    ok != 0 && result != 0
+    (ok != 0).then_some(result != 0)
 }
 
 /// Kernel plus user CPU time of `proc`, in 100 ns units.
@@ -410,6 +503,20 @@ mod tests {
     fn entry_info_matches_the_documented_x64_size() {
         assert_eq!(size_of::<EntryInfoEx>(), 3 * size_of::<usize>() + 16);
         assert_eq!(size_of::<UnicodeString>(), 2 * size_of::<usize>());
+    }
+
+    #[test]
+    fn entry_starts_with_the_object_address() {
+        // The object address is what makes two handles the same job object.
+        assert_eq!(std::mem::offset_of!(EntryInfoEx, object), 0);
+        let entry = Entry {
+            object: 0x7ff6_0000,
+            handle_value: 4,
+            object_type_index: 7,
+        };
+        assert_eq!(entry.object, 0x7ff6_0000);
+        assert_eq!(entry.handle_value, 4);
+        assert_eq!(entry.object_type_index, 7);
     }
 
     #[test]

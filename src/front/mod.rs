@@ -3,8 +3,9 @@
 
 pub mod admin;
 pub mod help;
+pub mod jobs;
 pub mod legacy;
-pub(crate) mod native;
+mod native;
 pub mod uiup;
 
 use crate::{Config, RealSys, Sys};
