@@ -15,6 +15,10 @@ path = "src/main.rs"
 name = "integration"
 harness = false
 
+[[test]]
+name = "compat"
+harness = false
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Security",

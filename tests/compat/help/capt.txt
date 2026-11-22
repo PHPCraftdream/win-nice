@@ -1,0 +1,13 @@
+capt - pin a whole process tree to the first N logical processors
+
+usage: capt <thread-count> <command> [args...]
+
+<thread-count>: 1..min(logical processors, 63). These are logical processors
+(hardware threads), not physical cores. Applies to the command and everything
+it starts. Exits with the command's exit code.
+
+Same as: wnice -t <thread-count> -- <command> [args...]
+
+examples:
+  capt 4 npm run build
+  capt 2 cargo test

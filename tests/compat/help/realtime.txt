@@ -1,0 +1,21 @@
+realtime - run a command at REALTIME priority
+
+usage: realtime <command> [args...]
+
+The priority is a Job Object limit, so it applies to the whole process tree,
+including children that ask for another priority. Waits for the command and
+exits with its exit code (127 if it is not found). Everything after the tool
+name is the command, exactly as given.
+
+DANGEROUS: realtime outranks the system's own input, audio and UI threads; a
+busy realtime process can freeze the whole desktop. Needs
+SeIncreaseBasePriorityPrivilege (an elevated shell); without it the job
+refuses (Win32 error 1314) and the priority booster applies HIGH to every
+process of the tree; a note on stderr says so.
+
+Same as: wnice -p realtime -- <command> [args...]
+
+examples:
+  realtime npm run build
+  realtime cmd /c "build.bat && test.bat"
+  realtime capc 50 cargo test        (chained: realtime priority plus a 50% CPU cap)

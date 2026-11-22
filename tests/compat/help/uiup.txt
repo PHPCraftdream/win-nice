@@ -1,0 +1,9 @@
+uiup - raise the desktop shell processes to HIGH priority
+
+usage: uiup
+
+One-shot boost for explorer, dwm, sihost, ShellExperienceHost,
+StartMenuExperienceHost, StartMenu, SearchApp and audiodg, to keep the
+desktop responsive while heavy work runs. Asks for elevation (UAC) when
+needed, because dwm and sihost run under another account. Prints a table of
+old and new priorities. Apps started later are not affected.

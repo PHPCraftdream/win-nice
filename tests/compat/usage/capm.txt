@@ -1,0 +1,1 @@
+usage: capm <size> <command> [args...]  (size: plain integer 1-100 = percent of total physical RAM, e.g. 50 - same convention as capc's <percent 1-100>; number+m/M = MB, e.g. 512m; number+g/G = GB, e.g. 2g)

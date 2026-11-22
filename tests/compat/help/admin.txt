@@ -1,0 +1,14 @@
+admin - run a command as Administrator and wait for it
+
+usage: admin <command> [args...]
+
+Already elevated: runs the command inline in this console.
+Not elevated: shows the UAC prompt and runs it in its own window (Windows
+gives an elevated process its own console). A real .exe is started directly
+by its absolute path; .bat/.cmd files, cmd.exe builtins and unknown names go
+through cmd.exe, where an argument containing '%' is refused. Exits with the
+command's exit code, or 1 if elevation was cancelled.
+
+examples:
+  admin npm install -g some-package
+  admin cmd /c "net stop spooler && net start spooler"

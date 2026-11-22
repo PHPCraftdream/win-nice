@@ -1,0 +1,1 @@
+usage: caps <seconds> <command> [args...]  (seconds: positive whole or decimal number, e.g. 2 or 2.5 - converted to whole milliseconds; minimum 1 ms, maximum 4294967294 ms (~49.7 days) - a deliberate ceiling, not an API limit)
