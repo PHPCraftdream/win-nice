@@ -1,0 +1,15 @@
+caps - wall-clock timeout for a whole process tree
+
+usage: caps <seconds> <command> [args...]
+
+<seconds>: positive whole or decimal number (2, 2.5), floored to whole
+milliseconds; at most 4294967294 ms (~49.7 days). Time the machine spends
+asleep counts. If the command is still running at the deadline, it and
+everything it started are killed in one call and caps exits 124; otherwise
+caps exits with the command's exit code. Sets no other limit.
+
+Same as: wnice -s <seconds> -- <command> [args...]
+
+examples:
+  caps 300 npm test
+  caps 2.5 ping -n 10 127.0.0.1    (exits 124)

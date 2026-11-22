@@ -1,0 +1,14 @@
+capn - limit how many processes a tree may run at once
+
+usage: capn <count> <command> [args...]
+
+<count>: 1..4294967295 simultaneously active processes, the command itself
+included (capn 1 lets the command run but refuses its first child). A spawn
+above the limit fails; nothing already running is affected. Exits with the
+command's exit code.
+
+Same as: wnice -n <count> -- <command> [args...]
+
+examples:
+  capn 10 npm run build
+  capn 32 make -j 64

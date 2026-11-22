@@ -1,3 +1,5 @@
 * text=auto
 bin/*.exe binary
 *.ps1 text eol=crlf
+# Golden CLI text is compared byte for byte; keep it LF in every checkout.
+tests/compat/** text eol=lf

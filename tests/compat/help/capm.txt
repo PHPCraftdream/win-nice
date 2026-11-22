@@ -1,0 +1,20 @@
+capm - memory ceiling for a whole process tree
+
+usage: capm <size> <command> [args...]
+
+<size>:
+  1-100   percent of total physical RAM, e.g. 50 (no '%' sign)
+  <n>m    megabytes, e.g. 512m (decimals allowed: 0.5g)
+  <n>g    gigabytes, e.g. 2g
+
+Limits the total committed memory of the command and everything it starts.
+An allocation above the limit FAILS (most programs then crash); it is not
+throttled. Leave headroom for the runtime itself. Exits with the command's
+exit code.
+
+Same as: wnice -m <size> -- <command> [args...]
+
+examples:
+  capm 50 npm run build
+  capm 512m node script.js
+  capm 2g cargo build

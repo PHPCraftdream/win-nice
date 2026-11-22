@@ -1,0 +1,109 @@
+wnice - run a command under Windows priority and resource limits
+
+usage: wnice [options] [--] <command> [args...]
+
+Every limit you pass is applied through ONE Windows Job Object that the
+command joins before its first instruction, so it covers the whole process
+tree (children, grandchildren, ...). The process tree is just
+wnice.exe -> <command>: no cmd.exe or powershell.exe layer in between.
+wnice waits for the command and exits with its exit code.
+
+options:
+  -p, --priority <class>   priority class for the whole tree:
+                           idle | belownormal | normal | abovenormal | high | realtime
+                           high/realtime (and abovenormal) need
+                           SeIncreaseBasePriorityPrivilege (an elevated shell)
+                           for a job-wide limit; without it wnice starts the
+                           priority booster, which applies the class to every
+                           process of the tree itself (see --boost)
+  -c, --cpu <1-100>        hard CPU cap, percent of the whole machine's CPU
+                           (throttles even when the machine is otherwise idle)
+  -t, --threads <n>        run on the first <n> logical processors only
+                           (1..min(logical processors, 63))
+  -m, --memory <size>      ceiling on the tree's total committed memory:
+                           <1-100>   percent of physical RAM, e.g. 50
+                           <n>m      megabytes, e.g. 512m (decimals allowed: 1.5g)
+                           <n>g      gigabytes, e.g. 2g
+                           an allocation above it fails (it is not throttled)
+  -n, --procs <n>          at most <n> processes alive at once, the command
+                           itself included; a spawn above it fails
+  -s, --timeout <seconds>  wall-clock deadline (2, 2.5, ...; sleep counts);
+                           on expiry the whole tree is killed and wnice exits 124
+  --wsl[=<distro>]         run the command inside a WSL2 distro (the one named,
+                           or wsl.exe's default) under a systemd scope; the
+                           other options become cgroup v2 limits in the guest
+                           (see WSL MODE below)
+  --boost                  skip the job priority limit; apply -p to every
+                           process of the tree via the booster (job completion
+                           port + SetPriorityClass per new process; usually
+                           sub-millisecond, up to a few ms in spawn bursts);
+                           requires -p/--priority
+  -h, --help               this help
+  -V, --version            print the version
+
+Options end at the first argument that is not an option, or at '--'.
+Everything after that is passed to the command exactly as given.
+
+command lookup:
+  A bare name is searched in the absolute PATH entries, in PATHEXT order
+  (.com, .exe, .bat, .cmd). The current directory is NEVER searched.
+  .bat/.cmd files run through 'cmd.exe /d /v:off /s /c'; on that path an
+  argument containing '%' is refused (cmd.exe would expand it).
+  cmd.exe builtins are not files: wrap them, e.g. wnice -p idle -- cmd /c dir
+
+WSL mode (--wsl):
+  The command runs inside the guest as its default user; root is only used
+  to start it (systemd-run --scope supplies the limits, nice(1) sets the
+  nice level, runuser(1) drops back to the user). Flag mapping:
+    -c   CPUQuota = N percent of ALL guest vCPUs (nproc --all)
+    -p   Nice 19/10/0/-5/-20 and CPUWeight 1/50/100/500/10000 for
+         idle/belownormal/normal/abovenormal/high; realtime is REFUSED
+         (the Linux nice/weight model has no realtime band)
+    -m   MemoryMax: percent of the guest's RAM, or m/g byte sizes
+    -t   AllowedCPUs = the first N guest vCPUs
+    -n   TasksMax
+    -s   RuntimeMaxSec plus a cgroup-wide SIGKILL at the deadline;
+         wnice then exits 124 like Windows mode
+  Requirements, all checked up front with a clear error: WSL2 (WSL1 is
+  refused), systemd as PID 1 (enable [boot] systemd=true in /etc/wsl.conf),
+  cgroup v2, systemd-run, runuser/nice. The command starts in the current
+  Windows directory translated to /mnt/<drive>/...; if that directory is
+  not visible in the guest, the run is refused. Arguments travel as a raw
+  argv array through 'wsl.exe --exec' - no shell on either side - so the
+  cmd.exe '%' refusal of Windows mode does not apply here. Startup runs a
+  few WSL probes, so expect a second or two of overhead. The guest's total
+  vCPUs/RAM are whatever .wslconfig (processors=/memory=) gives the VM;
+  wnice never edits that file - it is the hard ceiling.
+
+exit codes:
+  <n>   the command's own exit code
+  124   timed out (-s); the whole tree was killed
+  127   command not found
+  1     usage error, '%' refused, or a Windows API failure (message on stderr)
+
+background processes:
+  A process the command leaves running keeps the limits for its whole life,
+  but is not killed when the command exits normally (only on timeout or if
+  wnice itself is killed).
+
+examples:
+  wnice -p idle -- npm run build
+      build in the background without slowing the desktop
+  wnice -c 50 -t 4 -- cargo build --release
+      at most half the CPU, on 4 logical processors
+  wnice -m 2g -n 32 -- node server.js
+      2 GB for the whole tree, at most 32 processes
+  wnice -s 300 -- npm test
+      kill the test run and everything it started after 5 minutes
+  wnice -p belownormal -c 70 -m 50 -s 1800 -- npm run e2e
+      everything at once, still one wrapper process and one job
+  wnice --wsl -c 50 -s 300 -- ./bench.sh
+      run a Linux benchmark capped at half the VM's CPU, killed after
+      5 minutes (exit 124)
+
+The single-purpose tools idle, belownormal, abovenormal, high, realtime,
+capc, capt, capm, caps and capn are this binary with one limit each, and
+admin (run elevated) and uiup (boost the desktop shell) ship with it; run any
+of them with --help. cy and cx run 'claude --dangerously-skip-permissions'
+and 'codex --dangerously-bypass-approvals-and-sandbox' with your arguments
+(so 'cy --help' shows claude's own help).

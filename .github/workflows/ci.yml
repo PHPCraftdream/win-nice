@@ -164,6 +164,24 @@ jobs:
           if ($failed) { exit 1 }
           exit 0
 
+      - name: Backward-compatibility differential (published reference build)
+        # Replays the fixed command set in tests/compat/differential-cases.json
+        # against the PUBLISHED wnice.exe of the version pinned in
+        # tests/compat/reference-version.txt (never "latest") and against the
+        # binary built in this workflow; stdout, stderr and exit code must match
+        # byte for byte. An intentional difference belongs in
+        # tests/compat/differential-allowlist.json, with a reason per entry.
+        shell: bash
+        run: |
+          version="$(cat tests/compat/reference-version.txt)"
+          ref_dir="$RUNNER_TEMP/compat-reference"
+          mkdir -p "$ref_dir"
+          npm pack "win-nice@$version" --pack-destination "$ref_dir"
+          node --require ./scripts/lib/hide-windows.js scripts/compat-differential.js \
+            --built bin/wnice.exe \
+            --tarball "$ref_dir/win-nice-$version.tgz" \
+            --work "$RUNNER_TEMP/compat-work"
+
       - name: Verify the actual packed artifact (scripts/release-check.js)
         # A break here (as in review rounds 12-13: shallow checkout,
         # shell:true) would otherwise only surface in the tag-triggered

@@ -83,6 +83,57 @@ key under `HKCU:\Software\WinNiceTest`.
 - No new runtime dependencies without a strong reason - "no dependencies" is a
   deliberate project property, not an oversight.
 
+## Compatibility contract
+
+Everything a released version exposes is contract: the tool names and their
+argument syntax, the `wnice` options (including `--wsl` and `--boost`), the
+exit codes (`<n>` passed through unchanged, `124` timeout, `127` command not
+found, `1` usage or wrapper error, negative NTSTATUS values bit for bit), the
+exact stderr text, and the `--help` output of every tool. New features must be
+strictly additive; changing any of the above is a breaking change and needs a
+deliberate decision, never a CI-green silent diff. Not contract: the installer
+(covered by `npm test`), timing, README/SKILL wording, and anything that only
+happens inside a WSL guest.
+
+Two gates hold it:
+
+1. `tests/compat.rs` (part of `cargo test`) compares the running binary with
+   the goldens in `tests/compat/help/` and `tests/compat/usage/`, and pins the
+   exit codes, the error messages and the Job Object lifecycle (the limits are
+   on the tree's job while it runs; a child left running by a normal exit
+   survives AND still reports the CPU cap itself, queried after the wrapper is
+   gone, while KILL_ON_JOB_CLOSE is released; a timeout kills the whole tree
+   and exits 124).
+   To change a golden: run the tool, diff its output against the file, and
+   commit the new file in the same commit as the intended change. `tests/compat/**`
+   is pinned to LF in `.gitattributes` - do not let an editor rewrite the line
+   endings.
+
+2. `scripts/compat-differential.js` (a CI step) replays the fixed command set in
+   `tests/compat/differential-cases.json` against the published binary of the
+   version named in `tests/compat/reference-version.txt` and against the fresh
+   build, and fails on any difference in stdout, stderr or exit code. An
+   intentional difference needs an entry in
+   `tests/compat/differential-allowlist.json` (`{ "case", "field", "reason" }`);
+   the list is empty by default, and an entry that stops differing fails the
+   run, so it cannot rot.
+   - Local run: `npm run build:exe`, then
+     `npm pack win-nice@$(cat tests/compat/reference-version.txt) --pack-destination <dir>`
+     and
+     `node --require ./scripts/lib/hide-windows.js scripts/compat-differential.js --built bin/wnice.exe --tarball <dir>/win-nice-<version>.tgz`.
+   - After a release, move the reference: change the single line in
+     `tests/compat/reference-version.txt` to the new version (first PR after the
+     release) and drop any allowlist entry that no longer differs. Never point
+     it at "latest".
+   - New coverage: append one object to `differential-cases.json`. `${CMD}` and
+     `${WORKDIR}` are expanded by the runner, and an optional `env` object
+     overrides single environment variables for both sides (the cy/cx cases pin
+     `PATH` and `PATHEXT` to a fake agent CLI), so a case never depends on the
+     caller's PATH, `PATHEXT`, or a temp path. An optional `expect` block
+     (`exit`, `stdoutIncludes`, `stderrIncludes`) is checked against BOTH
+     builds: a case that silently took another path - a stand-in that was not
+     found, say - fails instead of matching.
+
 ## Design conventions worth knowing before you dig in
 
 - One multicall binary: `src/main.rs` dispatches on the argv[0] file stem.

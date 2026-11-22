@@ -1,0 +1,4 @@
+{
+  "about": "Intentional stdout/stderr/exit-code differences between the published reference build and the current build. One entry per (case, field); every entry needs a reason. An entry that no longer differs fails the run, so this list cannot rot. Empty by default: new differences are regressions, not allowlist material.",
+  "entries": []
+}

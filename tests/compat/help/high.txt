@@ -1,0 +1,20 @@
+high - run a command at HIGH priority
+
+usage: high <command> [args...]
+
+The priority is a Job Object limit, so it applies to the whole process tree,
+including children that ask for another priority. Waits for the command and
+exits with its exit code (127 if it is not found). Everything after the tool
+name is the command, exactly as given.
+
+HIGH/REALTIME as a job limit need SeIncreaseBasePriorityPrivilege
+(an elevated shell). Without it the job refuses (Win32 error 1314)
+and the priority booster applies HIGH to every process of the
+tree; a note on stderr says so.
+
+Same as: wnice -p high -- <command> [args...]
+
+examples:
+  high npm run build
+  high cmd /c "build.bat && test.bat"
+  high capc 50 cargo test        (chained: high priority plus a 50% CPU cap)

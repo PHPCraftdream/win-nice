@@ -1,0 +1,17 @@
+idle - run a command at IDLE priority
+
+usage: idle <command> [args...]
+
+The priority is a Job Object limit, so it applies to the whole process tree,
+including children that ask for another priority. Waits for the command and
+exits with its exit code (127 if it is not found). Everything after the tool
+name is the command, exactly as given.
+
+Use it to keep long builds/tests from making the desktop sluggish.
+
+Same as: wnice -p idle -- <command> [args...]
+
+examples:
+  idle npm run build
+  idle cmd /c "build.bat && test.bat"
+  idle capc 50 cargo test        (chained: idle priority plus a 50% CPU cap)

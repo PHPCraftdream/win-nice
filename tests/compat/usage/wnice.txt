@@ -1,0 +1,15 @@
+usage: wnice [options] [--] <command> [args...]
+options:
+  -p, --priority <idle|belownormal|normal|abovenormal|high|realtime>
+  -c, --cpu <1-100>
+  -t, --threads <1..min(logical processors, 63)>
+  -m, --memory <size>   (<1-100> percent of RAM, or <n>[.d](m|g) bytes, e.g. 512m, 0.5g)
+  -n, --procs <1-4294967295>
+  -s, --timeout <seconds>  (decimal seconds > 0, floored to whole ms, max 4294967294 ms)
+  --wsl[=<distro>]   run the command inside WSL2 under a systemd scope (see --help)
+  --boost                  with -p: apply the priority to every process via the
+                           priority booster (see the README), not a job limit
+  -h, --help
+  -V, --version
+options end at the first non-option token or at '--'; everything after
+belongs to the wrapped command.

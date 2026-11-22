@@ -1,0 +1,15 @@
+abovenormal - run a command at ABOVE_NORMAL priority
+
+usage: abovenormal <command> [args...]
+
+The priority is a Job Object limit, so it applies to the whole process tree,
+including children that ask for another priority. Waits for the command and
+exits with its exit code (127 if it is not found). Everything after the tool
+name is the command, exactly as given.
+
+Same as: wnice -p abovenormal -- <command> [args...]
+
+examples:
+  abovenormal npm run build
+  abovenormal cmd /c "build.bat && test.bat"
+  abovenormal capc 50 cargo test        (chained: abovenormal priority plus a 50% CPU cap)

@@ -1,0 +1,14 @@
+capc - hard CPU cap for a whole process tree
+
+usage: capc <percent 1-100> <command> [args...]
+
+Caps the total CPU use of the command and everything it starts at
+<percent> of the whole machine (Job Object hard cap). Unlike idle, it holds
+even when nothing else wants the CPU. Exits with the command's exit code.
+
+Same as: wnice -c <percent> -- <command> [args...]
+
+examples:
+  capc 50 npm run build
+  capc 25 cargo build --release
+  capc 50 capm 50 npm test     (chained: also cap memory at 50% of RAM)
