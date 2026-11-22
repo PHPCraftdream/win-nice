@@ -9,6 +9,10 @@ by its absolute path; .bat/.cmd files, cmd.exe builtins and unknown names go
 through cmd.exe, where an argument containing '%' is refused. Exits with the
 command's exit code, or 1 if elevation was cancelled.
 
+examples:
+  admin npm install -g some-package
+  admin cmd /c "net stop spooler && net start spooler"
+
 --keep-limits, opt-in: keep the limits of the job this admin is in.
 usage: admin --keep-limits <command> [args...]
 When this admin was started inside a limited Job Object (capc 10 admin
@@ -17,15 +21,16 @@ of admin and would run unlimited. With the flag, admin elevates wnice with
 the caller's job limits instead of the command, so the elevated tree runs
 with the same CPU rate cap, job memory limit, active-process limit, affinity
 and priority class. The elevated wnice creates its own new job: it is a
-separate pool, not the caller's job. Affinity is kept only when the mask is a
-contiguous run from CPU 0 (it becomes -t <n>); otherwise admin says so on
-stderr and elevates without it. Not kept: the wall-clock timeout -s (it lives
-in the wrapper process, not in the job), and the caps of outer jobs when the
-caller's job is nested. In no job, or with none of those limits, admin prints
-one note and behaves exactly like plain admin. Already elevated, the flag
-changes nothing: the command inherits the job it already has.
-
-examples:
-  admin npm install -g some-package
-  admin cmd /c "net stop spooler && net start spooler"
-  capc 10 admin --keep-limits npm run build
+separate pool, not the caller's job. A hard CPU cap with a fractional
+percent is rounded down to a whole percent, but never below 1 (wnice -c
+takes whole percents), and admin says so on stderr. Every limit that cannot be kept -
+a CPU rate control that is not a hard cap, an affinity mask that is not a
+contiguous run from CPU 0, an unknown priority class - gets its own stderr
+line and is left out; the rest is still kept. Not kept by design: the
+wall-clock timeout -s (it lives in the wrapper process, not in the job),
+and the caps of outer jobs when the caller's job is nested. In no job, or
+with none of those limits, admin prints one note and behaves exactly like
+plain admin. When the caller's job limits cannot be read, or the wnice.exe
+next to admin.exe is not this executable's front, admin refuses to elevate
+(exit 1) instead of running unlimited. Already elevated, the flag changes
+nothing: the command inherits the job it already has.

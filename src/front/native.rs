@@ -10,7 +10,7 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::JobObjects::{
-    JobObjectCpuRateControlInformation, JobObjectExtendedLimitInformation,
+    IsProcessInJob, JobObjectCpuRateControlInformation, JobObjectExtendedLimitInformation,
     QueryInformationJobObject, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
 };
@@ -156,36 +156,53 @@ pub fn raise_to_high(pid: u32) -> (Result<u32, u32>, Result<(), u32>) {
     }
 }
 
-/// The limits of the job this process belongs to: `QueryInformationJobObject`
-/// with a NULL job handle (the caller's immediate job). `None` when the
-/// process is in no job or a query failed.
-pub fn caller_limits() -> Option<super::admin::CallerLimits> {
+/// What the job this process belongs to reports. `NoJob` is only returned when
+/// the process really is in no job: every query failure is reported as such, so
+/// the caller can fail closed instead of elevating unlimited.
+pub fn caller_job() -> super::admin::CallerJob {
+    use super::admin::CallerJob;
     unsafe {
+        let mut in_job: i32 = 0;
+        if IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) == 0 {
+            return CallerJob::Failed {
+                query: "IsProcessInJob",
+                code: GetLastError(),
+            };
+        }
+        if in_job == 0 {
+            return CallerJob::NoJob;
+        }
         let mut ext: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        let ok = QueryInformationJobObject(
+        if QueryInformationJobObject(
             std::ptr::null_mut(),
             JobObjectExtendedLimitInformation,
             (&mut ext as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
             size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             std::ptr::null_mut(),
-        );
-        if ok == 0 {
-            return None;
+        ) == 0
+        {
+            return CallerJob::Failed {
+                query: "QueryInformationJobObject(JobObjectExtendedLimitInformation)",
+                code: GetLastError(),
+            };
         }
         let mut cpu: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = std::mem::zeroed();
-        let ok = QueryInformationJobObject(
+        if QueryInformationJobObject(
             std::ptr::null_mut(),
             JobObjectCpuRateControlInformation,
             (&mut cpu as *mut JOBOBJECT_CPU_RATE_CONTROL_INFORMATION).cast(),
             size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
             std::ptr::null_mut(),
-        );
-        if ok == 0 {
-            return None;
+        ) == 0
+        {
+            return CallerJob::Failed {
+                query: "QueryInformationJobObject(JobObjectCpuRateControlInformation)",
+                code: GetLastError(),
+            };
         }
         // SAFETY: CpuRate is the plain-u32 union member the rate control path
         // writes (see limits::cpu_rate_info).
-        Some(super::admin::CallerLimits {
+        CallerJob::Limits(super::admin::CallerLimits {
             flags: ext.BasicLimitInformation.LimitFlags,
             affinity: ext.BasicLimitInformation.Affinity,
             active_process_limit: ext.BasicLimitInformation.ActiveProcessLimit,

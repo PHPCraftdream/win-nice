@@ -606,6 +606,30 @@ fn test_help_exits_zero_with_examples() {
     }
 }
 
+/// A spawned child killed through its retained handle on drop unless it was
+/// waited for; nothing here is ever killed by PID.
+struct ChildGuard(Option<std::process::Child>);
+
+impl ChildGuard {
+    fn spawn(mut cmd: Command) -> ChildGuard {
+        ChildGuard(Some(cmd.spawn().expect("spawn admin")))
+    }
+
+    fn output(mut self) -> Output {
+        let child = self.0.take().expect("child");
+        child.wait_with_output().expect("admin output")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 /// True when this process holds an elevated (administrator) token.
 fn elevated() -> bool {
     unsafe {
@@ -630,25 +654,26 @@ fn elevated() -> bool {
 fn test_admin_keep_limits() {
     let admin = legacy_exe("admin");
     let run = |args: &[&str]| {
-        Command::new(&admin)
-            .creation_flags(CREATE_NO_WINDOW)
+        let mut cmd = Command::new(&admin);
+        cmd.creation_flags(CREATE_NO_WINDOW)
             .args(args)
-            .output()
-            .expect("spawn admin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        ChildGuard::spawn(cmd).output()
     };
-    // Flag with no command: the unchanged usage error, the only part of
-    // --keep-limits that runs before elevation.
+    if !elevated() {
+        // Not elevated, a regression in flag parsing would reach the UAC prompt
+        // (a window no test may open), so nothing is run at all.
+        println!("note: not elevated; admin --keep-limits was not run");
+        return;
+    }
+    // Flag with no command: the unchanged usage error.
     let plain = run(&[]);
     let kept = run(&["--keep-limits"]);
     assert_eq!(kept.status.code(), Some(1));
     assert_eq!(stdout(&kept), "", "--keep-limits with no command: stdout");
     assert_eq!(stderr(&kept), stderr(&plain), "usage error must not change");
-    if !elevated() {
-        // Not elevated, the other branch is the UAC prompt - a visible window
-        // no test may open - so only the usage/route part is asserted here.
-        println!("note: not elevated; only the usage part of admin --keep-limits was asserted");
-        return;
-    }
     for args in [
         &["--keep-limits", "cmd", "/c", "exit", "7"][..],
         &["cmd", "/c", "exit", "7"][..],

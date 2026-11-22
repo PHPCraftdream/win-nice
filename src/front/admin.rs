@@ -6,6 +6,8 @@
 //! `wnice` front with the limits of the caller's job instead of the command,
 //! so a UAC-elevated child keeps them (a separate new job, not the caller's).
 
+use std::path::Path;
+
 use super::native;
 use crate::launch::{
     build_argv_command_line, build_cmd_fallback_command_line, contains_percent, is_bat_or_cmd,
@@ -69,12 +71,26 @@ pub struct CallerLimits {
     pub cpu_rate: u32,
 }
 
-/// What `--keep-limits` elevates: the `wnice` options that reproduce the
-/// preserved limits, plus one stderr note per limit that could not be kept.
+/// What the caller's immediate job reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallerJob {
+    /// The process belongs to no job.
+    NoJob,
+    /// A query failed; `code` is the Win32 error of `query`.
+    Failed { query: &'static str, code: u32 },
+    /// The job's limits.
+    Limits(CallerLimits),
+}
+
+/// What `--keep-limits` can do with the caller's job: the `wnice` options that
+/// reproduce the preserved limits, one stderr note per limit that cannot be
+/// kept, and whether the job carries any limit at all.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Plan {
     pub options: Vec<String>,
     pub notes: Vec<String>,
+    /// The caller's job carries at least one limit `--keep-limits` knows.
+    pub carried: bool,
 }
 
 const PRIORITIES: [PriorityClass; 6] = [
@@ -121,25 +137,62 @@ fn memory_arg(bytes: u64) -> String {
 pub fn plan(l: &CallerLimits, logical_cpus: u32) -> Plan {
     let mut out = Plan::default();
     if l.cpu_control_flags & crate::JOB_OBJECT_CPU_RATE_CONTROL_ENABLE != 0 {
-        let percent = l.cpu_rate / 100;
-        if l.cpu_rate.is_multiple_of(100) && (1..=100).contains(&percent) {
-            out.options.extend(["-c".to_string(), percent.to_string()]);
-        } else {
+        out.carried = true;
+        if l.cpu_control_flags & crate::JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP == 0 {
             out.notes.push(format!(
-                "admin: --keep-limits: the CPU rate cap could not be kept (CpuRate {}).",
-                l.cpu_rate
+                "admin: --keep-limits: the caller's CPU rate control is not a hard cap (control \
+                 flags {:#x}); it cannot be kept",
+                l.cpu_control_flags
             ));
+        } else {
+            let percent = l.cpu_rate / 100;
+            if percent == 0 {
+                out.options.extend(["-c".to_string(), "1".to_string()]);
+                out.notes.push(format!(
+                    "admin: --keep-limits: the caller's CPU rate cap {}.{:02}% is below 1%, the \
+                     smallest whole percent wnice -c accepts; keeping -c 1",
+                    percent,
+                    l.cpu_rate % 100
+                ));
+            } else {
+                if !l.cpu_rate.is_multiple_of(100) {
+                    out.notes.push(format!(
+                        "admin: --keep-limits: the caller's CPU rate cap {}.{:02}% was rounded \
+                         down to -c {percent}; wnice -c takes whole percents",
+                        percent,
+                        l.cpu_rate % 100
+                    ));
+                }
+                out.options.extend(["-c".to_string(), percent.to_string()]);
+            }
         }
     }
-    if l.flags & crate::JOB_OBJECT_LIMIT_JOB_MEMORY != 0 && l.job_memory_limit > 0 {
-        out.options
-            .extend(["-m".to_string(), memory_arg(l.job_memory_limit)]);
+    if l.flags & crate::JOB_OBJECT_LIMIT_JOB_MEMORY != 0 {
+        out.carried = true;
+        if l.job_memory_limit > 0 {
+            out.options
+                .extend(["-m".to_string(), memory_arg(l.job_memory_limit)]);
+        } else {
+            out.notes.push(
+                "admin: --keep-limits: the job memory limit is 0 bytes; it cannot be kept"
+                    .to_string(),
+            );
+        }
     }
-    if l.flags & crate::JOB_OBJECT_LIMIT_ACTIVE_PROCESS != 0 && l.active_process_limit > 0 {
-        out.options
-            .extend(["-n".to_string(), l.active_process_limit.to_string()]);
+    if l.flags & crate::JOB_OBJECT_LIMIT_ACTIVE_PROCESS != 0 {
+        out.carried = true;
+        if l.active_process_limit > 0 {
+            out.options
+                .extend(["-n".to_string(), l.active_process_limit.to_string()]);
+        } else {
+            out.notes.push(
+                "admin: --keep-limits: the active-process limit is 0; it cannot be kept"
+                    .to_string(),
+            );
+        }
     }
     if l.flags & crate::JOB_OBJECT_LIMIT_AFFINITY != 0 {
+        out.carried = true;
         match threads_of(l.affinity).filter(|&n| n <= logical_cpus.clamp(1, 63)) {
             Some(n) => out.options.extend(["-t".to_string(), n.to_string()]),
             None => out.notes.push(format!(
@@ -150,6 +203,7 @@ pub fn plan(l: &CallerLimits, logical_cpus: u32) -> Plan {
         }
     }
     if l.flags & crate::JOB_OBJECT_LIMIT_PRIORITY_CLASS != 0 {
+        out.carried = true;
         match PRIORITIES
             .iter()
             .copied()
@@ -177,18 +231,35 @@ pub fn elevated_params(options: &[String], command: &[String]) -> String {
 }
 
 /// This executable's `wnice` front: the same file under another hardlink name
-/// (dispatch reads argv[0], so an elevated copy must not be called `admin`).
+/// (dispatch reads argv[0]) or the installer's byte-identical copy. Anything
+/// else is refused before the UAC prompt.
 fn wnice_front() -> Result<String, String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("admin: --keep-limits: cannot locate this executable: {e}"))?;
     let front = exe.with_file_name("wnice.exe");
-    if !front.is_file() {
+    if !same_front(&exe, &front) {
         return Err(format!(
-            "admin: --keep-limits: {} is missing, so the limits cannot be kept",
+            "admin: --keep-limits: {} is not this executable's wnice front; refusing to elevate",
             front.display()
         ));
     }
     Ok(front.to_string_lossy().into_owned())
+}
+
+/// Same content, so the same installed front: the installer's hardlink and its
+/// fallback copy both qualify, a foreign `wnice.exe` of another build does not.
+/// (A file's volume serial and file index are still unstable in std.)
+fn same_front(exe: &Path, front: &Path) -> bool {
+    let (Ok(meta_a), Ok(meta_b)) = (std::fs::metadata(exe), std::fs::metadata(front)) else {
+        return false;
+    };
+    if meta_a.len() != meta_b.len() {
+        return false;
+    }
+    match (std::fs::read(exe), std::fs::read(front)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// Start `file` elevated and return its exit code; a cancelled prompt is the
@@ -206,35 +277,74 @@ fn elevate(file: &str, params: &str) -> i32 {
     }
 }
 
-/// Elevate the `wnice` front with the caller's job limits. `None` means there
-/// is nothing to keep and the caller falls back to the plain route.
-fn elevate_kept(args: &[String], sys: &dyn Sys) -> Option<i32> {
-    let plan = match native::caller_limits() {
-        Some(l) => plan(&l, sys.logical_processor_count()),
-        None => Plan::default(),
-    };
-    if plan.options.is_empty() {
-        eprintln!("{NOTHING_TO_KEEP}");
-        return None;
+/// What `--keep-limits` does next.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Elevation {
+    /// Nothing to keep or nothing that could be kept: use the plain route.
+    Plain,
+    /// Fail closed before the UAC prompt.
+    Fail,
+    /// Elevate `params` with `file`.
+    Keep { file: String, params: String },
+}
+
+/// Split a leading `--keep-limits` off `args`; anywhere else it is a command
+/// token.
+fn split_keep_limits(args: &[String]) -> (bool, &[String]) {
+    match args.split_first() {
+        Some((first, rest)) if first == KEEP_LIMITS => (true, rest),
+        _ => (false, args),
     }
-    for note in &plan.notes {
-        eprintln!("{note}");
-    }
-    let file = match wnice_front() {
-        Ok(f) => f,
-        Err(msg) => {
-            eprintln!("{msg}");
-            return Some(1);
+}
+
+/// Decide the `--keep-limits` step and report every problem through `err`: one
+/// line per limit that cannot be kept, one line when there is nothing to keep,
+/// one line when the limits cannot be read or the front is not ours.
+fn decide(
+    job: CallerJob,
+    logical_cpus: u32,
+    args: &[String],
+    front: &mut dyn FnMut() -> Result<String, String>,
+    err: &mut dyn FnMut(&str),
+) -> Elevation {
+    let limits = match job {
+        CallerJob::NoJob => {
+            err(NOTHING_TO_KEEP);
+            return Elevation::Plain;
         }
+        CallerJob::Failed { query, code } => {
+            err(&format!(
+                "admin: --keep-limits: {query} failed: {code}; refusing to elevate without the \
+                 caller's limits"
+            ));
+            return Elevation::Fail;
+        }
+        CallerJob::Limits(l) => l,
     };
-    Some(elevate(&file, &elevated_params(&plan.options, args)))
+    let plan = plan(&limits, logical_cpus);
+    for note in &plan.notes {
+        err(note);
+    }
+    if plan.options.is_empty() {
+        if !plan.carried {
+            err(NOTHING_TO_KEEP);
+        }
+        return Elevation::Plain;
+    }
+    match front() {
+        Ok(file) => Elevation::Keep {
+            file,
+            params: elevated_params(&plan.options, args),
+        },
+        Err(msg) => {
+            err(&msg);
+            Elevation::Fail
+        }
+    }
 }
 
 pub fn main(args: &[String]) -> i32 {
-    let (keep, args) = match args.split_first() {
-        Some((first, rest)) if first == KEEP_LIMITS => (true, rest),
-        _ => (false, args),
-    };
+    let (keep, args) = split_keep_limits(args);
     if args.is_empty() {
         eprintln!("{USAGE}");
         eprintln!("{}", super::help::hint("admin"));
@@ -249,8 +359,17 @@ pub fn main(args: &[String]) -> i32 {
         return crate::run::run(&cfg, sys);
     }
     if keep {
-        if let Some(code) = elevate_kept(args, &*sys) {
-            return code;
+        let mut err = |msg: &str| eprintln!("{msg}");
+        match decide(
+            native::caller_job(),
+            sys.logical_processor_count(),
+            args,
+            &mut wnice_front,
+            &mut err,
+        ) {
+            Elevation::Plain => {}
+            Elevation::Fail => return 1,
+            Elevation::Keep { file, params } => return elevate(&file, &params),
         }
     }
     let (file, params) = match route(&path_dirs(), args) {
@@ -356,6 +475,7 @@ mod tests {
             a(&["-c", "100", "-m", "512m", "-n", "9", "-t", "4", "-p", "high"])
         );
         assert!(p.notes.is_empty(), "{:?}", p.notes);
+        assert!(p.carried);
     }
 
     #[test]
@@ -462,8 +582,197 @@ mod tests {
     }
 
     #[test]
-    fn keep_limits_without_a_command_is_the_existing_usage_error() {
-        assert_eq!(main(&a(&["--keep-limits"])), 1);
-        assert_eq!(main(&a(&[])), 1);
+    fn hard_cap_with_a_fractional_percent_is_rounded_down() {
+        let mut l = empty();
+        l.cpu_control_flags =
+            crate::JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | crate::JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+        l.cpu_rate = 1050;
+        let p = plan(&l, 8);
+        assert_eq!(p.options, a(&["-c", "10"]));
+        assert_eq!(p.notes.len(), 1);
+        assert!(p.notes[0].contains("10.50%"), "{}", p.notes[0]);
+        assert!(p.notes[0].contains("-c 10"), "{}", p.notes[0]);
+        l.cpu_rate = 1000;
+        assert!(
+            plan(&l, 8).notes.is_empty(),
+            "a whole percent is not rounded"
+        );
+        l.cpu_rate = 50;
+        let p = plan(&l, 8);
+        assert_eq!(p.options, a(&["-c", "1"]));
+        assert_eq!(p.notes.len(), 1);
+        assert!(p.notes[0].contains("below 1%"), "{}", p.notes[0]);
+    }
+
+    #[test]
+    fn rate_control_that_is_not_a_hard_cap_is_not_kept() {
+        let mut l = empty();
+        l.cpu_control_flags = crate::JOB_OBJECT_CPU_RATE_CONTROL_ENABLE;
+        l.cpu_rate = 1000;
+        let p = plan(&l, 8);
+        assert!(p.options.is_empty());
+        assert!(p.carried);
+        assert_eq!(p.notes.len(), 1);
+        assert!(p.notes[0].contains("not a hard cap"), "{}", p.notes[0]);
+    }
+
+    #[test]
+    fn affinity_only_job_reports_the_loss_on_stderr() {
+        let mut lines: Vec<String> = Vec::new();
+        let mut front_called = false;
+        let mut front = || {
+            front_called = true;
+            Ok("unused".to_string())
+        };
+        let mut err = |m: &str| lines.push(m.to_string());
+        let out = decide(
+            CallerJob::Limits(CallerLimits {
+                flags: crate::JOB_OBJECT_LIMIT_AFFINITY,
+                affinity: 0b101,
+                ..empty()
+            }),
+            8,
+            &a(&["cmd"]),
+            &mut front,
+            &mut err,
+        );
+        assert_eq!(out, Elevation::Plain);
+        assert!(!front_called);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("affinity could not be kept"),
+            "{}",
+            lines[0]
+        );
+        assert!(!lines.contains(&NOTHING_TO_KEEP.to_string()), "{lines:?}");
+    }
+
+    #[test]
+    fn query_failure_fails_closed_before_elevation() {
+        let mut lines: Vec<String> = Vec::new();
+        let mut front_called = false;
+        let mut front = || {
+            front_called = true;
+            Ok("unused".to_string())
+        };
+        let mut err = |m: &str| lines.push(m.to_string());
+        let out = decide(
+            CallerJob::Failed {
+                query: "QueryInformationJobObject(JobObjectCpuRateControlInformation)",
+                code: 5,
+            },
+            8,
+            &a(&["cmd"]),
+            &mut front,
+            &mut err,
+        );
+        assert_eq!(out, Elevation::Fail);
+        assert!(!front_called);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains(
+                "QueryInformationJobObject(JobObjectCpuRateControlInformation) failed: 5"
+            ),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[0].contains("refusing to elevate"), "{}", lines[0]);
+    }
+
+    #[test]
+    fn front_that_is_not_this_executable_fails_closed() {
+        let mut lines: Vec<String> = Vec::new();
+        let mut front = || {
+            Err(
+                "admin: --keep-limits: C:\\x\\wnice.exe is not this executable's wnice front; \
+                 refusing to elevate"
+                    .to_string(),
+            )
+        };
+        let mut err = |m: &str| lines.push(m.to_string());
+        let out = decide(
+            CallerJob::Limits(full()),
+            8,
+            &a(&["cmd"]),
+            &mut front,
+            &mut err,
+        );
+        assert_eq!(out, Elevation::Fail);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("not this executable's wnice front"),
+            "{}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn keep_route_elevates_the_front_with_the_limits() {
+        let mut lines: Vec<String> = Vec::new();
+        let mut front = || Ok("C:\\tools\\wnice.exe".to_string());
+        let mut err = |m: &str| lines.push(m.to_string());
+        let out = decide(
+            CallerJob::Limits(full()),
+            8,
+            &a(&["cmd", "/c", "x y"]),
+            &mut front,
+            &mut err,
+        );
+        match out {
+            Elevation::Keep { file, params } => {
+                assert_eq!(file, "C:\\tools\\wnice.exe");
+                assert_eq!(params, "-c 100 -m 512m -n 9 -t 4 -p high -- cmd /c \"x y\"");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    #[test]
+    fn no_job_reports_once_and_stays_plain() {
+        let mut lines: Vec<String> = Vec::new();
+        let mut front_called = false;
+        let mut front = || {
+            front_called = true;
+            Ok("unused".to_string())
+        };
+        let mut err = |m: &str| lines.push(m.to_string());
+        let out = decide(CallerJob::NoJob, 8, &a(&["cmd"]), &mut front, &mut err);
+        assert_eq!(out, Elevation::Plain);
+        assert!(!front_called);
+        assert_eq!(lines, a(&[NOTHING_TO_KEEP]));
+    }
+
+    #[test]
+    fn same_front_requires_the_same_file_content() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let exe = here.join("Cargo.toml");
+        assert!(same_front(&exe, &exe), "the same path");
+        assert!(!same_front(&exe, &here.join("README.md")), "another file");
+        assert!(
+            !same_front(&exe, &here.join("wnice-no-such-front.exe")),
+            "a missing sibling is not our front"
+        );
+    }
+
+    fn split(v: &[&str]) -> (bool, Vec<String>) {
+        let args = a(v);
+        let (keep, rest) = split_keep_limits(&args);
+        (keep, rest.to_vec())
+    }
+
+    #[test]
+    fn only_a_leading_keep_limits_is_split_off() {
+        assert_eq!(split(&["--keep-limits", "cmd"]), (true, a(&["cmd"])));
+        assert_eq!(
+            split(&["cmd", "--keep-limits"]),
+            (false, a(&["cmd", "--keep-limits"]))
+        );
+        assert_eq!(split(&["--keep-limits"]), (true, a(&[])));
+        assert_eq!(
+            split(&["--keep-limits", "--keep-limits", "cmd"]),
+            (true, a(&["--keep-limits", "cmd"]))
+        );
+        assert_eq!(split(&[]), (false, a(&[])));
     }
 }

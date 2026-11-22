@@ -42,16 +42,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   executable's `wnice` front instead of the command, as
   `wnice <options> -- <command> [args...]`: `-c` CPU rate percent, `-m` job
   memory limit, `-n` active-process limit, `-t` affinity (only when the mask
-  is a contiguous run from CPU 0, otherwise one stderr note and no affinity)
-  and `-p` priority class. The elevated `wnice` creates its own new job, so
-  the limits live in a separate pool, never in the caller's job. Not kept: the
-  wall-clock timeout (it lives in the wrapper process, not in the job) and the
-  caps of outer jobs when the caller's job is nested. With no job, or none of
-  those limits, one note on stderr and the plain `admin` behavior. Already
-  elevated, the flag changes nothing. `admin <command>` without the flag, the
-  `admin` usage text and every exit code are unchanged; only the
-  `admin --help` text grew, which is the differential allowlist's second
-  entry.
+  is a contiguous run from CPU 0) and `-p` priority class. The elevated
+  `wnice` creates its own new job, so the limits live in a separate pool,
+  never in the caller's job. A hard cap with a fractional percent is rounded
+  down to a whole percent (never below 1), with one stderr note naming both values; every
+  limit that cannot be kept (a CPU rate control that is not a hard cap, a
+  sparse affinity mask, an unknown priority class) gets its own stderr line
+  and is left out, and the rest is still kept. A job with no such limit - or
+  no job at all - prints one note and falls back to plain `admin`. If the
+  limits cannot be read, or the sibling `wnice.exe` is not this executable's
+  front (the same file, or the installer's byte-identical copy), `admin`
+  refuses to elevate with exit 1 before the UAC prompt instead of running
+  unlimited. Not kept by design: the wall-clock timeout (it lives
+  in the wrapper process, not in the job) and the caps of outer jobs when the
+  caller's job is nested. Already elevated, the flag changes nothing.
+  `admin <command>` without the flag, the `admin` usage text and every exit
+  code are unchanged; only the `admin --help` text grew, which is the
+  differential allowlist's second entry.
 
 ### Internal
 
