@@ -32,6 +32,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   contain `--jobs` change, and every other invocation behaves exactly as
   before.
 
+- `admin --keep-limits <command> [args...]`: opt-in, keeps the limits of the
+  job `admin` itself runs in when it has to elevate. A UAC-elevated process is
+  created by the AppInfo service, not as a child of `admin`, so it never
+  enters the caller's job: `capc 10 admin build.bat` used to run the elevated
+  command with no CPU cap, memory limit or process limit. With the flag,
+  `admin` reads the limits of the caller's immediate job
+  (`QueryInformationJobObject` with a NULL job handle) and elevates this
+  executable's `wnice` front instead of the command, as
+  `wnice <options> -- <command> [args...]`: `-c` CPU rate percent, `-m` job
+  memory limit, `-n` active-process limit, `-t` affinity (only when the mask
+  is a contiguous run from CPU 0) and `-p` priority class. The elevated
+  `wnice` creates its own new job, so the limits live in a separate pool,
+  never in the caller's job. A hard cap with a fractional percent is rounded
+  down to a whole percent (never below 1), with one stderr note naming both values; every
+  limit that cannot be kept (a CPU rate control that is not a hard cap, a
+  sparse affinity mask, an unknown priority class) gets its own stderr line
+  and is left out, and the rest is still kept. A job with no such limit - or
+  no job at all - prints one note and falls back to plain `admin`. If the
+  limits cannot be read, or the sibling `wnice.exe` is not this executable's
+  front (the same file, or the installer's byte-identical copy), `admin`
+  refuses to elevate with exit 1 before the UAC prompt instead of running
+  unlimited. Not kept by design: the wall-clock timeout (it lives
+  in the wrapper process, not in the job) and the caps of outer jobs when the
+  caller's job is nested. Already elevated, the flag changes nothing.
+  `admin <command>` without the flag, the `admin` usage text and every exit
+  code are unchanged; only the `admin --help` text grew, which is the
+  differential allowlist's second entry.
+
 ### Internal
 
 - Backward-compatibility safety net for the published CLI contract: a `cargo test` suite with committed `--help`/usage goldens, exact message and exit-code checks and the Job Object lifecycle (`tests/compat.rs`), plus a CI differential gate that replays a fixed command set against the published `win-nice@0.4.0` binary (`scripts/compat-differential.js`; its allowlist gained its first entry with `--jobs`). No runtime, CLI or version change.
