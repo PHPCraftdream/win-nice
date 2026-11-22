@@ -28,10 +28,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+};
 use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 // ------------------------------------------------------------- test helpers
 
@@ -601,6 +606,59 @@ fn test_help_exits_zero_with_examples() {
     }
 }
 
+/// True when this process holds an elevated (administrator) token.
+fn elevated() -> bool {
+    unsafe {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return false;
+        }
+        let mut info = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            (&mut info as *mut TOKEN_ELEVATION).cast(),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        );
+        CloseHandle(token);
+        ok != 0 && info.TokenIsElevated != 0
+    }
+}
+
+fn test_admin_keep_limits() {
+    let admin = legacy_exe("admin");
+    let run = |args: &[&str]| {
+        Command::new(&admin)
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(args)
+            .output()
+            .expect("spawn admin")
+    };
+    // Flag with no command: the unchanged usage error, the only part of
+    // --keep-limits that runs before elevation.
+    let plain = run(&[]);
+    let kept = run(&["--keep-limits"]);
+    assert_eq!(kept.status.code(), Some(1));
+    assert_eq!(stdout(&kept), "", "--keep-limits with no command: stdout");
+    assert_eq!(stderr(&kept), stderr(&plain), "usage error must not change");
+    if !elevated() {
+        // Not elevated, the other branch is the UAC prompt - a visible window
+        // no test may open - so only the usage/route part is asserted here.
+        println!("note: not elevated; only the usage part of admin --keep-limits was asserted");
+        return;
+    }
+    for args in [
+        &["--keep-limits", "cmd", "/c", "exit", "7"][..],
+        &["cmd", "/c", "exit", "7"][..],
+    ] {
+        let o = run(args);
+        assert_eq!(o.status.code(), Some(7), "{args:?}: {}", stderr(&o));
+        assert_eq!(stderr(&o), "", "{args:?}: inline run must stay silent");
+    }
+}
+
 const TESTS: &[(&str, fn())] = &[
     (
         "help_exits_zero_with_examples",
@@ -659,6 +717,7 @@ const TESTS: &[(&str, fn())] = &[
         test_command_not_found_clear_error,
     ),
     ("cwd_exe_is_never_picked", test_cwd_exe_is_never_picked),
+    ("admin_keep_limits", test_admin_keep_limits),
 ];
 
 fn main() {
