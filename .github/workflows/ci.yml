@@ -341,7 +341,7 @@ jobs:
               if command -v cmp >/dev/null 2>&1; then
                 echo "differing bytes: $(cmp -l "$a" "$b" 2>/dev/null | wc -l)"
                 echo 'first differing offsets (hex, 0-based; byte values octal, as cmp prints them):'
-                cmp -l "$a" "$b" 2>/dev/null | head -n 40 | awk '{ printf "0x%08x  %s %s\n", $1 - 1, $2, $3 }'
+                { cmp -l "$a" "$b" 2>/dev/null || true; } | head -n 40 | awk '{ printf "0x%08x  %s %s\n", $1 - 1, $2, $3 }'
               else
                 node -e "const fs=require('fs');const a=fs.readFileSync(process.argv[1],null);const b=fs.readFileSync(process.argv[2],null);const n=Math.min(a.length,b.length);let c=0;const o=[];for(let i=0;i<n;i++){if(a[i]!==b[i]){c++;if(o.length<40)o.push('0x'+i.toString(16));}}console.log('differing bytes (within the common length): '+c);console.log(o.join(' '));" "$a" "$b"
               fi
@@ -405,7 +405,7 @@ jobs:
               if command -v cmp >/dev/null 2>&1; then
                 echo "differing bytes: $(cmp -l "$a" "$b" 2>/dev/null | wc -l)"
                 echo 'first differing offsets (hex, 0-based; byte values octal, as cmp prints them):'
-                cmp -l "$a" "$b" 2>/dev/null | head -n 40 | awk '{ printf "0x%08x  %s %s\n", $1 - 1, $2, $3 }'
+                { cmp -l "$a" "$b" 2>/dev/null || true; } | head -n 40 | awk '{ printf "0x%08x  %s %s\n", $1 - 1, $2, $3 }'
               else
                 node -e "const fs=require('fs');const a=fs.readFileSync(process.argv[1],null);const b=fs.readFileSync(process.argv[2],null);const n=Math.min(a.length,b.length);let c=0;const o=[];for(let i=0;i<n;i++){if(a[i]!==b[i]){c++;if(o.length<40)o.push('0x'+i.toString(16));}}console.log('differing bytes (within the common length): '+c);console.log(o.join(' '));" "$a" "$b"
               fi

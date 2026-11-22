@@ -23,6 +23,10 @@ harness = false
 name = "job_containment"
 harness = false
 
+[[test]]
+name = "jobs_report"
+harness = false
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Security",
@@ -35,6 +39,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Registry",
     "Win32_UI_Shell",
+    "Wdk_System_SystemInformation",
+    "Wdk_System_Threading",
 ] }
 
 [target.'cfg(windows)'.dev-dependencies]

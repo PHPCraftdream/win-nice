@@ -3,6 +3,7 @@
 
 pub mod admin;
 pub mod help;
+pub mod jobs;
 pub mod legacy;
 mod native;
 pub mod uiup;

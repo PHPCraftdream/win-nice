@@ -88,13 +88,14 @@ pub fn run_elevated(file: &str, params: &str) -> Result<u32, u32> {
     }
 }
 
-/// `(image name, pid)` of every running process.
-pub fn processes() -> Vec<(String, u32)> {
+/// `(image name, pid)` of every running process, or `None` when the snapshot
+/// itself failed (an empty list is a real answer).
+pub fn process_snapshot() -> Option<Vec<(String, u32)>> {
     let mut out = Vec::new();
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snap.is_null() || snap as isize == -1 {
-            return out;
+            return None;
         }
         let mut entry: PROCESSENTRY32W = std::mem::zeroed();
         entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
@@ -113,7 +114,13 @@ pub fn processes() -> Vec<(String, u32)> {
         }
         CloseHandle(snap);
     }
-    out
+    Some(out)
+}
+
+/// The process list; empty when the snapshot failed (callers that only want
+/// the names keep their old behaviour).
+pub fn processes() -> Vec<(String, u32)> {
+    process_snapshot().unwrap_or_default()
 }
 
 /// Raise `pid` to HIGH priority. Returns `(old class, result)`.

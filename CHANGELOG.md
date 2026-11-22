@@ -4,9 +4,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `wnice --jobs`: a read-only report of the wnice-family Job Objects the
+  current user's wrappers hold right now (owner process and command line,
+  CPU cap, memory and process limits, affinity mask, priority class, active
+  processes) plus the busiest processes with the jobs they belong to. One
+  row per kernel job object, found through the system handle table,
+  duplicated with query-only rights and closed on every path; nothing is
+  modified and no elevation is needed. The owner's user SID is checked
+  before anything else is read from that process, so foreign owners are
+  only counted. Every value a query could not establish is shown as `?`,
+  and a chain verdict (`UNCAPPED`, `NOT-IN-WNICE-JOB`) is given only when
+  the inventory is complete - otherwise the fact carries an explicit
+  `- inventory incomplete` qualifier and a one-line legend explains it.
+  A nested job (e.g. `capc 50 capm 50 ...`) shows its rate as a share of
+  its parent job's allowance, never of the whole machine: the immediate
+  parent is named when the answers prove it, otherwise the row shows it as
+  `nested (parent ?)`. `--jobs` is decided before any other argument is
+  interpreted and is accepted only as the whole command line: any other
+  argument before the first `--` - a command, an option, a help or version
+  flag, an invalid option value, or a repeated `--jobs` - is a usage error
+  with exit 2 and a single line on stderr, so `wnice cmd --jobs` is that
+  error too, while a `--jobs` at or after the first `--` is an ordinary
+  argument of the wrapped command (`wnice -- cmd --jobs`). `wnice --help`
+  is the only place it is documented; only invocations whose arguments
+  contain `--jobs` change, and every other invocation behaves exactly as
+  before.
+
 ### Internal
 
-- Backward-compatibility safety net for the published CLI contract: a `cargo test` suite with committed `--help`/usage goldens, exact message and exit-code checks and the Job Object lifecycle (`tests/compat.rs`), plus a CI differential gate that replays a fixed command set against the published `win-nice@0.4.0` binary (`scripts/compat-differential.js`, empty allowlist). No runtime, CLI or version change.
+- Backward-compatibility safety net for the published CLI contract: a `cargo test` suite with committed `--help`/usage goldens, exact message and exit-code checks and the Job Object lifecycle (`tests/compat.rs`), plus a CI differential gate that replays a fixed command set against the published `win-nice@0.4.0` binary (`scripts/compat-differential.js`; its allowlist gained its first entry with `--jobs`). No runtime, CLI or version change.
 - Job Object containment regression suite (`tests/job_containment.rs`): no breakaway from the tree's job, a nested job cannot loosen the outer one, and the wrapper's job handle is not inheritable; plus strict probe-report parsing, atomic scratch-dir creation and a kill-on-drop survivor guard in `tests/compat.rs`. No runtime, CLI or version change.
 
 ## [0.4.0] - 2026-11-15

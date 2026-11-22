@@ -29,6 +29,30 @@ pub enum Action {
     Run(Config),
     Help,
     Version,
+    Jobs,
+}
+
+/// Argument-parsing failure; the variant decides the exit code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseError {
+    /// Ordinary usage error: `wnice: <msg>. <usage>` on stderr, exit 1.
+    Usage(String),
+    /// `--jobs` combined with anything else: `<msg>` on stderr, exit 2.
+    JobsConflict(String),
+}
+
+impl ParseError {
+    pub fn message(&self) -> &str {
+        match self {
+            ParseError::Usage(m) | ParseError::JobsConflict(m) => m,
+        }
+    }
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
 }
 
 fn strict_u32(s: &str) -> Option<u32> {
@@ -165,7 +189,25 @@ fn parse_timeout(s: &str) -> Result<u32, String> {
 ///
 /// `logical_cpus` is the machine's logical processor count, used as the upper
 /// bound for `-t/--threads`.
-pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, String> {
+///
+/// `--jobs` is a pre-scan: a `--jobs` token before the first `--` makes the
+/// whole command line a `ParseError::JobsConflict` unless it is the only
+/// argument. Anything at or after the first `--` is an ordinary command token.
+pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, ParseError> {
+    // `--jobs` is a whole-process action, decided before any other argument is
+    // interpreted, so an invalid neighbour cannot change the verdict.
+    let before_dash_dash = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    if args[..before_dash_dash].iter().any(|a| a == "--jobs") {
+        return if args.len() == 1 {
+            Ok(Action::Jobs)
+        } else {
+            Err(ParseError::JobsConflict(
+                "--jobs takes no command and no other options; run 'wnice --jobs' on its own"
+                    .to_string(),
+            ))
+        };
+    }
+
     let mut cfg = Config::default();
     let mut want_help = false;
     let mut want_version = false;
@@ -201,7 +243,9 @@ pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, String> 
         }
         if let Some(rest) = arg.strip_prefix("--wsl=") {
             if rest.is_empty() {
-                return Err("invalid --wsl value (empty distro name)".to_string());
+                return Err(ParseError::Usage(
+                    "invalid --wsl value (empty distro name)".to_string(),
+                ));
             }
             cfg.wsl = Some(WslMode {
                 distro: Some(rest.to_string()),
@@ -227,52 +271,58 @@ pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, String> 
         } else if arg == "-s" || arg == "--timeout" {
             "-s/--timeout"
         } else if arg.starts_with('-') && arg.len() > 1 {
-            return Err(format!("unknown option '{arg}'"));
+            return Err(ParseError::Usage(format!("unknown option '{arg}'")));
         } else {
             // First non-option token: the command starts here.
             options_done = true;
             continue;
         };
         let Some(val) = args.get(i + 1) else {
-            return Err(format!("missing value for {flag}"));
+            return Err(ParseError::Usage(format!("missing value for {flag}")));
         };
         i += 2;
         match flag {
             "-p/--priority" => {
-                cfg.priority = Some(
-                    parse_priority(val)
-                        .ok_or_else(|| format!("invalid -p/--priority value '{val}'"))?,
-                );
+                cfg.priority = Some(parse_priority(val).ok_or_else(|| {
+                    ParseError::Usage(format!("invalid -p/--priority value '{val}'"))
+                })?);
             }
             "-c/--cpu" => {
-                let n = strict_u32(val).ok_or_else(|| format!("invalid -c/--cpu value '{val}'"))?;
+                let n = strict_u32(val)
+                    .ok_or_else(|| ParseError::Usage(format!("invalid -c/--cpu value '{val}'")))?;
                 if !(1..=100).contains(&n) {
-                    return Err(format!("invalid -c/--cpu value '{val}'"));
+                    return Err(ParseError::Usage(format!("invalid -c/--cpu value '{val}'")));
                 }
                 cfg.cpu_percent = Some(n);
             }
             "-t/--threads" => {
-                let n =
-                    strict_u32(val).ok_or_else(|| format!("invalid -t/--threads value '{val}'"))?;
+                let n = strict_u32(val).ok_or_else(|| {
+                    ParseError::Usage(format!("invalid -t/--threads value '{val}'"))
+                })?;
                 let max = logical_cpus.clamp(1, 63);
                 if n < 1 || n > max {
-                    return Err(format!("invalid -t/--threads value '{val}'"));
+                    return Err(ParseError::Usage(format!(
+                        "invalid -t/--threads value '{val}'"
+                    )));
                 }
                 cfg.threads = Some(n);
             }
             "-m/--memory" => {
-                cfg.memory = Some(parse_memory(val)?);
+                cfg.memory = Some(parse_memory(val).map_err(ParseError::Usage)?);
             }
             "-n/--procs" => {
-                let n =
-                    strict_u32(val).ok_or_else(|| format!("invalid -n/--procs value '{val}'"))?;
+                let n = strict_u32(val).ok_or_else(|| {
+                    ParseError::Usage(format!("invalid -n/--procs value '{val}'"))
+                })?;
                 if n == 0 {
-                    return Err(format!("invalid -n/--procs value '{val}'"));
+                    return Err(ParseError::Usage(format!(
+                        "invalid -n/--procs value '{val}'"
+                    )));
                 }
                 cfg.procs = Some(n);
             }
             "-s/--timeout" => {
-                cfg.timeout_ms = Some(parse_timeout(val)?);
+                cfg.timeout_ms = Some(parse_timeout(val).map_err(ParseError::Usage)?);
             }
             _ => unreachable!(),
         }
@@ -285,16 +335,18 @@ pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, String> 
         return Ok(Action::Version);
     }
     if cfg.boost && cfg.wsl.is_some() {
-        return Err(
+        return Err(ParseError::Usage(
             "--boost does not apply to --wsl: the guest priority comes from the WSL cgroup (nice/CPUWeight), not from a Windows job"
                 .to_string(),
-        );
+        ));
     }
     if cfg.boost && cfg.priority.is_none() {
-        return Err("--boost requires -p/--priority".to_string());
+        return Err(ParseError::Usage(
+            "--boost requires -p/--priority".to_string(),
+        ));
     }
     if cfg.command.is_empty() {
-        return Err("no command given".to_string());
+        return Err(ParseError::Usage("no command given".to_string()));
     }
     Ok(Action::Run(cfg))
 }
@@ -315,7 +367,10 @@ mod tests {
     }
 
     fn err(v: &[&str]) -> String {
-        parse_args(&args(v), 8).unwrap_err()
+        parse_args(&args(v), 8)
+            .expect_err("usage error")
+            .message()
+            .to_string()
     }
 
     #[test]
@@ -685,5 +740,70 @@ mod tests {
         // Without -p the mode conflict is reported (checked first).
         let e = err(&["--wsl", "--boost", "cmd"]);
         assert!(e.contains("--boost") && e.contains("--wsl"));
+    }
+
+    const JOBS_CONFLICT: &str =
+        "--jobs takes no command and no other options; run 'wnice --jobs' on its own";
+
+    fn jobs_conflict(v: &[&str]) -> String {
+        match parse_args(&args(v), 8) {
+            Err(ParseError::JobsConflict(m)) => m,
+            other => panic!("expected a jobs conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jobs_alone_is_the_jobs_action() {
+        assert_eq!(parse_args(&args(&["--jobs"]), 8).ok(), Some(Action::Jobs));
+    }
+
+    #[test]
+    fn jobs_conflicts_with_a_command_or_options() {
+        for v in [
+            &["--jobs", "cmd"][..],
+            &["--jobs", "-c", "10"],
+            // The `--jobs` verdict precedes any option-value validation.
+            &["--jobs", "-c", "0"],
+            &["--jobs", "--bogus"],
+            &["--jobs", "-c"],
+            &["--jobs", "--boost"],
+            &["--jobs", "--wsl"],
+            &["--jobs", "--"],
+            &["--jobs", "--jobs"],
+            &["--jobs", "--help"],
+            &["--jobs", "-h"],
+            &["--jobs", "--version"],
+            &["--jobs", "-V"],
+            &["-V", "--jobs"],
+            &["-c", "10", "--jobs", "cmd"],
+            &["--jobs", "idle"],
+            &["cmd", "--jobs"],
+        ] {
+            assert_eq!(jobs_conflict(v), JOBS_CONFLICT, "args {v:?}");
+        }
+    }
+
+    #[test]
+    fn help_and_version_win_without_jobs() {
+        assert_eq!(parse_args(&args(&["--help"]), 8).ok(), Some(Action::Help));
+        assert_eq!(parse_args(&args(&["-h"]), 8).ok(), Some(Action::Help));
+        assert_eq!(
+            parse_args(&args(&["-c", "50", "--help"]), 8).ok(),
+            Some(Action::Help)
+        );
+        assert_eq!(
+            parse_args(&args(&["--version"]), 8).ok(),
+            Some(Action::Version)
+        );
+        assert_eq!(parse_args(&args(&["-V"]), 8).ok(), Some(Action::Version));
+    }
+
+    #[test]
+    fn jobs_after_double_dash_is_part_of_the_command() {
+        // At or after the first `--`, `--jobs` is an ordinary command token.
+        let c = run(&["--", "--jobs"]);
+        assert_eq!(c.command, vec!["--jobs"]);
+        let c = run(&["--", "cmd", "--jobs"]);
+        assert_eq!(c.command, vec!["cmd", "--jobs"]);
     }
 }

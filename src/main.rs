@@ -28,10 +28,17 @@ fn main() -> ExitCode {
                 // negative NTSTATUS from run() passes through bit-cast.
                 std::process::exit(code);
             }
-            Err(msg) => {
+            Ok(wnice::cli::Action::Jobs) => {
+                std::process::exit(wnice::front::jobs::run());
+            }
+            Err(wnice::cli::ParseError::Usage(msg)) => {
                 eprintln!("wnice: {msg}. {}", wnice::cli::USAGE);
                 eprintln!("{}", wnice::front::help::hint("wnice"));
                 return ExitCode::from(1);
+            }
+            Err(wnice::cli::ParseError::JobsConflict(msg)) => {
+                eprintln!("wnice: {msg}");
+                return ExitCode::from(2);
             }
         }
     }
