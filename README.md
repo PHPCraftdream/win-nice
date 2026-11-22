@@ -34,12 +34,13 @@ wnice -p idle -c 50 -t 4 -m 50 -n 64 -s 600 -- npm run build
 | Option | Same as | Meaning |
 | --- | --- | --- |
 | `-p, --priority <class>` | `idle` ... `realtime` | `idle`, `belownormal`, `normal`, `abovenormal`, `high` or `realtime` for the whole tree |
-| `-c, --cpu <1-100>` | `capc` | hard CPU cap, percent of total CPU |
+| `-c, --cpu <1-100>` | `capc` | hard CPU cap: N percent of all logical processors, one ceiling for the whole tree (see "What a CPU cap covers") |
 | `-t, --threads <n>` | `capt` | affinity: the first `n` logical processors |
 | `-m, --memory <size>` | `capm` | job memory ceiling (`50` = 50% of RAM, `512m`, `2g`) |
 | `-n, --procs <n>` | `capn` | maximum simultaneously active processes |
 | `-s, --timeout <seconds>` | `caps` | wall-clock deadline, exit 124 |
 | `--boost` | — | with `-p`: skip the job priority limit and apply the priority to every process via the booster (see "Priority above NORMAL without elevation") |
+| `--jobs` | — | read-only report of the wnice jobs running right now (see "Looking at what is running"); must be the whole command line, so it takes no command and no other option |
 | `-h` / `-V` | | help / version |
 
 Options are parsed only up to the first non-option token or `--`; everything
@@ -75,6 +76,106 @@ worth being precise about both:
 - **Nested Job Objects multiply percentages** (see the `capc` section and
   "Chaining these tools together" below) - check whether your shell is
   already job-wrapped before trusting a cap percentage.
+
+### Looking at what is running: `wnice --jobs`
+
+`wnice --jobs` (on its own) prints a read-only report of the Job Objects
+wnice-family wrappers of the current user hold at that moment: one row per
+job with its owner process and command line, its CPU cap as a percent of all
+logical processors and of one, its memory and process limits, affinity mask,
+priority class and active process count - then the busiest processes of a
+short sample, each with the job chain it belongs to.
+
+That chain answers "is this work really capped?": a process whose chain
+contains no CPU cap is tagged `UNCAPPED`, and one in no wnice job at all is
+`NOT-IN-WNICE-JOB`. Both labels speak only about the wnice jobs the report
+could see: they do not rule out a cap from a job that is not a wnice job, or
+from a wrapper the report could not inspect (the footer counts those). A value a query could not establish is shown as `?`,
+never as "no limit"; while any wrapper could not be inspected, a verdict that
+depends on it carries `- inventory incomplete` with a one-line legend, and
+the footer counts the owners that were skipped and why. A nested job shows
+`nested (job N): X% of parent`, because that number is a share of the
+parent's allowance, not of the machine.
+
+It changes nothing, needs no elevation (an owner it cannot inspect is counted,
+not dropped), and is accepted only as the whole command line: `wnice --jobs`
+with a command or any other option is a usage error - one stderr line, exit
+code 2. After the first `--` it is an ordinary argument of the command:
+`wnice -- cmd --jobs` runs `cmd` with that argument.
+
+## What a CPU cap covers
+
+### `-c N` is N percent of all logical processors
+
+`-c N` (and `capc N`) is one hard cap for the whole job, measured against
+**all** logical processors on the machine. On a 16-logical-processor
+machine `-c 10` allows 1.6 cores' worth of CPU for the entire tree - 160
+in "percent of one core" units, the unit many process monitors use
+(performance counters, Process Explorer). A single process inside that
+tree showing 160% is the cap working, not leaking: it is using 1.6 of the 16
+processors. `wnice --jobs` prints both units for every job
+(`10.0% all / 160.0% one hard`), so a number seen elsewhere can be matched
+against the cap. WSL mode uses the same convention over the VM's vCPUs
+(`-c 50` becomes `CPUQuota=800%` on 16 vCPUs; see "WSL mode").
+
+`-m N` follows the same pattern for memory: N percent of the machine's total
+physical RAM, one ceiling on the job's aggregate committed memory, not a
+per-process figure.
+
+### Each job has its own cap
+
+There is no machine-wide pool that per-job percentages draw from. Thirty
+separate `wnice -c 10` invocations on a 16-logical-processor machine are
+thirty independent 1.6-core allowances - 48 cores' worth in total, and only
+the machine's real capacity stops them. Nesting goes the other way: a job
+started inside another capped job takes its rate as a share of the parent's
+allowance, so the percentages multiply instead of setting a machine-wide
+total (see "Chaining these tools together").
+
+## Not a sandbox: what these limits do not cover
+
+A Job Object is a resource limiter, not a security boundary. It constrains the
+processes assigned to it and nothing else, and no option here changes that.
+Work outside the job stays outside the cap:
+
+- **Processes that were already running.** A job only holds what it starts, so
+  a daemon or server reused from an earlier run does the work outside this
+  invocation's cap (it may have limits of its own):
+  MSBuild node reuse, `VBCSCompiler`, a Gradle daemon, an `sccache` or Bazel
+  server, an editor that hands the build to an instance already open. (The
+  reverse case - a daemon that *was* started under a cap and is still alive -
+  is in the `capm` section: the limit then sticks to that daemon.)
+- **Processes a service or broker starts for the command.** WMI's
+  `Win32_Process.Create`, Task Scheduler, an out-of-process COM server and UAC
+  elevation all create processes that are not children of the job, so they
+  never join it and run outside its limits. `admin --keep-limits` is the one case with
+  a fix: it carries the caller's limits through the UAC prompt.
+- **Work inside a VM.** WSL2, Docker and Hyper-V guests are separate kernels:
+  a host-side job cannot limit their processes (WSL2 shows up host-side as
+  `vmmem`, which an un-elevated process cannot even open). Use `wnice --wsl`,
+  the VM's own `.wslconfig` ceiling (`processors=`, `memory=`) or the
+  container runtime's own CPU/memory options instead.
+- **Work other processes do on the command's behalf.** Antivirus scans, the
+  search indexer and shared build services run in their own processes, and
+  kernel/driver work (interrupts, DPCs) belongs to no process in the job;
+  none of that time is charged to the job, so the machine can be busy while
+  every job sits under its cap.
+- **A process of the same user that lifts the limits deliberately.** A job is
+  an object with a handle: a process that can obtain that handle with enough
+  access can change that job's limits (it cannot leave the job), and
+  `wnice --jobs` duplicates those handles for reading, with query-only rights.
+  Ordinary children cannot escape: a descendant asking for
+  `CREATE_BREAKAWAY_FROM_JOB` fails to launch, a nested job cannot loosen the
+  outer one, and the wrapper's job handle is not inherited (see `capc`). That
+  is robustness against ordinary programs, not a boundary against a user who
+  means it.
+
+What exists today to close the gaps that can be closed: `wnice --jobs` to see
+which processes are actually capped, `admin --keep-limits` to carry limits
+across UAC, `WNICE_AGENT_LIMITS` to cap every `cy`/`cx` agent, `wnice --wsl`
+plus `.wslconfig`/container limits for VM work, and starting a reused daemon
+under the same wrapper (or turning reuse off, as shown under `capm`) when its
+work must be counted.
 
 ## Argument handling
 
@@ -651,6 +752,25 @@ actually needed, since a direct launch is never exposed to `%` expansion at all.
 admin npm install -g some-package
 ```
 
+**`admin --keep-limits <command> [args...]`** (opt-in) keeps the job limits
+across the UAC prompt. The elevated process is created by the AppInfo service,
+not as a child of `admin`, so `capc 10 admin build.bat` otherwise runs the
+elevated work with no CPU cap, memory limit or process limit at all. With the
+flag, `admin` reads the job it is in and elevates this executable's `wnice`
+front as `wnice <options> -- <command> [args...]`, so the work starts in a new
+job with the same hard CPU cap, job memory limit, active-process limit,
+affinity (when the mask is a contiguous run from CPU 0) and priority class. A
+hard cap with a fractional percent is rounded down to a whole percent, never
+below 1, with a note on stderr. Every limit that cannot be kept - a soft cap,
+a sparse affinity mask, an unknown priority class - gets its own stderr line
+and is left out; the rest is still kept. Not carried: `-s` (the deadline lives
+in the wrapper process, not in the job) and the caps of outer jobs when the
+caller's job is nested. No job, or a job with none of those limits: one note,
+then plain `admin`. If the limits cannot be read, or the `wnice.exe` next to
+`admin.exe` is not this executable's front, it exits 1 before any UAC prompt
+instead of running unlimited. Already elevated, the flag changes nothing - the
+command already inherits the job. `admin` without the flag is unchanged.
+
 ## AI CLI launchers
 
 Not part of the priority/CPU-limiting toolset above — two convenience
@@ -666,6 +786,45 @@ Runs `codex --dangerously-bypass-approvals-and-sandbox [args...]`.
 in a context where you'd already accept running that AI agent unattended (e.g.
 inside an already-sandboxed/disposable environment). They do not add any sandboxing
 of their own — the flag names describe exactly what they do.
+
+### Limiting what `cy`/`cx` start: `WNICE_AGENT_LIMITS`
+
+Both launchers read one environment variable. If `WNICE_AGENT_LIMITS` is set,
+its whitespace-separated value must be `wnice` limit options (`-p`, `-c`,
+`-t`, `-m`, `-n`, `-s` each with its value, or `--boost`) and the agent then
+runs under exactly the job `wnice <those options> -- claude ...` (resp.
+`codex ...`) would create: one job with those limits around the agent and
+everything it starts, `cy -c` continuation sessions included. Unset or blank
+keeps the 0.4.0 behaviour: the agent still runs in a job, but that job
+carries no limit and no CPU cap.
+
+cmd.exe, for this shell (every `cy`/`cx` started from it is capped):
+
+```
+set WNICE_AGENT_LIMITS=-p idle -c 10 -m 10g
+cy -c
+```
+
+PowerShell, for this session:
+
+```powershell
+$env:WNICE_AGENT_LIMITS = '-p idle -c 10 -m 10g'
+```
+
+Permanently for the user, in cmd.exe: `setx WNICE_AGENT_LIMITS
+"-p idle -c 10 -m 10g"`; in PowerShell:
+`[Environment]::SetEnvironmentVariable('WNICE_AGENT_LIMITS', '-p idle -c 10
+-m 10g', 'User')`. Both take effect in new terminals. That is the stable place
+for "every agent is capped": set once, nothing to add per invocation, and it
+covers the `cy -c` sessions too. To cap a single agent instead, wrap it -
+`wnice -c 10 -- cy -c` - and do not combine the two: the agent would then be
+in a nested job and its percentage would be a share of the wrapper's.
+
+The value goes through the same parser and validation as the `wnice` command
+line, so values and error wording cannot drift. A command token, `--`,
+`--wsl`, `--jobs`, `--help`/`--version`, an invalid value or a non-Unicode
+value is refused: one stderr line naming the variable, exit code 1, nothing
+started. `wnice`, the single-purpose tools, `admin` and `uiup` never read it.
 
 ## Install
 
@@ -800,6 +959,9 @@ package ships it.
 - `WIN_NICE_NO_PATH` — if set (to anything), `install`/`uninstall`/
   `reinstall` skip the user `PATH` update/removal entirely, only managing
   files under the install directory.
+- `WNICE_AGENT_LIMITS` — `wnice` limit options applied to the agent that
+  `cy`/`cx` start (see "Limiting what `cy`/`cx` start" above). Read only by
+  those two launchers; unset or blank means no limits.
 
 ## Testing
 
