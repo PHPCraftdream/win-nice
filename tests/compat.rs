@@ -839,6 +839,7 @@ fn test_cy_cx_agent_flags() {
                 .args(&caller_args)
                 .env("PATH", &bin)
                 .env("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+                .env_remove("WNICE_AGENT_LIMITS")
                 .env("WNICE_PROBE", "echo")
                 .env("WNICE_PROBE_ARGS", "")
                 .env("WNICE_PROBE_DEPTH", (probe_depth() + 1).to_string())
@@ -871,6 +872,7 @@ fn test_cy_cx_without_agent_127() {
             .arg("--help")
             .env("PATH", &empty)
             .env("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+            .env_remove("WNICE_AGENT_LIMITS")
             .stdin(Stdio::null())
             .output()
             .expect("spawn agent frontend");
