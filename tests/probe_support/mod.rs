@@ -1,5 +1,7 @@
-//! Probe + win32 support for the harness=false integration test binary
-//! (tests/integration.rs includes this as `mod probe_support`).
+//! Probe + win32 support for the harness=false test binaries; each declares
+//! this as `mod probe_support`: tests/integration.rs, tests/compat.rs and
+//! tests/job_containment.rs. Job-containment probes live here too: breakaway,
+//! nested inner job and job-handle audit.
 //!
 //! See integration.rs for the arg/env contract and the why-harness=false
 //! explanation. Depth guard: WNICE_PROBE_DEPTH increments per probe
@@ -24,8 +26,12 @@ use windows_sys::Win32::System::Threading::{
     TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
 };
 
+mod containment;
+pub use containment::hand_off_self;
+
 pub const DETACHED_PROCESS: u32 = 0x0000_0008;
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+pub const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
 const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
 
@@ -35,7 +41,7 @@ pub fn probe_exe() -> PathBuf {
     std::env::current_exe().expect("current_exe")
 }
 
-fn probe_args() -> Vec<String> {
+pub(crate) fn probe_args() -> Vec<String> {
     // Extras come in via WNICE_PROBE_ARGS (\u{1f}-separated) — probe argv is
     // kept empty so the harness never option-parses probe arguments.
     match std::env::var("WNICE_PROBE_ARGS") {
@@ -44,7 +50,7 @@ fn probe_args() -> Vec<String> {
     }
 }
 
-fn need(args: &[String], i: usize) -> String {
+pub(crate) fn need(args: &[String], i: usize) -> String {
     args.get(i)
         .unwrap_or_else(|| panic!("probe arg {i} missing"))
         .clone()
@@ -98,7 +104,7 @@ pub fn spawn_probe(mode: &str, extras: &[&str], detached: bool) -> std::process:
 /// Spawn this test binary as a probe child running `mode` (with extras),
 /// capturing its stdout (piped). Used by spawnchain to read midchain's line.
 /// Same depth semantics as spawn_probe.
-fn spawn_probe_piped(mode: &str, extras: &[&str]) -> std::process::Child {
+pub(crate) fn spawn_probe_piped(mode: &str, extras: &[&str]) -> std::process::Child {
     check_probe_depth();
     let depth = probe_depth() + 1;
     Command::new(probe_exe())
@@ -113,6 +119,9 @@ fn spawn_probe_piped(mode: &str, extras: &[&str]) -> std::process::Child {
 }
 
 pub fn probe_main(mode: &str) -> ! {
+    if let Some(code) = containment::try_run(mode) {
+        std::process::exit(code);
+    }
     let rest = probe_args();
     match mode {
         "exit" => {
@@ -120,6 +129,8 @@ pub fn probe_main(mode: &str) -> ! {
             std::process::exit(code);
         }
         "sleep" => {
+            // A daemon survivor publishes its own handle before it blocks.
+            hand_off_self();
             let ms: u64 = need(&rest, 0).parse().expect("ms");
             std::thread::sleep(Duration::from_millis(ms));
             std::process::exit(0);
@@ -391,6 +402,56 @@ pub fn probe_main(mode: &str) -> ! {
         other => {
             eprintln!("unknown probe mode {other}");
             std::process::exit(2);
+        }
+    }
+}
+
+// ------------------------------------------------------------ handle helpers
+
+/// Exit code of the process behind `h`; None when the query itself fails.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn handle_exit_code(h: HANDLE) -> Option<u32> {
+    let mut code: u32 = 0;
+    (unsafe { GetExitCodeProcess(h, &mut code) } != 0).then_some(code)
+}
+
+/// Owns a survivor process through a handle the survivor duplicated into this
+/// process: the numeric PID is never used, so a later guard cannot hit a reused
+/// PID.
+pub struct SurvivorGuard(HANDLE);
+
+impl SurvivorGuard {
+    /// Adopts a process handle the survivor duplicated into this process. The
+    /// numeric PID is never used again, so a reused PID can never be hit.
+    pub fn adopt(handle: HANDLE) -> SurvivorGuard {
+        SurvivorGuard(handle)
+    }
+
+    /// True while the process behind the retained handle is still running.
+    pub fn alive(&self) -> bool {
+        handle_exit_code(self.0) == Some(STILL_ACTIVE as u32)
+    }
+
+    /// Terminate through the retained handle; false when it is already gone.
+    pub fn kill(&self) -> bool {
+        if !self.alive() {
+            return false;
+        }
+        unsafe { TerminateProcess(self.0, 1) != 0 }
+    }
+}
+
+impl Drop for SurvivorGuard {
+    fn drop(&mut self) {
+        if self.alive() {
+            unsafe {
+                TerminateProcess(self.0, 1);
+            }
+        }
+        if !self.0.is_null() {
+            unsafe {
+                CloseHandle(self.0);
+            }
         }
     }
 }
