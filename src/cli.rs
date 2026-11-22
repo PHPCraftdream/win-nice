@@ -190,14 +190,27 @@ fn parse_timeout(s: &str) -> Result<u32, String> {
 /// `logical_cpus` is the machine's logical processor count, used as the upper
 /// bound for `-t/--threads`.
 ///
-/// `--jobs` in the option region is valid only when it is the whole command
-/// line; any other argument next to it is a [`ParseError::JobsConflict`].
+/// `--jobs` is a pre-scan: a `--jobs` token before the first `--` makes the
+/// whole command line a `ParseError::JobsConflict` unless it is the only
+/// argument. Anything at or after the first `--` is an ordinary command token.
 pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, ParseError> {
+    // `--jobs` is a whole-process action, decided before any other argument is
+    // interpreted, so an invalid neighbour cannot change the verdict.
+    let before_dash_dash = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    if args[..before_dash_dash].iter().any(|a| a == "--jobs") {
+        return if args.len() == 1 {
+            Ok(Action::Jobs)
+        } else {
+            Err(ParseError::JobsConflict(
+                "--jobs takes no command and no other options; run 'wnice --jobs' on its own"
+                    .to_string(),
+            ))
+        };
+    }
+
     let mut cfg = Config::default();
     let mut want_help = false;
     let mut want_version = false;
-    let mut want_jobs = false;
-    let mut jobs_seen = 0usize;
     let mut i = 0usize;
     let mut options_done = false;
 
@@ -220,12 +233,6 @@ pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, ParseErr
         }
         if arg == "-V" || arg == "--version" {
             want_version = true;
-            i += 1;
-            continue;
-        }
-        if arg == "--jobs" {
-            want_jobs = true;
-            jobs_seen += 1;
             i += 1;
             continue;
         }
@@ -321,18 +328,6 @@ pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, ParseErr
         }
     }
 
-    if want_jobs {
-        // `--jobs` counts only as the sole argument: any other token (option,
-        // option value, command, or `--`) makes this a conflict, even when a
-        // `-h`/`-V` short-circuit is also pending.
-        if jobs_seen != 1 || args.len() > jobs_seen {
-            return Err(ParseError::JobsConflict(
-                "--jobs takes no command and no other options; run 'wnice --jobs' on its own"
-                    .to_string(),
-            ));
-        }
-        return Ok(Action::Jobs);
-    }
     if want_help {
         return Ok(Action::Help);
     }
@@ -760,23 +755,32 @@ mod tests {
     #[test]
     fn jobs_alone_is_the_jobs_action() {
         assert_eq!(parse_args(&args(&["--jobs"]), 8).ok(), Some(Action::Jobs));
-        // Repeating the flag is not "the single argument".
-        assert_eq!(jobs_conflict(&["--jobs", "--jobs"]), JOBS_CONFLICT);
     }
 
     #[test]
     fn jobs_conflicts_with_a_command_or_options() {
-        assert_eq!(jobs_conflict(&["--jobs", "cmd"]), JOBS_CONFLICT);
-        assert_eq!(jobs_conflict(&["--jobs", "-c", "10"]), JOBS_CONFLICT);
-        assert_eq!(jobs_conflict(&["--jobs", "-c", "0"]), JOBS_CONFLICT);
-        assert_eq!(jobs_conflict(&["--jobs", "--boost"]), JOBS_CONFLICT);
-        assert_eq!(jobs_conflict(&["--jobs", "--wsl"]), JOBS_CONFLICT);
-        assert_eq!(jobs_conflict(&["--jobs", "--"]), JOBS_CONFLICT);
-        assert_eq!(jobs_conflict(&["-c", "10", "--jobs", "cmd"]), JOBS_CONFLICT);
-        assert_eq!(jobs_conflict(&["--jobs", "--help"]), JOBS_CONFLICT);
-        assert_eq!(jobs_conflict(&["--jobs", "-h"]), JOBS_CONFLICT);
-        assert_eq!(jobs_conflict(&["--jobs", "--version"]), JOBS_CONFLICT);
-        assert_eq!(jobs_conflict(&["--jobs", "-V"]), JOBS_CONFLICT);
+        for v in [
+            &["--jobs", "cmd"][..],
+            &["--jobs", "-c", "10"],
+            // The `--jobs` verdict precedes any option-value validation.
+            &["--jobs", "-c", "0"],
+            &["--jobs", "--bogus"],
+            &["--jobs", "-c"],
+            &["--jobs", "--boost"],
+            &["--jobs", "--wsl"],
+            &["--jobs", "--"],
+            &["--jobs", "--jobs"],
+            &["--jobs", "--help"],
+            &["--jobs", "-h"],
+            &["--jobs", "--version"],
+            &["--jobs", "-V"],
+            &["-V", "--jobs"],
+            &["-c", "10", "--jobs", "cmd"],
+            &["--jobs", "idle"],
+            &["cmd", "--jobs"],
+        ] {
+            assert_eq!(jobs_conflict(v), JOBS_CONFLICT, "args {v:?}");
+        }
     }
 
     #[test]
@@ -796,10 +800,10 @@ mod tests {
 
     #[test]
     fn jobs_after_double_dash_is_part_of_the_command() {
-        // After the option region `--jobs` is an ordinary command token.
+        // At or after the first `--`, `--jobs` is an ordinary command token.
         let c = run(&["--", "--jobs"]);
         assert_eq!(c.command, vec!["--jobs"]);
-        let c = run(&["cmd", "--jobs"]);
+        let c = run(&["--", "cmd", "--jobs"]);
         assert_eq!(c.command, vec!["cmd", "--jobs"]);
     }
 }

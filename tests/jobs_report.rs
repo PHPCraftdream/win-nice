@@ -180,7 +180,8 @@ fn test_jobs_report_lists_a_real_capped_tree() {
 fn test_jobs_flag_usage_errors() {
     // `--jobs` is valid only as the sole argument: any command, option,
     // help/version flag or repeat is a misuse reported on stderr with exit 2
-    // and no usage block.
+    // and no usage block. It is decided before any other argument is
+    // interpreted, so even an invalid neighbour yields the conflict.
     for args in [
         vec!["--jobs", "cmd"],
         vec!["--jobs", "-c", "10", "cmd"],
@@ -193,6 +194,11 @@ fn test_jobs_flag_usage_errors() {
         vec!["--jobs", "--jobs"],
         vec!["--jobs", "-c", "0"],
         vec!["--jobs", "--"],
+        vec!["--jobs", "--bogus"],
+        vec!["--jobs", "-c"],
+        vec!["-V", "--jobs"],
+        vec!["--jobs", "idle"],
+        vec!["cmd", "--jobs"],
     ] {
         let o = run(&args);
         let code = o.status.code();

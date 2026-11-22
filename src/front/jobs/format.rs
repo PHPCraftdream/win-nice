@@ -1,4 +1,4 @@
-//! Text rendering of a [`Scan`]: pure functions, no Win32.
+//! Text rendering of a `Scan`: pure functions, no Win32.
 //!
 //! Column widths are fixed (they never depend on the terminal or the locale),
 //! and every line is built by the same cell formatter so headers and rows line
@@ -81,9 +81,15 @@ pub fn render(scan: &Scan) -> String {
                 percent_all_cores(proc.cpu_seconds, scan.window_ms, scan.logical_cpus)
             ),
             format!("{:.1}%", percent_one_core(proc.cpu_seconds, scan.window_ms)),
-            chain(proc, &scan.jobs, scan.logical_cpus),
+            chain(proc, &scan.jobs, scan.logical_cpus, scan.complete),
         ];
         lines.push(row(&cells, &PROC_WIDTHS));
+    }
+    if !scan.complete {
+        lines.push(
+            "note: \"inventory incomplete\" = at least one owner process could not be inspected, so a missing or cap-free job chain is not a verdict"
+                .to_string(),
+        );
     }
     lines.push(String::new());
     lines.extend(footer(&scan.uninspected));
@@ -289,9 +295,10 @@ pub fn truncate(text: &str, width: usize) -> String {
     out
 }
 
-/// The jobs of `proc`, e.g. `"1 (none) UNCAPPED"`, and whether that is a verdict
-/// at all: a failed membership query is never read as "not in a job".
-pub fn chain(proc: &ProcInfo, jobs: &[JobInfo], logical_cpus: u32) -> String {
+/// The jobs of `proc`, e.g. `"1 (none) UNCAPPED"`. A verdict is only given
+/// for a complete inventory: a failed membership query is never read as "not in
+/// a job", and an incomplete one never as "no job at all".
+pub fn chain(proc: &ProcInfo, jobs: &[JobInfo], logical_cpus: u32, complete: bool) -> String {
     let Some(ids) = &proc.jobs else {
         return "? (membership unknown)".to_string();
     };
@@ -300,7 +307,11 @@ pub fn chain(proc: &ProcInfo, jobs: &[JobInfo], logical_cpus: u32) -> String {
         .filter_map(|id| jobs.iter().find(|j| j.id == *id))
         .collect();
     if found.is_empty() {
-        return "NOT-IN-WNICE-JOB".to_string();
+        return if complete {
+            "NOT-IN-WNICE-JOB".to_string()
+        } else {
+            "no wnice job found - inventory incomplete".to_string()
+        };
     }
     let entries: Vec<String> = found
         .iter()
@@ -313,7 +324,11 @@ pub fn chain(proc: &ProcInfo, jobs: &[JobInfo], logical_cpus: u32) -> String {
         .any(|job| matches!(job.cpu, CapState::Capped(_)))
     {
         if found.iter().all(|job| job.cpu == CapState::Uncapped) {
-            out.push_str(" UNCAPPED");
+            out.push_str(if complete {
+                " UNCAPPED"
+            } else {
+                " - inventory incomplete"
+            });
         } else {
             out.push_str(" CAP UNKNOWN");
         }
@@ -329,7 +344,7 @@ pub fn percent_one_core(cpu_seconds: f64, window_ms: u64) -> f64 {
     cpu_seconds / (window_ms as f64 / 1000.0) * 100.0
 }
 
-/// [`percent_one_core`] divided by the number of logical processors.
+/// `percent_one_core` divided by the number of logical processors.
 pub fn percent_all_cores(cpu_seconds: f64, window_ms: u64, logical_cpus: u32) -> f64 {
     if logical_cpus == 0 {
         return 0.0;
@@ -577,24 +592,56 @@ mod tests {
             job(2, cap(1000, true), Nesting::TopLevel),
         ];
         // A failed membership query is not "no jobs".
-        assert_eq!(chain(&proc(1, None), &jobs, 16), "? (membership unknown)");
-        assert_eq!(chain(&proc(1, Some(vec![])), &jobs, 16), "NOT-IN-WNICE-JOB");
+        assert_eq!(
+            chain(&proc(1, None), &jobs, 16, true),
+            "? (membership unknown)"
+        );
+        assert_eq!(
+            chain(&proc(1, Some(vec![])), &jobs, 16, true),
+            "NOT-IN-WNICE-JOB"
+        );
         // Unresolvable ids read as "not in a job".
         assert_eq!(
-            chain(&proc(1, Some(vec![9])), &jobs, 16),
+            chain(&proc(1, Some(vec![9])), &jobs, 16, true),
             "NOT-IN-WNICE-JOB"
         );
         assert_eq!(
-            chain(&proc(1, Some(vec![1])), &jobs, 16),
+            chain(&proc(1, Some(vec![1])), &jobs, 16, true),
             "1 (none) UNCAPPED"
         );
         assert_eq!(
-            chain(&proc(1, Some(vec![2])), &jobs, 16),
+            chain(&proc(1, Some(vec![2])), &jobs, 16, true),
             "2 (10.0% all / 160.0% one hard)"
         );
         assert_eq!(
-            chain(&proc(1, Some(vec![1, 2])), &jobs, 16),
+            chain(&proc(1, Some(vec![1, 2])), &jobs, 16, true),
             "1 (none), 2 (10.0% all / 160.0% one hard)"
+        );
+    }
+
+    #[test]
+    fn an_incomplete_inventory_never_gives_a_chain_verdict() {
+        let uncapped = vec![job(1, CapState::Uncapped, Nesting::TopLevel)];
+        // Empty chain: the verdict needs a complete inventory.
+        assert_eq!(
+            chain(&proc(1, Some(vec![])), &uncapped, 16, true),
+            "NOT-IN-WNICE-JOB"
+        );
+        let absent = chain(&proc(1, Some(vec![])), &uncapped, 16, false);
+        assert_eq!(absent, "no wnice job found - inventory incomplete");
+        assert!(!absent.contains("NOT-IN-WNICE-JOB"));
+        // Cap-free chain: same rule.
+        assert_eq!(
+            chain(&proc(1, Some(vec![1])), &uncapped, 16, true),
+            "1 (none) UNCAPPED"
+        );
+        let soft = chain(&proc(1, Some(vec![1])), &uncapped, 16, false);
+        assert_eq!(soft, "1 (none) - inventory incomplete");
+        assert!(!soft.contains("UNCAPPED"));
+        // Unknown membership stays unknown either way.
+        assert_eq!(
+            chain(&proc(1, None), &uncapped, 16, false),
+            "? (membership unknown)"
         );
     }
 
@@ -606,27 +653,28 @@ mod tests {
         let jobs = vec![uncapped, unknown, capped];
         // All uncapped: the chain verdict is a cap verdict.
         assert_eq!(
-            chain(&proc(1, Some(vec![1])), &jobs, 16),
+            chain(&proc(1, Some(vec![1])), &jobs, 16, true),
             "1 (none) UNCAPPED"
         );
         // Mixed uncapped + unknown: no verdict.
-        let mixed = chain(&proc(1, Some(vec![1, 2])), &jobs, 16);
+        let mixed = chain(&proc(1, Some(vec![1, 2])), &jobs, 16, true);
         assert_eq!(mixed, "1 (none), 2 (?) CAP UNKNOWN");
         assert!(!mixed.contains("UNCAPPED"));
         // One known cap is enough for the verdict to be absent altogether.
-        let known = chain(&proc(1, Some(vec![1, 2, 3])), &jobs, 16);
+        let known = chain(&proc(1, Some(vec![1, 2, 3])), &jobs, 16, true);
         assert!(!known.contains("UNCAPPED"));
         assert!(!known.contains("CAP UNKNOWN"));
         // Nested caps in the chain use the short nested form.
         let nested = vec![job(1, cap(1000, true), Nesting::Nested(7))];
         assert_eq!(
-            chain(&proc(1, Some(vec![1])), &nested, 16),
+            chain(&proc(1, Some(vec![1])), &nested, 16, true),
             "1 (nested: 10.0% of job 7)"
         );
     }
 
     fn scan() -> Scan {
         Scan {
+            complete: true,
             jobs: vec![
                 JobInfo {
                     id: 1,
@@ -694,7 +742,10 @@ owner processes not inspected: 0
 
     #[test]
     fn render_of_an_empty_scan_keeps_the_headers() {
-        let text = render(&Scan::default());
+        let text = render(&Scan {
+            complete: true,
+            ..Scan::default()
+        });
         let want = "\
 JOBS: 0 job object(s) held by wnice-family wrappers
 id   owner                       command                             cpu cap                             memory   procs  affinity   priority     active
@@ -749,8 +800,32 @@ owner processes not inspected: 0
     }
 
     #[test]
+    fn an_incomplete_inventory_adds_one_legend_line() {
+        let mut s = scan();
+        s.jobs[1].nesting = Nesting::Nested(1);
+        s.complete = false;
+        let text = render(&s);
+        assert_eq!(text.matches("note: \"inventory incomplete\"").count(), 1);
+        // The nested legend keeps its own line and is never doubled.
+        assert_eq!(text.matches("note: nested").count(), 1);
+        // The note follows the PROCESSES rows, just before the footer's blank.
+        let lines: Vec<&str> = text.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with("note: \"inventory incomplete\""))
+            .unwrap();
+        assert!(lines[at - 1].starts_with("40000"));
+        assert_eq!(lines[at + 1], "");
+        assert_eq!(lines[at + 2], "owner processes not inspected: 0");
+        // A complete scan never shows it.
+        s.complete = true;
+        assert!(!render(&s).contains("inventory incomplete"));
+    }
+
+    #[test]
     fn footer_summarises_reasons_in_the_fixed_order() {
         let scan = Scan {
+            complete: true,
             uninspected: vec![
                 failure(1, Uninspected::JobQuery),
                 failure(2, Uninspected::DifferentUser),
@@ -797,6 +872,7 @@ owner processes not inspected: 0
     #[test]
     fn an_all_uninspected_scan_names_every_owner() {
         let scan = Scan {
+            complete: true,
             jobs: Vec::new(),
             processes: Vec::new(),
             uninspected: vec![

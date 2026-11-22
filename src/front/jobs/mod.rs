@@ -62,7 +62,7 @@ pub enum Nesting {
 /// One Job Object held by a wrapper process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobInfo {
-    /// 1-based row id, referenced by [`ProcInfo::jobs`] and [`Nesting::Nested`].
+    /// 1-based row id, referenced by `ProcInfo::jobs` and `Nesting::Nested`.
     pub id: usize,
     pub owner_pid: u32,
     /// Image name of the owning wrapper, e.g. `"wnice.exe"`.
@@ -125,9 +125,12 @@ pub struct OwnerFailure {
 /// One inspection pass.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scan {
+    /// False when part of the current user's job inventory could not be read,
+    /// so a missing or cap-free chain is not a verdict.
+    pub complete: bool,
     /// Display order, ids `1..=len`.
     pub jobs: Vec<JobInfo>,
-    /// Busiest first, at most [`TOP_PROCESSES`].
+    /// Busiest first, at most `TOP_PROCESSES`.
     pub processes: Vec<ProcInfo>,
     /// Owners that produced no rows, in owner order.
     pub uninspected: Vec<OwnerFailure>,
@@ -145,7 +148,7 @@ pub fn run() -> i32 {
     run_to(&inspect::RealInspector, &mut std::io::stdout())
 }
 
-/// Same as [`run`], writing to `out` (testable). Write errors are ignored.
+/// Same as `run`, writing to `out` (testable). Write errors are ignored.
 pub fn run_to(inspector: &dyn Inspector, out: &mut dyn std::io::Write) -> i32 {
     let scan = inspector.scan();
     let _ = out.write_all(format::render(&scan).as_bytes());
@@ -166,6 +169,7 @@ mod tests {
 
     fn fake_scan() -> Scan {
         Scan {
+            complete: true,
             jobs: vec![JobInfo {
                 id: 1,
                 owner_pid: 4242,
@@ -232,6 +236,7 @@ mod tests {
                     reason: Uninspected::HandleTable,
                 },
             ],
+            complete: true,
             logical_cpus: 4,
             window_ms: 250,
             ..Scan::default()
