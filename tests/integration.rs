@@ -19,6 +19,7 @@
 
 #![cfg(windows)]
 
+#[allow(dead_code)] // the probe module carries modes this suite does not use
 mod probe_support;
 use probe_support::*;
 

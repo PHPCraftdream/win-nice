@@ -442,8 +442,9 @@ function main() {
       console.error(`  args:      ${JSON.stringify(args)}`);
     }
     // Verbose also names identical cases, so silence means "not compared"
-    // rather than "matched".
-    if (opts.verbose && perCase === 0) console.error(`match ${item.name}`);
+    // rather than "matched". A case with unmet expectations is reported above,
+    // not matched.
+    if (opts.verbose && perCase === 0 && unmet.length === 0) console.error(`match ${item.name}`);
   }
 
   const stale = [...allowlist.entries()].filter(([, entry]) => !entry.matched);

@@ -276,7 +276,9 @@ fn probe_jobinfo_after(out: &str, go: &str) -> ! {
     std::process::exit(0);
 }
 
-/// A complete probe report. Parsed strictly: unknown or missing fields and a
+/// A complete probe report. Parsed strictly: exactly the four fields
+/// `limitflags`, `cpuctrl`, `cpurate` and the trailing `complete=1` end marker,
+/// in that order; an unknown, missing, duplicated or reordered field and a
 /// missing end marker are errors, never data.
 struct JobReport {
     limitflags: u32,
@@ -285,31 +287,35 @@ struct JobReport {
 }
 
 fn parse_job_report(text: &str) -> Result<JobReport, String> {
-    let mut fields: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
-    for token in text.split_whitespace() {
-        let (key, value) = token
+    const KEYS: [&str; 4] = ["limitflags", "cpuctrl", "cpurate", "complete"];
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.len() != KEYS.len() {
+        return Err(format!(
+            "expected {} fields, found {} in {text:?}",
+            KEYS.len(),
+            tokens.len()
+        ));
+    }
+    let mut values = [0u32; KEYS.len()];
+    for (i, (token, key)) in tokens.iter().zip(KEYS).enumerate() {
+        let (found, value) = token
             .split_once('=')
             .ok_or_else(|| format!("unexpected token {token:?}"))?;
-        let value: u32 = value
+        if found != key {
+            return Err(format!("expected {key}=..., found {token:?}"));
+        }
+        values[i] = value
             .parse()
             .map_err(|_| format!("unparsable value in {token:?}"))?;
-        if fields.insert(key, value).is_some() {
-            return Err(format!("duplicate field {key:?}"));
-        }
     }
-    let field = |key: &str| -> Result<u32, String> {
-        fields
-            .get(key)
-            .copied()
-            .ok_or_else(|| format!("missing field {key:?}"))
-    };
-    if field("complete")? != 1 {
-        return Err("report is not marked complete".to_string());
+    // complete=1 is the end marker: it must be last and must be 1.
+    if values[3] != 1 {
+        return Err(format!("end marker must be complete=1, found {text:?}"));
     }
     Ok(JobReport {
-        limitflags: field("limitflags")?,
-        cpuctrl: field("cpuctrl")?,
-        cpurate: field("cpurate")?,
+        limitflags: values[0],
+        cpuctrl: values[1],
+        cpurate: values[2],
     })
 }
 
@@ -347,9 +353,9 @@ fn wait_for_job_report(path: &Path, pid: u32, budget: Duration) -> JobReport {
     );
 }
 
-/// A scratch directory unique to one test run and removed on drop. A failing
-/// assertion must not leave a "go" file or a report behind that a later run
-/// could mistake for its own.
+/// A scratch directory unique to one test run, created exclusively (an existing
+/// path is a panic) and removed on drop. A failing assertion must not leave a
+/// "go" file or a report behind that a later run could mistake for its own.
 struct ScratchDir(PathBuf);
 
 impl ScratchDir {
@@ -361,12 +367,11 @@ impl ScratchDir {
         let path =
             std::env::temp_dir().join(format!("wnice-compat-{tag}-{}-{nanos}", std::process::id()));
         // An existing path would mean someone else's leftovers: refuse it.
-        assert!(
-            !path.exists(),
-            "scratch path {} already exists",
-            path.display()
-        );
-        std::fs::create_dir_all(&path).expect("scratch dir");
+        // create_dir (not create_dir_all) makes the check atomic: it fails with
+        // AlreadyExists instead of adopting the path in a race.
+        if let Err(e) = std::fs::create_dir(&path) {
+            panic!("cannot create scratch dir {}: {e}", path.display());
+        }
         ScratchDir(path)
     }
 
@@ -694,12 +699,16 @@ fn test_cpu_cap_survives_normal_exit() {
         .expect("spawn wnice");
     assert_eq!(o.status.code(), Some(0), "stderr={}", err(&o));
     let pid: u32 = last_line(&o).parse().expect("child pid");
-    assert!(pid_alive(pid), "background child died with the wrapper");
+    let survivor = SurvivorGuard::open(pid);
+    assert!(survivor.alive(), "background child died with the wrapper");
 
     // wnice has exited (output() returned): only now release the survivor.
     std::fs::write(&go, b"").expect("release the survivor");
     let report = wait_for_job_report(&report_path, pid, Duration::from_secs(40));
-    assert!(pid_alive(pid), "the survivor exited before it could report");
+    assert!(
+        survivor.alive(),
+        "the survivor exited before it could report"
+    );
     assert_eq!(
         report.cpurate, 5000,
         "the CPU cap must still be on the job after the wrapper exited"
@@ -714,7 +723,7 @@ fn test_cpu_cap_survives_normal_exit() {
         0,
         "KILL_ON_JOB_CLOSE must be released on a normal exit"
     );
-    assert!(kill_pid(pid), "cleanup kill failed for pid {pid}");
+    assert!(survivor.kill(), "cleanup kill failed for pid {pid}");
     // `scratch` drops here: no report and no "go" file survive this test.
 }
 
@@ -749,15 +758,16 @@ fn test_daemon_survives_normal_exit() {
         .expect("spawn wnice");
     assert_eq!(o.status.code(), Some(0), "stderr={}", err(&o));
     let pid: u32 = last_line(&o).parse().expect("child pid");
+    let survivor = SurvivorGuard::open(pid);
     for _ in 0..20 {
         std::thread::sleep(Duration::from_millis(250));
-        assert!(pid_alive(pid), "background child died with the wrapper");
+        assert!(survivor.alive(), "background child died with the wrapper");
     }
-    assert!(kill_pid(pid), "cleanup kill failed for pid {pid}");
+    assert!(survivor.kill(), "cleanup kill failed for pid {pid}");
     let mut dead = false;
     for _ in 0..10 {
         std::thread::sleep(Duration::from_millis(50));
-        if !pid_alive(pid) {
+        if !survivor.alive() {
             dead = true;
         }
     }

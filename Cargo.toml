@@ -19,6 +19,10 @@ harness = false
 name = "compat"
 harness = false
 
+[[test]]
+name = "job_containment"
+harness = false
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Security",
@@ -44,6 +48,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Console",
+    "Wdk_System_SystemInformation",
 ] }
 
 [profile.release]
