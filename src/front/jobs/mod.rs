@@ -9,6 +9,7 @@
 
 pub mod format;
 pub mod inspect;
+pub(crate) mod inventory;
 pub mod win;
 
 /// CPU sampling window for the process table.
@@ -55,7 +56,10 @@ pub enum Nesting {
     TopLevel,
     /// Row id of the scanned job whose member this job's owner process is.
     Nested(usize),
-    /// Membership of the owner process could not be determined.
+    /// Known to be nested inside another scanned job, but the immediate parent
+    /// could not be proven from the answers available.
+    NestedUnnamed,
+    /// Whether this job is nested at all could not be determined.
     Unknown,
 }
 
@@ -157,6 +161,7 @@ pub fn run_to(inspector: &dyn Inspector, out: &mut dyn std::io::Write) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use super::inventory::Inventory;
     use super::*;
 
     struct FakeInspector(Scan);
@@ -165,6 +170,47 @@ mod tests {
         fn scan(&self) -> Scan {
             self.0.clone()
         }
+    }
+
+    /// The `complete` flag always comes from the production `Inventory`.
+    fn inventory_scan(inventory: Inventory, jobs: Vec<JobInfo>, processes: Vec<ProcInfo>) -> Scan {
+        let (complete, uninspected) = inventory.into_parts();
+        Scan {
+            complete,
+            jobs,
+            processes,
+            uninspected,
+            logical_cpus: 8,
+            window_ms: 250,
+        }
+    }
+
+    fn job(id: usize, cpu: CapState) -> JobInfo {
+        JobInfo {
+            id,
+            owner_pid: 100 + id as u32,
+            owner_image: "wnice.exe".to_string(),
+            owner_command: None,
+            cpu,
+            limits: None,
+            active_processes: None,
+            nesting: Nesting::TopLevel,
+        }
+    }
+
+    fn sampled(jobs: Option<Vec<usize>>) -> ProcInfo {
+        ProcInfo {
+            pid: 5000,
+            image: "node.exe".to_string(),
+            cpu_seconds: 0.2,
+            jobs,
+        }
+    }
+
+    fn rendered(scan: Scan) -> String {
+        let mut out: Vec<u8> = Vec::new();
+        assert_eq!(run_to(&FakeInspector(scan), &mut out), 0);
+        String::from_utf8(out).unwrap()
     }
 
     fn fake_scan() -> Scan {
@@ -247,5 +293,80 @@ mod tests {
         let text = format::render(&scan);
         assert!(text.contains("owner processes not inspected: 2 (1 different user, 1 handle table"));
         assert!(text.contains("JOBS: 0 job object(s)"));
+    }
+
+    #[test]
+    fn a_failed_discovery_never_calls_a_process_jobless() {
+        let mut inventory = Inventory::default();
+        inventory.discovery_failed(&[(4242, "wnice.exe".to_string())], Uninspected::HandleTable);
+        let scan = inventory_scan(inventory, Vec::new(), vec![sampled(Some(vec![]))]);
+        let text = rendered(scan);
+        let row = text.lines().find(|l| l.starts_with("5000 ")).unwrap();
+        assert!(row.ends_with("no wnice job found - inventory incomplete"));
+        assert_eq!(text.matches("note: \"inventory incomplete\"").count(), 1);
+        assert!(text.contains("owner processes not inspected: 1 (1 handle table unavailable)"));
+        assert!(text.contains("\n  not inspected: 4242 wnice.exe (handle table unavailable)\n"));
+        assert!(!text.contains("NOT-IN-WNICE-JOB"));
+        assert!(!text.contains("UNCAPPED"));
+    }
+
+    #[test]
+    fn a_failed_process_snapshot_keeps_the_tables_and_the_legend() {
+        let mut inventory = Inventory::default();
+        inventory.mark_incomplete();
+        let text = rendered(inventory_scan(inventory, Vec::new(), Vec::new()));
+        assert!(text.contains("PROCESSES: 0 busiest process(es) over 250 ms"));
+        assert_eq!(text.matches("note: \"inventory incomplete\"").count(), 1);
+        assert!(text.ends_with("\nowner processes not inspected: 0\n"));
+        assert!(!text.contains("NOT-IN-WNICE-JOB"));
+        assert!(!text.contains("UNCAPPED"));
+    }
+
+    #[test]
+    fn a_skipped_owner_never_yields_an_uncapped_verdict() {
+        let mut inventory = Inventory::default();
+        inventory.owner_failed(777, "capc.exe", Uninspected::AccessDenied);
+        let scan = inventory_scan(
+            inventory,
+            vec![job(1, CapState::Uncapped)],
+            vec![sampled(Some(vec![1]))],
+        );
+        let text = rendered(scan);
+        let row = text.lines().find(|l| l.starts_with("5000 ")).unwrap();
+        assert!(row.ends_with("1 (none) - inventory incomplete"));
+        assert!(!text.contains("UNCAPPED"));
+        assert_eq!(text.matches("note: \"inventory incomplete\"").count(), 1);
+        assert!(text.contains("\n  not inspected: 777 capc.exe (access denied)\n"));
+    }
+
+    #[test]
+    fn a_failed_limit_query_shows_unknown_cells_and_no_verdict() {
+        let mut inventory = Inventory::default();
+        inventory.mark_incomplete();
+        let scan = inventory_scan(
+            inventory,
+            vec![job(1, CapState::Unknown)],
+            vec![sampled(Some(vec![1]))],
+        );
+        let text = rendered(scan);
+        let row = text.lines().find(|l| l.starts_with("5000 ")).unwrap();
+        assert!(row.ends_with("1 (?) CAP UNKNOWN"));
+        let jobs_row = text.lines().find(|l| l.starts_with("1 ")).unwrap();
+        assert!(jobs_row.contains('?'));
+        assert_eq!(text.matches("note: \"inventory incomplete\"").count(), 1);
+    }
+
+    #[test]
+    fn a_complete_inventory_gives_the_uncapped_verdict() {
+        let scan = inventory_scan(
+            Inventory::default(),
+            vec![job(1, CapState::Uncapped)],
+            vec![sampled(Some(vec![1]))],
+        );
+        let text = rendered(scan);
+        let row = text.lines().find(|l| l.starts_with("5000 ")).unwrap();
+        assert!(row.ends_with("1 (none) UNCAPPED"));
+        assert!(!text.contains("inventory incomplete"));
+        assert!(text.ends_with("\nowner processes not inspected: 0\n"));
     }
 }

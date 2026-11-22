@@ -1,11 +1,9 @@
 //! The real (Win32-backed) inspection pass behind `wnice --jobs`.
 
+use super::inventory::Inventory;
 use super::win::{self, HandleTable};
-use super::{
-    JobInfo, Nesting, OwnerFailure, ProcInfo, Scan, Uninspected, SAMPLE_WINDOW, TOP_PROCESSES,
-};
+use super::{JobInfo, Nesting, ProcInfo, Scan, Uninspected, SAMPLE_WINDOW, TOP_PROCESSES};
 use crate::Handle;
-use std::collections::HashSet;
 
 /// Multicall frontend names (image stems) that hold a wrapped command's job.
 const WRAPPER_NAMES: [&str; 15] = [
@@ -84,47 +82,52 @@ impl super::Inspector for RealInspector {
         let logical_cpus = win::logical_cpus();
         let window_ms = SAMPLE_WINDOW.as_millis() as u64;
         let me = std::process::id();
+        let mut inventory = Inventory::default();
 
         // The handle table is the only way to reach another process's job
         // handles; the job type index is resolved at runtime from a probe job.
         let table = HandleTable::query();
         let job_type = table.as_ref().and_then(win::job_type_index);
         let own_sid = win::current_user();
-        // Discovery is what a definitive chain verdict needs in the first place.
-        let discovery_ok = own_sid.is_some() && table.is_some() && job_type.is_some();
 
-        let processes = crate::front::native::processes();
+        // A failed snapshot is an incomplete inventory, never just no
+        // processes: nothing could have been recognised either.
+        let processes = match crate::front::native::process_snapshot() {
+            Some(list) => list,
+            None => {
+                inventory.mark_incomplete();
+                Vec::new()
+            }
+        };
         let owners = recognised_owners(&processes, me);
 
         // A failure that precedes every per-owner step leaves no owner
         // inspected at all, but never stops the sampling pass.
-        let (owned, owner_handles, uninspected) = match (&own_sid, &table, job_type) {
-            (None, ..) => (
-                Vec::new(),
-                Vec::new(),
-                all_uninspected(&owners, Uninspected::TokenQuery),
-            ),
-            (Some(_), None, _) => (
-                Vec::new(),
-                Vec::new(),
-                all_uninspected(&owners, Uninspected::HandleTable),
-            ),
-            (Some(_), Some(_), None) => (
-                Vec::new(),
-                Vec::new(),
-                all_uninspected(&owners, Uninspected::JobType),
-            ),
+        let (owned, owner_handles) = match (&own_sid, &table, job_type) {
+            (None, ..) => {
+                inventory.discovery_failed(&owners, Uninspected::TokenQuery);
+                (Vec::new(), Vec::new())
+            }
+            (Some(_), None, _) => {
+                inventory.discovery_failed(&owners, Uninspected::HandleTable);
+                (Vec::new(), Vec::new())
+            }
+            (Some(_), Some(_), None) => {
+                inventory.discovery_failed(&owners, Uninspected::JobType);
+                (Vec::new(), Vec::new())
+            }
             (Some(sid), Some(table), Some(job_type)) => {
-                inspect_owners(sid, table, job_type, &owners)
+                inspect_owners(sid, table, job_type, &owners, &mut inventory)
             }
         };
 
         let owned = with_nesting(owned, &owner_handles);
         let jobs: Vec<JobInfo> = owned.iter().map(|j| j.info.clone()).collect();
-        let processes = sample(&processes, me, &owned);
+        let processes = sample(&processes, me, own_sid.as_ref(), &owned);
+        let (complete, uninspected) = inventory.into_parts();
 
         Scan {
-            complete: inventory_complete(discovery_ok, &uninspected),
+            complete,
             jobs,
             processes,
             uninspected,
@@ -132,15 +135,6 @@ impl super::Inspector for RealInspector {
             window_ms,
         }
     }
-}
-
-/// Complete enough for a definitive chain verdict: discovery succeeded (own
-/// SID, handle table, job type) and every same-user owner was inspected.
-pub(crate) fn inventory_complete(discovery_ok: bool, failures: &[OwnerFailure]) -> bool {
-    discovery_ok
-        && failures
-            .iter()
-            .all(|f| f.reason == Uninspected::DifferentUser)
 }
 
 /// The wrapper processes worth inspecting, pid-ascending: this order decides
@@ -155,103 +149,103 @@ fn recognised_owners(processes: &[(String, u32)], me: u32) -> Vec<(u32, String)>
     owners
 }
 
-/// Every owner counted as not inspected, in the given order (used when the
-/// handle snapshot or the job type index is unavailable).
-pub(crate) fn all_uninspected(owners: &[(u32, String)], reason: Uninspected) -> Vec<OwnerFailure> {
-    owners
-        .iter()
-        .map(|(pid, image)| OwnerFailure {
-            pid: *pid,
-            image: image.clone(),
-            reason,
-        })
-        .collect()
-}
-
-/// Open each owner, keep its job handles and collect the ones that failed.
-/// Returns the jobs, one owner handle per owner position (`None` when the
-/// process could not be opened) and the failures in owner order.
+/// Two phases over the owners, in the given (pid-ascending) order: first open
+/// and screen every owner and collect its job handles as candidates, then try
+/// to duplicate one handle per kernel job object. Returns the jobs and one
+/// owner handle per owner position (`None` when the owner was not inspected).
 fn inspect_owners(
     own: &win::OwnedSid,
     table: &HandleTable,
     job_type: u16,
     owners: &[(u32, String)],
-) -> (Vec<OwnedJob>, Vec<Option<Handle>>, Vec<OwnerFailure>) {
-    let mut owned: Vec<OwnedJob> = Vec::new();
+    inventory: &mut Inventory,
+) -> (Vec<OwnedJob>, Vec<Option<Handle>>) {
     let mut owner_handles: Vec<Option<Handle>> = owners.iter().map(|_| None).collect();
-    let mut failures: Vec<OwnerFailure> = Vec::new();
-    // One row per kernel job object, even when a wrapper holds several handles
-    // to it: the first owner that succeeds in duplicating it claims it.
-    let mut claimed: HashSet<usize> = HashSet::new();
-    // Objects this owner could not duplicate: a later handle for the same
-    // object may still succeed, so only the leftovers count as a failure.
-    let mut unduplicated: HashSet<usize> = HashSet::new();
+    let mut commands: Vec<Option<String>> = owners.iter().map(|_| None).collect();
+    // Kernel job object address -> its candidate handles as (owner position,
+    // handle value), in the order the owners and the table produced them.
+    let mut objects: Vec<(usize, Vec<(usize, usize)>)> = Vec::new();
 
     for (index, (pid, image)) in owners.iter().enumerate() {
-        let fail = |reason| OwnerFailure {
-            pid: *pid,
-            image: image.clone(),
-            reason,
-        };
         let Some(owner) = win::open_owner(*pid) else {
-            failures.push(fail(Uninspected::AccessDenied));
+            inventory.owner_failed(*pid, image, Uninspected::AccessDenied);
             continue;
         };
         // SID gate first: nothing else is ever asked of a foreign process.
         match win::same_user(&owner, own) {
+            Some(true) => {}
             Some(false) => {
-                failures.push(fail(Uninspected::DifferentUser));
+                inventory.owner_failed(*pid, image, Uninspected::DifferentUser);
                 continue;
             }
             None => {
-                failures.push(fail(Uninspected::TokenQuery));
+                inventory.owner_failed(*pid, image, Uninspected::TokenQuery);
                 continue;
             }
-            Some(true) => {}
         }
-        let command = win::command_line(&owner);
-
+        commands[index] = win::command_line(&owner);
         for entry in table
             .entries_of(*pid)
             .into_iter()
             .filter(|e| e.object_type_index == job_type)
         {
-            if claimed.contains(&entry.object) {
-                continue;
+            match objects
+                .iter_mut()
+                .find(|(object, _)| *object == entry.object)
+            {
+                Some((_, candidates)) => candidates.push((index, entry.handle_value)),
+                None => objects.push((entry.object, vec![(index, entry.handle_value)])),
             }
-            let Some(handle) = win::duplicate_job(&owner, entry.handle_value) else {
-                unduplicated.insert(entry.object);
-                continue;
-            };
-            unduplicated.remove(&entry.object);
-            claimed.insert(entry.object);
-            let limits = win::job_limits(&handle);
-            owned.push(OwnedJob {
-                handle,
-                object: entry.object,
-                owner_index: index,
-                info: JobInfo {
-                    id: 0,
-                    owner_pid: *pid,
-                    owner_image: image.clone(),
-                    owner_command: command.clone(),
-                    cpu: limits.cpu,
-                    limits: limits.extended,
-                    active_processes: limits.active,
-                    nesting: Nesting::TopLevel,
-                },
-            });
         }
-        if !unduplicated.is_empty() {
-            failures.push(fail(Uninspected::JobQuery));
-        }
-        // Per owner: the retry for the same object happens inside this owner's
-        // entry loop above, and a failed duplicate never claims the address.
-        unduplicated.clear();
         owner_handles[index] = Some(owner);
     }
 
-    (owned, owner_handles, failures)
+    // One row per kernel job object, even when several wrappers hold handles
+    // to it: the first candidate handle that duplicates wins the object.
+    let mut owned: Vec<OwnedJob> = Vec::new();
+    for (object, candidates) in objects {
+        let first_owner = candidates.first().map(|&(owner_index, _)| owner_index);
+        let mut duplicated: Option<(Handle, usize)> = None;
+        for (owner_index, handle_value) in candidates {
+            // A candidate only exists for an owner whose handle was kept.
+            let Some(owner) = owner_handles[owner_index].as_ref() else {
+                continue;
+            };
+            if let Some(handle) = win::duplicate_job(owner, handle_value) {
+                duplicated = Some((handle, owner_index));
+                break;
+            }
+        }
+        let Some((handle, owner_index)) = duplicated else {
+            if let Some(first_owner) = first_owner {
+                let (pid, image) = &owners[first_owner];
+                inventory.job_failed(*pid, image);
+            }
+            continue;
+        };
+        let limits = win::job_limits(&handle);
+        if !limits.queries_ok() {
+            inventory.mark_incomplete();
+        }
+        let (pid, image) = &owners[owner_index];
+        owned.push(OwnedJob {
+            handle,
+            object,
+            owner_index,
+            info: JobInfo {
+                id: 0,
+                owner_pid: *pid,
+                owner_image: image.clone(),
+                owner_command: commands[owner_index].clone(),
+                cpu: limits.cpu,
+                limits: limits.extended,
+                active_processes: limits.active,
+                nesting: Nesting::TopLevel,
+            },
+        });
+    }
+
+    (owned, owner_handles)
 }
 
 /// Number the rows in a deterministic order and classify each one's nesting.
@@ -300,6 +294,11 @@ fn classify_nesting(own_pos: usize, count: usize, members: &dyn OwnerMembership)
             Nesting::TopLevel
         };
     }
+    // A candidate plus an unanswered pair: the job is nested, but which job
+    // contains it cannot be proven, so no depth is scored.
+    if any_unknown {
+        return Nesting::NestedUnnamed;
+    }
     // Depth of a candidate: how many other candidates contain its owner, plus
     // how many of those questions went unanswered.
     let mut depths: Vec<(usize, usize, usize)> = Vec::new();
@@ -320,22 +319,31 @@ fn classify_nesting(own_pos: usize, count: usize, members: &dyn OwnerMembership)
         depths.push((k, score, unknown));
     }
     // Only a strictly deepest, fully known candidate names the parent: an
-    // ambiguous or unknowable depth must not name one.
+    // ambiguous or unknowable depth leaves the nesting unnamed.
     let Some(deepest) = depths.iter().map(|&(_, score, _)| score).max() else {
-        return Nesting::Unknown;
+        return Nesting::NestedUnnamed;
     };
     let mut winners = depths.iter().filter(|&&(_, score, _)| score == deepest);
     match (winners.next(), winners.next()) {
         (Some(&(k, _, 0)), None) => Nesting::Nested(k + 1),
-        _ => Nesting::Unknown,
+        _ => Nesting::NestedUnnamed,
     }
 }
 
 /// Two CPU-time samples around the window, then membership of the busiest
 /// processes. The handle taken for the first sample is reused for both the
 /// second sample and the membership queries, so every reading describes the
-/// same process.
-fn sample(processes: &[(String, u32)], me: u32, owned: &[OwnedJob]) -> Vec<ProcInfo> {
+/// same process. Only this user's processes are sampled at all.
+fn sample(
+    processes: &[(String, u32)],
+    me: u32,
+    own: Option<&win::OwnedSid>,
+    owned: &[OwnedJob],
+) -> Vec<ProcInfo> {
+    // Without our own SID no process can be proven to be ours.
+    let Some(own) = own else {
+        return Vec::new();
+    };
     let mut first: Vec<(u32, String, Handle, u64)> = Vec::new();
     for (image, pid) in processes {
         if *pid == me {
@@ -344,6 +352,11 @@ fn sample(processes: &[(String, u32)], me: u32, owned: &[OwnedJob]) -> Vec<ProcI
         let Some(handle) = win::open_query(*pid) else {
             continue;
         };
+        // Same-user gate: a foreign process is never sampled, so it appears
+        // nowhere except in the inventory failures.
+        if win::same_user(&handle, own) != Some(true) {
+            continue;
+        }
         let Some(start) = win::cpu_time_100ns(&handle) else {
             continue;
         };
@@ -411,77 +424,6 @@ mod tests {
         assert!(!is_wrapper_image("wnice.cmd"));
         assert!(!is_wrapper_image("wnice2.exe"));
         assert!(!is_wrapper_image(""));
-    }
-
-    #[test]
-    fn all_uninspected_keeps_every_owner_in_order() {
-        let owners = vec![
-            (300u32, "wnice.exe".to_string()),
-            (100, "capc.exe".to_string()),
-        ];
-        let want = vec![
-            OwnerFailure {
-                pid: 300,
-                image: "wnice.exe".to_string(),
-                reason: Uninspected::JobType,
-            },
-            OwnerFailure {
-                pid: 100,
-                image: "capc.exe".to_string(),
-                reason: Uninspected::JobType,
-            },
-        ];
-        assert_eq!(all_uninspected(&owners, Uninspected::JobType), want);
-        assert!(all_uninspected(&[], Uninspected::HandleTable).is_empty());
-    }
-
-    fn owner_failure(pid: u32, reason: Uninspected) -> OwnerFailure {
-        OwnerFailure {
-            pid,
-            image: "capc.exe".to_string(),
-            reason,
-        }
-    }
-
-    #[test]
-    fn inventory_is_complete_only_with_discovery_and_no_same_user_failure() {
-        // Discovery failure: no verdict is possible at all.
-        assert!(!inventory_complete(false, &[]));
-        assert!(!inventory_complete(
-            false,
-            &[owner_failure(1, Uninspected::DifferentUser)]
-        ));
-        // Everything discovered, nothing failed.
-        assert!(inventory_complete(true, &[]));
-        // A same-user owner we could not read breaks the inventory.
-        assert!(!inventory_complete(
-            true,
-            &[owner_failure(1, Uninspected::AccessDenied)]
-        ));
-        assert!(!inventory_complete(
-            true,
-            &[owner_failure(1, Uninspected::JobQuery)]
-        ));
-        // Foreign owners are not part of our inventory.
-        assert!(inventory_complete(
-            true,
-            &[owner_failure(1, Uninspected::DifferentUser)]
-        ));
-        assert!(inventory_complete(
-            true,
-            &[
-                owner_failure(1, Uninspected::DifferentUser),
-                owner_failure(2, Uninspected::DifferentUser),
-            ]
-        ));
-        // ... but one real failure among them still is.
-        assert!(!inventory_complete(
-            true,
-            &[
-                owner_failure(1, Uninspected::DifferentUser),
-                owner_failure(2, Uninspected::TokenQuery),
-            ]
-        ));
     }
 
     /// One owned job at a fixed position, with a handle the fake seam never
@@ -588,23 +530,30 @@ mod tests {
             classify_nesting(1, jobs.len(), &FakeMembership::new(&jobs, &[(1, 0, None)])),
             Nesting::Unknown
         );
-        // A candidate plus an unanswered pair is still a nesting.
+        // A candidate plus an unanswered pair is a nesting with no provable
+        // parent: the third job's answer is missing, so depth is not scored.
         let three = owned_jobs(&[0, 1, 2]);
         let fake = FakeMembership::new(&three, &[(1, 0, Some(true)), (1, 2, None)]);
-        assert_eq!(classify_nesting(1, three.len(), &fake), Nesting::Nested(1));
+        assert_eq!(
+            classify_nesting(1, three.len(), &fake),
+            Nesting::NestedUnnamed
+        );
     }
 
     #[test]
-    fn nesting_is_unknown_when_two_siblings_are_equally_deep() {
+    fn nesting_is_unnamed_when_two_siblings_are_equally_deep() {
         // Job 2's owner is in both siblings, and neither contains the other:
-        // there is no unique immediate parent.
+        // there is no unique immediate parent, but the nesting is known.
         let jobs = owned_jobs(&[0, 1, 2]);
         let fake = FakeMembership::new(&jobs, &[(2, 0, Some(true)), (2, 1, Some(true))]);
-        assert_eq!(classify_nesting(2, jobs.len(), &fake), Nesting::Unknown);
+        assert_eq!(
+            classify_nesting(2, jobs.len(), &fake),
+            Nesting::NestedUnnamed
+        );
     }
 
     #[test]
-    fn nesting_is_unknown_when_a_candidate_depth_is_unanswered() {
+    fn nesting_is_unnamed_when_a_candidate_depth_is_unanswered() {
         // Two candidates, and whether the deeper one contains the other is
         // unknown: naming either would be a guess.
         let jobs = owned_jobs(&[0, 1, 2]);
@@ -612,6 +561,9 @@ mod tests {
             &jobs,
             &[(2, 0, Some(true)), (2, 1, Some(true)), (1, 0, None)],
         );
-        assert_eq!(classify_nesting(2, jobs.len(), &fake), Nesting::Unknown);
+        assert_eq!(
+            classify_nesting(2, jobs.len(), &fake),
+            Nesting::NestedUnnamed
+        );
     }
 }

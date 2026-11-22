@@ -374,6 +374,13 @@ pub struct JobLimits {
     pub active: Option<u32>,
 }
 
+impl JobLimits {
+    /// True when every query that produced this value succeeded.
+    pub fn queries_ok(&self) -> bool {
+        self.cpu != CapState::Unknown && self.extended.is_some() && self.active.is_some()
+    }
+}
+
 /// Read the limits of `job`. Never fails wholesale: a query that fails leaves
 /// only its own part unknown.
 pub fn job_limits(job: &Handle) -> JobLimits {
@@ -524,5 +531,35 @@ mod tests {
         // Zeroed header: a null buffer, so nothing to decode.
         assert_eq!(decode_command_line(&[0u8; 32], 32), None);
         assert_eq!(decode_command_line(&[], 0), None);
+    }
+
+    #[test]
+    fn limits_are_ok_only_when_every_query_succeeded() {
+        let ok = JobLimits {
+            cpu: CapState::Uncapped,
+            extended: Some(LimitFields::default()),
+            active: Some(0),
+        };
+        assert!(ok.queries_ok());
+        let capped = JobLimits {
+            cpu: CapState::Capped(CpuCap {
+                cpu_rate: 5000,
+                hard: true,
+            }),
+            ..ok
+        };
+        assert!(capped.queries_ok());
+        // Any unknown part makes the whole reading incomplete.
+        assert!(!JobLimits {
+            cpu: CapState::Unknown,
+            ..ok
+        }
+        .queries_ok());
+        assert!(!JobLimits {
+            extended: None,
+            ..ok
+        }
+        .queries_ok());
+        assert!(!JobLimits { active: None, ..ok }.queries_ok());
     }
 }

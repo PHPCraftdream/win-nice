@@ -17,14 +17,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only counted. Every value a query could not establish is shown as `?`,
   and a chain verdict (`UNCAPPED`, `NOT-IN-WNICE-JOB`) is given only when
   the inventory is complete - otherwise the fact carries an explicit
-  `- inventory incomplete` qualifier and a one-line legend explains it. A
-  nested job (e.g. `capc 50 capm 50 ...`) shows its rate relative to its
-  immediate parent, the deepest containing job, never as a share of the
-  whole machine. `--jobs` is decided before any other argument is
-  interpreted and is valid only as the whole command line: any other
-  argument, even an invalid one, is a usage error with exit 2 and one line
-  on stderr. `wnice --help` is the only place it is documented; every
-  existing invocation is unchanged.
+  `- inventory incomplete` qualifier and a one-line legend explains it.
+  A nested job (e.g. `capc 50 capm 50 ...`) shows its rate as a share of
+  its parent job's allowance, never of the whole machine: the immediate
+  parent is named when the answers prove it, otherwise the row shows it as
+  `nested (parent ?)`. `--jobs` is decided before any other argument is
+  interpreted and is accepted only as the whole command line: any other
+  argument before the first `--` - a command, an option, a help or version
+  flag, an invalid option value, or a repeated `--jobs` - is a usage error
+  with exit 2 and a single line on stderr, so `wnice cmd --jobs` is that
+  error too, while a `--jobs` at or after the first `--` is an ordinary
+  argument of the wrapped command (`wnice -- cmd --jobs`). `wnice --help`
+  is the only place it is documented; only invocations whose arguments
+  contain `--jobs` change, and every other invocation behaves exactly as
+  before.
 
 ### Internal
 

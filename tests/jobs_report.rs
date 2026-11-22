@@ -179,14 +179,16 @@ fn test_jobs_report_lists_a_real_capped_tree() {
 
 fn test_jobs_flag_usage_errors() {
     // `--jobs` is valid only as the sole argument: any command, option,
-    // help/version flag or repeat is a misuse reported on stderr with exit 2
-    // and no usage block. It is decided before any other argument is
-    // interpreted, so even an invalid neighbour yields the conflict.
+    // help/version flag or repeat is a misuse reported on stderr with exit 2.
+    // It is decided before any other argument is interpreted, so even an
+    // invalid neighbour yields the conflict and the message is a single line:
+    // no usage block (and no hint line) can ever be printed.
     for args in [
         vec!["--jobs", "cmd"],
         vec!["--jobs", "-c", "10", "cmd"],
         vec!["-c", "10", "--jobs"],
         vec!["--jobs", "--boost"],
+        vec!["--jobs", "--wsl"],
         vec!["--jobs", "--help"],
         vec!["--jobs", "-h"],
         vec!["--jobs", "--version"],
@@ -221,6 +223,16 @@ fn test_jobs_flag_usage_errors() {
         assert!(
             !err.contains("usage:"),
             "args {args:?} must not print the usage block: {err}"
+        );
+        assert_eq!(
+            err.lines().count(),
+            1,
+            "args {args:?} must print exactly one stderr line: {err}"
+        );
+        assert_eq!(
+            err.trim_end_matches('\n'),
+            "wnice: --jobs takes no command and no other options; run 'wnice --jobs' on its own",
+            "args {args:?}"
         );
     }
 

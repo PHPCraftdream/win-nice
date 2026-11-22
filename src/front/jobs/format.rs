@@ -58,7 +58,7 @@ pub fn render(scan: &Scan) -> String {
     if scan
         .jobs
         .iter()
-        .any(|job| matches!(job.nesting, Nesting::Nested(_)))
+        .any(|job| matches!(job.nesting, Nesting::Nested(_) | Nesting::NestedUnnamed))
     {
         lines.push(
             "note: nested = share of the parent job's own CPU allowance, not of the whole machine"
@@ -174,6 +174,12 @@ pub fn cpu_cap(job: &JobInfo, logical_cpus: u32) -> String {
             format!("nested (job {parent}): {:.1}% of parent", rate(cap))
         }
         (CapState::Capped(cap), Nesting::Unknown) => format!("{} (?)", full_cap(cap, logical_cpus)),
+        // An unnamed parent is still the parent, never the whole machine.
+        (CapState::Unknown, Nesting::NestedUnnamed) => "nested (parent ?), cap ?".to_string(),
+        (CapState::Uncapped, Nesting::NestedUnnamed) => "nested (parent ?), none".to_string(),
+        (CapState::Capped(cap), Nesting::NestedUnnamed) => {
+            format!("nested (parent ?): {:.1}% of parent", rate(cap))
+        }
     }
 }
 
@@ -185,6 +191,9 @@ pub fn cap_short(job: &JobInfo, logical_cpus: u32) -> String {
         (CapState::Capped(cap), Nesting::TopLevel) => full_cap(cap, logical_cpus),
         (CapState::Capped(cap), Nesting::Nested(parent)) => {
             format!("nested: {:.1}% of job {parent}", rate(cap))
+        }
+        (CapState::Capped(cap), Nesting::NestedUnnamed) => {
+            format!("nested: {:.1}% of parent", rate(cap))
         }
         (CapState::Capped(cap), Nesting::Unknown) => {
             format!("{} (?)", full_cap(cap, logical_cpus))
@@ -457,6 +466,39 @@ mod tests {
             cpu_cap(&job(1, cap(5050, false), Nesting::Unknown), 8),
             "50.5% all / 404.0% one soft (?)"
         );
+    }
+
+    #[test]
+    fn cpu_cap_names_an_unknown_parent() {
+        assert_eq!(
+            cpu_cap(&job(1, CapState::Unknown, Nesting::NestedUnnamed), 8),
+            "nested (parent ?), cap ?"
+        );
+        assert_eq!(
+            cpu_cap(&job(1, CapState::Uncapped, Nesting::NestedUnnamed), 8),
+            "nested (parent ?), none"
+        );
+        let capped = cpu_cap(&job(1, cap(5050, false), Nesting::NestedUnnamed), 8);
+        assert_eq!(capped, "nested (parent ?): 50.5% of parent");
+        // An unnamed parent is not the machine either.
+        assert!(!capped.contains("% all"));
+        assert!(!capped.contains("% one"));
+    }
+
+    #[test]
+    fn cap_short_names_an_unknown_parent() {
+        assert_eq!(
+            cap_short(&job(1, CapState::Unknown, Nesting::NestedUnnamed), 8),
+            "?"
+        );
+        assert_eq!(
+            cap_short(&job(1, CapState::Uncapped, Nesting::NestedUnnamed), 8),
+            "none"
+        );
+        let capped = cap_short(&job(1, cap(5050, false), Nesting::NestedUnnamed), 8);
+        assert_eq!(capped, "nested: 50.5% of parent");
+        assert!(!capped.contains("% all"));
+        assert!(!capped.contains("% one"));
     }
 
     #[test]
@@ -797,6 +839,20 @@ owner processes not inspected: 0
             .unwrap()
             .starts_with("2    23456"));
         assert_eq!(text.lines().nth(line + 1), Some(""));
+    }
+
+    #[test]
+    fn the_nested_legend_covers_an_unnamed_parent() {
+        let mut s = scan();
+        // No nested job at all: no nesting legend.
+        assert!(!render(&s).contains("note: nested"));
+        s.jobs[0].nesting = Nesting::NestedUnnamed;
+        s.jobs[1].nesting = Nesting::TopLevel;
+        let text = render(&s);
+        assert_eq!(text.matches("note: nested").count(), 1);
+        assert!(text.contains(
+            "\nnote: nested = share of the parent job's own CPU allowance, not of the whole machine\n"
+        ));
     }
 
     #[test]
