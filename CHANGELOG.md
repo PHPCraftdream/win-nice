@@ -60,6 +60,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   code are unchanged; only the `admin --help` text grew, which is the
   differential allowlist's second entry.
 
+- `WNICE_AGENT_LIMITS` (optional): limits for the agents `cy` and `cx`
+  start. When set, its value is whitespace-separated `wnice` limit options
+  (`-p/--priority`, `-c/--cpu`, `-t/--threads`, `-m/--memory`, `-n/--procs`,
+  `-s/--timeout`, `--boost`) and the agent runs under exactly the job
+  `wnice <those options> -- claude ...` (resp. `codex ...`) would create: one
+  job with those limits around the agent and everything it starts, e.g.
+  `set WNICE_AGENT_LIMITS=-p idle -c 10 -m 10g` once per shell instead of
+  editing every `cy` command. No quoting rules beyond whitespace separation,
+  and the value goes through the same parser and validation as the `wnice`
+  command line, so values and error wording cannot drift. A command or any
+  other non-option token, `--`, `--wsl`, `--jobs`, `--help` and `--version`
+  are refused: one stderr line naming the variable with the reason, exit 1,
+  nothing started. Unset, empty or whitespace-only is exactly the 0.4.0
+  behaviour (`cy`/`cx` stdout, stderr, exit code and the job they create are
+  unchanged), and `wnice`, the legacy tools, `admin` and `uiup` never read
+  the variable.
+
 ### Internal
 
 - Backward-compatibility safety net for the published CLI contract: a `cargo test` suite with committed `--help`/usage goldens, exact message and exit-code checks and the Job Object lifecycle (`tests/compat.rs`), plus a CI differential gate that replays a fixed command set against the published `win-nice@0.4.0` binary (`scripts/compat-differential.js`; its allowlist gained its first entry with `--jobs`). No runtime, CLI or version change.

@@ -572,12 +572,96 @@ fn test_cy_cx_prefix_agent_flags() {
             .creation_flags(CREATE_NO_WINDOW)
             .args(["x y", "-p"])
             .env("PATH", &bin)
+            .env_remove("WNICE_AGENT_LIMITS")
             .env("WNICE_PROBE", "echo")
             .env("WNICE_PROBE_DEPTH", (probe_depth() + 1).to_string())
             .output()
             .expect("spawn agent frontend");
         assert_eq!(o.status.code(), Some(0), "{tool}: stderr={}", stderr(&o));
         assert_eq!(last_line(&o), [flag, "x y", "-p"].join(""), "{tool}");
+    }
+    let _ = std::fs::remove_dir_all(&bin);
+}
+
+fn test_cy_cx_agent_limits_env() {
+    // A fake claude.exe / codex.exe (copies of the probe) on a private PATH.
+    let bin = std::env::temp_dir().join(format!("wnice-agentlimits-{}", std::process::id()));
+    std::fs::create_dir_all(&bin).expect("agents dir");
+    for agent in ["claude", "codex"] {
+        std::fs::copy(probe_exe(), bin.join(format!("{agent}.exe"))).expect("fake agent");
+    }
+    // WNICE_AGENT_LIMITS is set on the child only, never in this process.
+    let launch = |tool: &str, limits: Option<&str>| -> Output {
+        check_probe_depth();
+        let mut cmd = Command::new(legacy_exe(tool));
+        cmd.creation_flags(CREATE_NO_WINDOW)
+            .env("PATH", &bin)
+            .env("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+            .env("WNICE_PROBE", "jobinfo")
+            .env("WNICE_PROBE_ARGS", "")
+            .env("WNICE_PROBE_DEPTH", (probe_depth() + 1).to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        match limits {
+            Some(v) => cmd.env("WNICE_AGENT_LIMITS", v),
+            None => cmd.env_remove("WNICE_AGENT_LIMITS"),
+        };
+        ChildGuard::spawn(cmd).output()
+    };
+    // One field of the probe's "<name>=<dec>" jobinfo line.
+    let field = |o: &Output, name: &str| -> u32 {
+        let line = last_line(o);
+        line.split_whitespace()
+            .find_map(|t| t.strip_prefix(name).and_then(|v| v.parse().ok()))
+            .unwrap_or_else(|| panic!("{name} missing in {line:?}"))
+    };
+    let cap_flags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+    for tool in ["cy", "cx"] {
+        // With the variable the stand-in agent observes the same hard cap a
+        // `wnice -c 20 -- <agent>` command line creates.
+        let o = launch(tool, Some("-c 20"));
+        assert_eq!(o.status.code(), Some(0), "{tool}: stderr={}", stderr(&o));
+        assert_eq!(
+            field(&o, "cpuctrl="),
+            cap_flags,
+            "{tool}: {}",
+            last_line(&o)
+        );
+        assert_eq!(field(&o, "cpurate="), 2000, "{tool}: {}", last_line(&o));
+
+        // Unset and whitespace-only: the 0.4.0 job, no CPU cap of any kind.
+        for value in [None, Some("   ")] {
+            let o = launch(tool, value);
+            assert_eq!(
+                o.status.code(),
+                Some(0),
+                "{tool} {value:?}: stderr={}",
+                stderr(&o)
+            );
+            assert_ne!(
+                field(&o, "limitflags=") & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                0,
+                "{tool} {value:?}: must still be a wnice job"
+            );
+            assert_eq!(field(&o, "cpuctrl="), 0, "{tool} {value:?}");
+            assert_eq!(field(&o, "cpurate="), 0, "{tool} {value:?}");
+        }
+    }
+
+    // An invalid value and a forbidden token: exit 1, exactly one stderr line
+    // naming the variable, and the stand-in agent is never started (no stdout).
+    for (value, want) in [
+        ("-c 0", "WNICE_AGENT_LIMITS: invalid -c/--cpu value '0'\n"),
+        (
+            "-c 20 --",
+            "WNICE_AGENT_LIMITS: '--' is not allowed; only wnice limit options (-p, -c, -t, -m, -n, -s, --boost)\n",
+        ),
+    ] {
+        let o = launch("cy", Some(value));
+        assert_eq!(o.status.code(), Some(1), "{value}: stderr={}", stderr(&o));
+        assert_eq!(stdout(&o), "", "{value}: the agent must not start");
+        assert_eq!(stderr(&o), want, "{value}");
     }
     let _ = std::fs::remove_dir_all(&bin);
 }
@@ -690,6 +774,7 @@ const TESTS: &[(&str, fn())] = &[
         test_help_exits_zero_with_examples,
     ),
     ("cy_cx_prefix_agent_flags", test_cy_cx_prefix_agent_flags),
+    ("cy_cx_agent_limits_env", test_cy_cx_agent_limits_env),
     ("legacy_capc_sets_cpu_cap", test_legacy_capc_sets_cpu_cap),
     (
         "legacy_caps_timeout_and_exit_codes",

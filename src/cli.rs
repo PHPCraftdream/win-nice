@@ -185,29 +185,15 @@ fn parse_timeout(s: &str) -> Result<u32, String> {
     Ok(total_ms as u32)
 }
 
-/// Parse the `wnice` argument list (excluding `argv[0]`).
-///
-/// `logical_cpus` is the machine's logical processor count, used as the upper
-/// bound for `-t/--threads`.
-///
-/// `--jobs` is a pre-scan: a `--jobs` token before the first `--` makes the
-/// whole command line a `ParseError::JobsConflict` unless it is the only
-/// argument. Anything at or after the first `--` is an ordinary command token.
-pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, ParseError> {
-    // `--jobs` is a whole-process action, decided before any other argument is
-    // interpreted, so an invalid neighbour cannot change the verdict.
-    let before_dash_dash = args.iter().position(|a| a == "--").unwrap_or(args.len());
-    if args[..before_dash_dash].iter().any(|a| a == "--jobs") {
-        return if args.len() == 1 {
-            Ok(Action::Jobs)
-        } else {
-            Err(ParseError::JobsConflict(
-                "--jobs takes no command and no other options; run 'wnice --jobs' on its own"
-                    .to_string(),
-            ))
-        };
-    }
+/// The token loop's result: the limits parsed so far and the help/version
+/// flags, which `parse_args` acts on and `parse_options` leaves alone.
+struct Tokens {
+    cfg: Config,
+    help: bool,
+    version: bool,
+}
 
+fn parse_tokens(args: &[String], logical_cpus: u32) -> Result<Tokens, ParseError> {
     let mut cfg = Config::default();
     let mut want_help = false;
     let mut want_version = false;
@@ -328,12 +314,15 @@ pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, ParseErr
         }
     }
 
-    if want_help {
-        return Ok(Action::Help);
-    }
-    if want_version {
-        return Ok(Action::Version);
-    }
+    Ok(Tokens {
+        cfg,
+        help: want_help,
+        version: want_version,
+    })
+}
+
+/// The whole-line option checks `parse_args` applies after the token loop.
+fn validate(cfg: &Config) -> Result<(), ParseError> {
     if cfg.boost && cfg.wsl.is_some() {
         return Err(ParseError::Usage(
             "--boost does not apply to --wsl: the guest priority comes from the WSL cgroup (nice/CPUWeight), not from a Windows job"
@@ -345,10 +334,57 @@ pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, ParseErr
             "--boost requires -p/--priority".to_string(),
         ));
     }
-    if cfg.command.is_empty() {
+    Ok(())
+}
+
+/// Parse the `wnice` argument list (excluding `argv[0]`).
+///
+/// `logical_cpus` is the machine's logical processor count, used as the upper
+/// bound for `-t/--threads`.
+///
+/// `--jobs` is a pre-scan: a `--jobs` token before the first `--` makes the
+/// whole command line a `ParseError::JobsConflict` unless it is the only
+/// argument. Anything at or after the first `--` is an ordinary command token.
+pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, ParseError> {
+    // `--jobs` is a whole-process action, decided before any other argument is
+    // interpreted, so an invalid neighbour cannot change the verdict.
+    let before_dash_dash = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    if args[..before_dash_dash].iter().any(|a| a == "--jobs") {
+        return if args.len() == 1 {
+            Ok(Action::Jobs)
+        } else {
+            Err(ParseError::JobsConflict(
+                "--jobs takes no command and no other options; run 'wnice --jobs' on its own"
+                    .to_string(),
+            ))
+        };
+    }
+
+    let tokens = parse_tokens(args, logical_cpus)?;
+    if tokens.help {
+        return Ok(Action::Help);
+    }
+    if tokens.version {
+        return Ok(Action::Version);
+    }
+    validate(&tokens.cfg)?;
+    if tokens.cfg.command.is_empty() {
         return Err(ParseError::Usage("no command given".to_string()));
     }
-    Ok(Action::Run(cfg))
+    Ok(Action::Run(tokens.cfg))
+}
+
+/// Parse a list that holds only `wnice` limit options (`-p -c -t -m -n -s`,
+/// `--boost`) and no command: the same token loop and the same value
+/// validation as `parse_args`, minus the command requirement. `cfg.command`
+/// collects everything from the first non-option token on, so an empty
+/// `command` proves the list held options only. `--jobs` is not special here
+/// (an unknown option); `-h`/`--help`/`-V`/`--version` set no limit and are
+/// ignored here - the caller decides what they mean.
+pub fn parse_options(args: &[String], logical_cpus: u32) -> Result<Config, ParseError> {
+    let tokens = parse_tokens(args, logical_cpus)?;
+    validate(&tokens.cfg)?;
+    Ok(tokens.cfg)
 }
 
 #[cfg(test)]
@@ -805,5 +841,31 @@ mod tests {
         assert_eq!(c.command, vec!["--jobs"]);
         let c = run(&["--", "cmd", "--jobs"]);
         assert_eq!(c.command, vec!["cmd", "--jobs"]);
+    }
+
+    #[test]
+    fn parse_options_needs_no_command() {
+        let c = parse_options(&args(&["-c", "20", "--boost", "-p", "high"]), 8).unwrap();
+        assert_eq!(c.cpu_percent, Some(20));
+        assert_eq!(c.priority, Some(PriorityClass::High));
+        assert!(c.boost);
+        assert!(c.command.is_empty());
+        // A non-option token lands in `command` instead of being refused here.
+        let c = parse_options(&args(&["-c", "20", "claude"]), 8).unwrap();
+        assert_eq!(c.cpu_percent, Some(20));
+        assert_eq!(c.command, vec!["claude"]);
+        // Same value validation and same messages as a `wnice` command line.
+        for (v, want) in [
+            (vec!["-c", "0"], "invalid -c/--cpu value '0'"),
+            (vec!["-c"], "missing value for -c/--cpu"),
+            (vec!["--boost"], "--boost requires -p/--priority"),
+            (vec!["--cpu=50"], "unknown option '--cpu=50'"),
+        ] {
+            let e = parse_options(&args(&v), 8)
+                .expect_err("usage error")
+                .message()
+                .to_string();
+            assert_eq!(e, want, "args {v:?}");
+        }
     }
 }
