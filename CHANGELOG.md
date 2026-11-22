@@ -4,10 +4,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `wnice --jobs`: a read-only report of every Job Object the wnice-family
+  wrappers hold right now (owner process and command line, CPU cap as a
+  percent of all logical processors and of one, hard/soft, memory and
+  process limits, affinity mask, priority class, active processes) plus the
+  busiest processes with the job chain they belong to and the tags `UNCAPPED`
+  and `NOT-IN-WNICE-JOB`; a footer counts the owner processes that could not
+  be inspected. Handles are found through the system handle table,
+  duplicated with query-only rights into the report process and closed on
+  every path; nothing is modified and no elevation is needed. `--jobs` takes
+  no command and no other option, and `wnice --help` is the only place it is
+  documented - every existing invocation is unchanged.
+
 ### Internal
 
-- Backward-compatibility safety net for the published CLI contract: a `cargo test` suite with committed `--help`/usage goldens, exact message and exit-code checks and the Job Object lifecycle (`tests/compat.rs`), plus a CI differential gate that replays a fixed command set against the published `win-nice@0.4.0` binary (`scripts/compat-differential.js`, empty allowlist). No runtime, CLI or version change.
+- Backward-compatibility safety net for the published CLI contract: a `cargo test` suite with committed `--help`/usage goldens, exact message and exit-code checks and the Job Object lifecycle (`tests/compat.rs`), plus a CI differential gate that replays a fixed command set against the published `win-nice@0.4.0` binary (`scripts/compat-differential.js`; its allowlist gained its first entry with `--jobs`). No runtime, CLI or version change.
 - Job Object containment regression suite (`tests/job_containment.rs`): no breakaway from the tree's job, a nested job cannot loosen the outer one, and the wrapper's job handle is not inheritable; plus strict probe-report parsing, atomic scratch-dir creation and a kill-on-drop survivor guard in `tests/compat.rs`. No runtime, CLI or version change.
+- Structure-lint baseline: `src/` records 8 entries (`cli`, `front`, `jobs`,
+  `launch`, `lib`, `limits`, `main`, `run`), because the new `jobs` module is
+  a peer of `front`/`run` rather than a submodule; the rule still fails at 9
+  entries and the file-line limit is untouched.
 
 ## [0.4.0] - 2026-11-15
 

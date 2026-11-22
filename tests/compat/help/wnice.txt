@@ -107,3 +107,19 @@ admin (run elevated) and uiup (boost the desktop shell) ship with it; run any
 of them with --help. cy and cx run 'claude --dangerously-skip-permissions'
 and 'codex --dangerously-bypass-approvals-and-sandbox' with your arguments
 (so 'cy --help' shows claude's own help).
+
+inspection (--jobs):
+  wnice --jobs       list every Job Object a wnice-family wrapper holds on this
+                     machine right now: the owner process and its command line,
+                     the CPU cap as a percent of ALL logical processors AND as a
+                     percent of one processor (hard or soft), the memory and
+                     process-count limits, the affinity mask, the priority class
+                     and how many processes are active in it. Below that, the
+                     busiest processes over a short sample, each with the jobs it
+                     belongs to and the tag UNCAPPED when none of them caps the
+                     CPU, or NOT-IN-WNICE-JOB. Read-only, needs no elevation; an
+                     owner it cannot inspect (elevated, protected or another
+                     user) is counted in the footer instead of being dropped.
+                     -c is a percent of ALL logical processors, so a 10% cap is
+                     160% of one processor on 16 of them.
+                     --jobs takes no command and no other option (exit 2).

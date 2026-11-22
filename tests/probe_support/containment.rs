@@ -44,6 +44,14 @@ pub fn try_run(mode: &str) -> Option<i32> {
             let _ = std::io::stdin().read_to_end(&mut sink);
             std::process::exit(0);
         }
+        "ready-wait-eof" => {
+            // Readiness on the inherited stdout pipe, then stay alive on stdin
+            // until the owner closes it: no sleep, no timer, no polling.
+            raw_println("ready");
+            let mut sink = Vec::new();
+            let _ = std::io::stdin().read_to_end(&mut sink);
+            std::process::exit(0);
+        }
         "innerjob" => {
             // Nest in a loose job (no flags, 100% CPU); kids block on stdin pipe.
             let attempts: u32 = need(&rest, 0).parse().expect("attempts");
