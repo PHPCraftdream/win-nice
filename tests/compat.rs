@@ -15,7 +15,7 @@
 //! harness = false for the same reason as tests/integration.rs: this binary
 //! also runs as a probe child of wnice (WNICE_PROBE), and under libtest such a
 //! probe process would re-run every test and multiply processes recursively.
-//! Probe modes and their env contract live in tests/probe_support.rs.
+//! Probe modes and their env contract live in tests/probe_support/.
 
 #![cfg(windows)]
 
@@ -29,6 +29,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -245,6 +246,7 @@ fn job_field(report: &str, key: &str) -> u32 {
 /// was alive while it reported. Every failure path exits with its own code and a
 /// message instead of leaving a half-written report behind.
 fn probe_jobinfo_after(out: &str, go: &str) -> ! {
+    hand_off_self();
     let deadline = Instant::now() + Duration::from_secs(30);
     while !Path::new(go).exists() {
         if Instant::now() > deadline {
@@ -324,7 +326,7 @@ fn parse_job_report(text: &str) -> Result<JobReport, String> {
 /// survivor that dies without publishing is named in the panic with the last
 /// reason. Nothing here can silently succeed on stale data - the caller's
 /// scratch directory is fresh and the file cannot exist before the run starts.
-fn wait_for_job_report(path: &Path, pid: u32, budget: Duration) -> JobReport {
+fn wait_for_job_report(path: &Path, survivor: &SurvivorGuard, budget: Duration) -> JobReport {
     let deadline = Instant::now() + budget;
     let mut last_error = String::from("the report file does not exist yet");
     while Instant::now() < deadline {
@@ -340,10 +342,8 @@ fn wait_for_job_report(path: &Path, pid: u32, budget: Duration) -> JobReport {
             },
             Err(e) => last_error = format!("cannot read {}: {e}", path.display()),
         }
-        if !pid_alive(pid) {
-            panic!(
-                "the survivor (pid {pid}) exited before publishing a complete report: {last_error}"
-            );
+        if !survivor.alive() {
+            panic!("the survivor exited before publishing a complete report: {last_error}");
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -351,6 +351,21 @@ fn wait_for_job_report(path: &Path, pid: u32, budget: Duration) -> JobReport {
         "no complete job report at {} within {budget:?}: {last_error}",
         path.display()
     );
+}
+
+/// Waits for a survivor to publish its own handle and adopts it. The PID is
+/// never used again: observation and termination go through the handle.
+fn adopt_survivor(path: &Path) -> SurvivorGuard {
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if let Ok(value) = text.trim().parse::<usize>() {
+                return SurvivorGuard::adopt(value as HANDLE);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("no survivor handle at {} within 40s", path.display());
 }
 
 /// A scratch directory unique to one test run, created exclusively (an existing
@@ -674,6 +689,7 @@ fn test_cpu_cap_survives_normal_exit() {
     let scratch = ScratchDir::new("after");
     let report_path = scratch.join("job.txt");
     let go = scratch.join("go");
+    let handle_path = scratch.join("handle");
     let script = format!(
         "(Start-Process -FilePath '{}' -WindowStyle Hidden -PassThru).Id",
         probe_exe().display()
@@ -693,18 +709,20 @@ fn test_cpu_cap_survives_normal_exit() {
         .arg(&script)
         .env(PROBE_JOBINFO_OUT, &report_path)
         .env(PROBE_JOBINFO_GO, &go)
+        .env("WNICE_TEST_PID", std::process::id().to_string())
+        .env("WNICE_TEST_HANDLE_OUT", &handle_path)
         .env("WNICE_PROBE_DEPTH", (probe_depth() + 1).to_string())
         .stdin(Stdio::null())
         .output()
         .expect("spawn wnice");
+    // Adopt before asserting: the guard must be armed before anything can fail.
+    let survivor = adopt_survivor(&handle_path);
     assert_eq!(o.status.code(), Some(0), "stderr={}", err(&o));
-    let pid: u32 = last_line(&o).parse().expect("child pid");
-    let survivor = SurvivorGuard::open(pid);
     assert!(survivor.alive(), "background child died with the wrapper");
 
     // wnice has exited (output() returned): only now release the survivor.
     std::fs::write(&go, b"").expect("release the survivor");
-    let report = wait_for_job_report(&report_path, pid, Duration::from_secs(40));
+    let report = wait_for_job_report(&report_path, &survivor, Duration::from_secs(40));
     assert!(
         survivor.alive(),
         "the survivor exited before it could report"
@@ -723,7 +741,7 @@ fn test_cpu_cap_survives_normal_exit() {
         0,
         "KILL_ON_JOB_CLOSE must be released on a normal exit"
     );
-    assert!(survivor.kill(), "cleanup kill failed for pid {pid}");
+    assert!(survivor.kill(), "cleanup kill failed for the survivor");
     // `scratch` drops here: no report and no "go" file survive this test.
 }
 
@@ -733,6 +751,8 @@ fn test_daemon_survives_normal_exit() {
     // killed. The child is started through Start-Process: a directly spawned
     // detached process also dies when its parent exits with a piped stdout (see
     // tests/integration.rs), which would make it a false oracle.
+    let scratch = ScratchDir::new("daemon");
+    let handle_path = scratch.join("handle");
     let script = format!(
         "(Start-Process -FilePath '{}' -WindowStyle Hidden -PassThru).Id",
         probe_exe().display()
@@ -752,18 +772,20 @@ fn test_daemon_survives_normal_exit() {
         .arg(&script)
         .env("WNICE_PROBE", "sleep")
         .env("WNICE_PROBE_ARGS", "30000")
+        .env("WNICE_TEST_PID", std::process::id().to_string())
+        .env("WNICE_TEST_HANDLE_OUT", &handle_path)
         .env("WNICE_PROBE_DEPTH", (probe_depth() + 1).to_string())
         .stdin(Stdio::null())
         .output()
         .expect("spawn wnice");
+    // Adopt before asserting: the guard must be armed before anything can fail.
+    let survivor = adopt_survivor(&handle_path);
     assert_eq!(o.status.code(), Some(0), "stderr={}", err(&o));
-    let pid: u32 = last_line(&o).parse().expect("child pid");
-    let survivor = SurvivorGuard::open(pid);
     for _ in 0..20 {
         std::thread::sleep(Duration::from_millis(250));
         assert!(survivor.alive(), "background child died with the wrapper");
     }
-    assert!(survivor.kill(), "cleanup kill failed for pid {pid}");
+    assert!(survivor.kill(), "cleanup kill failed for the survivor");
     let mut dead = false;
     for _ in 0..10 {
         std::thread::sleep(Duration::from_millis(50));

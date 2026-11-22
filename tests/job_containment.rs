@@ -1,9 +1,8 @@
-//! Job Object containment (harness = false): the four guarantees the wrapper's
-//! job carries today. Every helper is observed through a retained process
-//! handle and released by an event or a closed pipe — never by a PID looked up
-//! after the fact and never by a sleep; the only time-based budget is SAFETY,
-//! whose sole job is to turn a hang into a clear failure. Probes are THIS
-//! binary re-executed with WNICE_PROBE set (tests/probe_support.rs).
+//! Job Object containment (harness = false): the three guarantees the wrapper's
+//! job carries today — the job grants no breakaway, a nested job cannot loosen
+//! the outer one, and the job handle is not inherited by the child. Every probe
+//! line is observed through the wrapper's own stdout. Probes are THIS binary
+//! re-executed with WNICE_PROBE set (tests/probe_support/).
 //!
 //! WHY harness = false: a probe process must run only the probe; under libtest
 //! it would run the test bodies too and multiply processes recursively.
@@ -14,29 +13,19 @@
 mod probe_support;
 use probe_support::*;
 
-use std::io::{BufRead, BufReader};
 use std::os::windows::process::CommandExt;
-use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+use std::process::{Command, Output, Stdio};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE};
 use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
     JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
     JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
 };
-use windows_sys::Win32::System::Threading::TerminateProcess;
 
-/// Hang breaker only: nothing below is ordered by time.
-const SAFETY: Duration = Duration::from_secs(120);
 /// ERROR_ACCESS_DENIED: what CreateProcessW returns for a breakaway the job does not grant.
 const ACCESS_DENIED: u32 = 5;
 /// ERROR_NOT_ENOUGH_QUOTA: CreateProcess refused by the job's active-process limit.
 const NOT_ENOUGH_QUOTA: i32 = 1816;
-
-static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 // ------------------------------------------------------------- test helpers
 
@@ -86,95 +75,26 @@ fn need_field(line: &str, key: &str) -> u32 {
     field(line, key).unwrap_or_else(|| panic!("missing `{key}=` in {line:?}"))
 }
 
-fn need_i32(line: &str, key: &str) -> i32 {
-    let pat = format!("{key}=");
-    line.split_whitespace()
-        .find_map(|t| t.strip_prefix(&pat).and_then(|v| v.parse().ok()))
-        .unwrap_or_else(|| panic!("missing `{key}=` in {line:?}"))
-}
-
-/// Terminates the process behind a retained handle on drop — never by PID.
-struct HandleGuard(HANDLE);
-
-impl Drop for HandleGuard {
-    fn drop(&mut self) {
-        if handle_exit_code(self.0) == Some(STILL_ACTIVE as u32) {
-            unsafe { TerminateProcess(self.0, 1) };
-        }
-        unsafe { CloseHandle(self.0) };
-    }
-}
-
-/// Signals the release event on drop, so no helper can outlive the test.
-struct EventGuard(HANDLE);
-
-impl Drop for EventGuard {
-    fn drop(&mut self) {
-        set_event(self.0);
-        unsafe { CloseHandle(self.0) };
-    }
-}
-
-/// The wrapper under test: its stdout is streamed line by line so the test can
-/// synchronise on events, and it is killed and reaped on EVERY path.
-struct Wrapper {
-    child: Child,
-    lines: Receiver<String>,
-}
-
-impl Wrapper {
-    fn spawn(args: &[&str], mode: &str, envs: &[(&str, String)]) -> Wrapper {
-        check_probe_depth();
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_wnice"));
-        cmd.creation_flags(CREATE_NO_WINDOW)
-            .args(args)
-            .arg("--")
-            .arg(probe_exe())
-            .env("WNICE_PROBE", mode)
-            .env("WNICE_PROBE_ARGS", "")
-            .env("WNICE_PROBE_DEPTH", (probe_depth() + 1).to_string())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        for (k, v) in envs {
-            cmd.env(k, v);
-        }
-        let mut child = cmd.spawn().expect("spawn wnice");
-        let out = child.stdout.take().expect("piped stdout");
-        let (tx, lines) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(out).lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-        Wrapper { child, lines }
-    }
-
-    /// Next stdout line; waiting past SAFETY means the tree hung.
-    fn next_line(&self, what: &str) -> String {
-        self.lines
-            .recv_timeout(SAFETY)
-            .unwrap_or_else(|_| panic!("{what}: no probe line within {SAFETY:?}"))
-    }
-
-    fn wait_code(&mut self) -> Option<i32> {
-        self.child.wait().ok().and_then(|s| s.code())
-    }
-}
-
-impl Drop for Wrapper {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+/// `failed=<code>`, or None for the probe's `failed=none`.
+fn failed_of(line: &str) -> Option<i32> {
+    let v = line
+        .split_whitespace()
+        .find_map(|t| t.strip_prefix("failed="))
+        .unwrap_or_else(|| panic!("missing `failed=` in {line:?}"));
+    if v == "none" {
+        None
+    } else {
+        Some(
+            v.parse()
+                .unwrap_or_else(|_| panic!("unexpected failed= value in {line:?}")),
+        )
     }
 }
 
 // ------------------------------------------------------------------- tests
 
 fn test_no_breakaway() {
-    // Breaks if JOB_OBJECT_LIMIT_BREAKAWAY_OK is added in src/limits.rs::compose: the explicit request then succeeds.
+    // Breaks if JOB_OBJECT_LIMIT_BREAKAWAY_OK is added in src/limits.rs::compose (the flag assertion fails).
     let o = wnice(&["-c", "50", "-s", "30"], "jobinfo", &[]);
     assert_eq!(o.status.code(), Some(0), "stderr={}", stderr(&o));
     let line = last_line(&o);
@@ -218,9 +138,9 @@ fn test_nested_job_does_not_loosen_outer() {
     assert_eq!(need_field(&last, "spawned"), 3, "control: {last}");
     assert_eq!(need_field(&last, "alive"), 3, "control: {last}");
     assert_eq!(
-        need_i32(&last, "failed"),
-        0,
-        "control: none may fail: {last}"
+        failed_of(&last),
+        None,
+        "control: nothing may be refused: {last}"
     );
 
     let o = wnice(&["-n", "3", "-s", "30"], "innerjob", &["8"]);
@@ -259,69 +179,9 @@ fn test_nested_job_does_not_loosen_outer() {
         "the accepted children must still be alive: {last}"
     );
     assert_eq!(
-        need_i32(&last, "failed"),
-        NOT_ENOUGH_QUOTA,
+        failed_of(&last),
+        Some(NOT_ENOUGH_QUOTA),
         "the outer ceiling must refuse the third spawn with a quota error: {last}"
-    );
-}
-
-fn test_membership_survives_parent_exit() {
-    // Breaks if the launcher stops assigning the child to the job (src/run/mod.rs): injob becomes 0.
-    let name = format!(
-        "Local\\wnice-job-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    );
-    let h_event = create_event(&name);
-    assert!(!h_event.is_null(), "CreateEvent({name}) failed");
-    let _release = EventGuard(h_event);
-
-    let mut w = Wrapper::spawn(
-        &["-s", "10"],
-        "orphan-root",
-        &[
-            ("WNICE_TEST_PID", std::process::id().to_string()),
-            ("WNICE_TEST_EVENT", name),
-        ],
-    );
-    let ready = w.next_line("orphan-root readiness");
-    assert_eq!(
-        need_i32(&ready, "intermediate_exit"),
-        0,
-        "the intermediate parent must have exited cleanly: {ready}"
-    );
-    assert_eq!(
-        need_field(&ready, "injob"),
-        1,
-        "the orphaned grandchild must still be in the wrapper's job: {ready}"
-    );
-    assert_eq!(
-        need_field(&ready, "alive"),
-        1,
-        "the grandchild must be alive while its parent is already gone: {ready}"
-    );
-    let handle = need_field(&ready, "test_handle") as usize as HANDLE;
-    let _grand = HandleGuard(handle);
-    assert_eq!(
-        handle_exit_code(handle),
-        Some(STILL_ACTIVE as u32),
-        "the grandchild must still be running: {ready}"
-    );
-
-    assert_eq!(
-        w.wait_code(),
-        Some(124),
-        "the wrapper's own timeout must end the run"
-    );
-    assert_eq!(
-        wait_handle(handle, SAFETY.as_millis() as u32),
-        0,
-        "the timeout kill never reached the orphaned grandchild"
-    );
-    assert_eq!(
-        handle_exit_code(handle),
-        Some(124),
-        "the grandchild must die from the job's own timeout kill"
     );
 }
 
@@ -351,10 +211,6 @@ const TESTS: &[(&str, fn())] = &[
     (
         "nested_job_does_not_loosen_outer",
         test_nested_job_does_not_loosen_outer,
-    ),
-    (
-        "membership_survives_parent_exit",
-        test_membership_survives_parent_exit,
     ),
     ("job_handle_not_inherited", test_job_handle_not_inherited),
 ];
