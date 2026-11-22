@@ -77,6 +77,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unchanged), and `wnice`, the legacy tools, `admin` and `uiup` never read
   the variable.
 
+### Changed
+
+- Documentation only: README.md and skills/win-nice/SKILL.md now state what
+  `-c` measures (N percent of all logical processors, one hard cap per job -
+  not a share of one core and not a machine-wide pool), list what Job Object
+  limits do not cover (reused daemons, service-created processes, VM work,
+  work done by other processes, deliberate handle duplication) and document
+  `wnice --jobs`, `admin --keep-limits` and `WNICE_AGENT_LIMITS`. No code, CLI
+  or version change.
+
 ### Internal
 
 - Backward-compatibility safety net for the published CLI contract: a `cargo test` suite with committed `--help`/usage goldens, exact message and exit-code checks and the Job Object lifecycle (`tests/compat.rs`), plus a CI differential gate that replays a fixed command set against the published `win-nice@0.4.0` binary (`scripts/compat-differential.js`; its allowlist gained its first entry with `--jobs`). No runtime, CLI or version change.

@@ -35,6 +35,10 @@ the first non-option token or `--`; the rest goes to the command verbatim. The
 single-purpose tools below are the same machinery with one limit each.
 Every tool prints detailed help with examples for `--help` (`wnice --help`,
 `capc --help`, ...); usage errors exit `1`.
+`wnice --jobs` on its own (no command, no other option; anything else before
+a `--` is a usage error, one stderr line, exit 2) is a read-only report of
+the running wnice jobs;
+see "Units, and what a limit does not cover".
 
 ## Priority tools
 
@@ -68,9 +72,10 @@ privilege.
 Job-Object-based; cover the *whole* process tree from the wrapped command's
 first instruction (created suspended, assigned to the job, only then resumed —
 no race window), including anything it spawns, recursively via ordinary
-`CreateProcess` calls. Exceptions: explicit `CREATE_BREAKAWAY_FROM_JOB`, and
-processes brought up through an external broker/service (e.g. WMI's
-`Win32_Process.Create`) that never goes through the tree's own `CreateProcess`.
+`CreateProcess` calls. Exception: processes brought up through an external
+broker/service (e.g. WMI's `Win32_Process.Create`) that never goes through
+the tree's own `CreateProcess`. An explicit `CREATE_BREAKAWAY_FROM_JOB`
+request is not a way out: the job refuses it and the launch fails.
 
 - `capc <percent 1-100> <command> [args...]` — hard CPU quota
   (`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`, hard cap). A real ceiling on total
@@ -137,6 +142,45 @@ reuse, a Gradle daemon, `npm run watch`-style file watchers) can leave a
 `capc`/`capt` call's job. Escape hatches: `dotnet build
 -p:UseSharedCompilation=false`, `gradle --no-daemon` — or accept the daemon
 stays limited until it's killed.
+
+## Units, and what a limit does not cover
+
+`-c N` (`capc N`) is **N percent of all logical processors**, applied as one
+hard cap to the whole job - not a share of one core and not a per-process
+figure. On 16 logical processors `-c 10` is 1.6 cores, so a monitor that
+reports "percent of one core" (performance counters, Process Explorer) shows
+up to 160% for that tree; that is the cap working, not an escape. `-m N` is
+likewise N percent of total physical RAM for the job's aggregate committed
+memory.
+
+Each capped invocation has its own job and its own allowance: separate jobs do
+not add up to a machine-wide total (30 separate `-c 10` jobs on 16 logical
+processors are 30 independent 1.6-core allowances), while a nested job's rate
+is a share of its parent's allowance and the percentages multiply (see
+Chaining).
+
+Never describe a job limit as a sandbox. It constrains the processes in the
+job and nothing else. Not covered: daemons or servers reused from an earlier
+run (MSBuild node reuse, VBCSCompiler, a Gradle daemon, sccache/Bazel servers,
+an editor handing the work to an already-open instance); processes a service
+or broker starts (WMI `Win32_Process.Create`, Task Scheduler, out-of-process
+COM servers, UAC elevation - `admin --keep-limits` carries limits across that
+one); work inside a VM (WSL2, Docker, Hyper-V: use `wnice --wsl`, `.wslconfig`,
+or the container runtime's own limits); work other processes do on the
+command's behalf (antivirus, the search indexer, shared build services,
+kernel/driver time); and a process of the same user that takes the job handle
+and lifts the limits. Ordinary children cannot escape (no breakaway, a nested
+job cannot loosen the outer one), but that is robustness, not a security
+boundary.
+
+Check instead of promising: `wnice --jobs` prints every wnice job and the
+busiest processes with their job chains - `UNCAPPED` when none of the wnice
+jobs it could see caps that process's CPU, `NOT-IN-WNICE-JOB` when it is in
+none of them (neither rules out a cap from a non-wnice job or an uninspected
+wrapper), `?` for a value no
+query established, and a `- inventory incomplete` qualifier when some owner
+could not be inspected. A nested cap there is printed as a share of its
+parent, not of the machine.
 
 ## Chaining
 
@@ -211,6 +255,13 @@ the scope keeps running in the guest until
   inline with no extra prompt if it is. Blocking elevation wrapper with the same
   wait-and-propagate-exit-code semantics as the other wrappers - it does not set
   a priority class like `idle` does.
+- `admin --keep-limits <command> [args...]` — opt-in; when `admin` has to
+  elevate, carry the limits of the job it is in (hard CPU cap rounded down to
+  a whole percent, never below 1; job memory; active-process limit;
+  contiguous affinity; priority class) into the new job the elevated `wnice`
+  creates. Every limit that cannot be kept is reported on stderr; the
+  wall-clock timeout and outer-job caps are not carried; `admin` without the
+  flag is unchanged.
 - `uiup` (no arguments) — one-shot `HIGH` priority boost for the live
   shell/UI/audio processes (`explorer`, `dwm`, `sihost`,
   `ShellExperienceHost`, `StartMenuExperienceHost`, `StartMenu`, `SearchApp`,
@@ -269,3 +320,9 @@ npx win-nice uninstall         # remove files + PATH entry
 Not covered here: `cy`/`cx`, convenience launchers for
 `claude --dangerously-skip-permissions` / `codex --dangerously-bypass-approvals-and-sandbox`
 that ship in the same binary.
+
+They read `WNICE_AGENT_LIMITS`: whitespace-separated wnice limit options
+(`-p -c -t -m -n -s` with values, `--boost`) that run every agent they start
+under one job with those limits; unset keeps the old behaviour (a job
+without limits), an invalid value
+exits 1 with one line and starts nothing.
