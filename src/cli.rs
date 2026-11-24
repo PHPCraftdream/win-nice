@@ -39,7 +39,7 @@ pub enum ParseError {
     Usage(String),
     /// `--jobs` combined with anything else: `<msg>` on stderr, exit 2.
     JobsConflict(String),
-    /// `--no-servers` cannot be combined with `--wsl`: stderr, exit 2.
+    /// `--no-servers` or `--audit` cannot be combined with `--wsl`: stderr, exit 2.
     NoServersWslConflict(String),
 }
 
@@ -248,6 +248,11 @@ fn parse_tokens(args: &[String], logical_cpus: u32) -> Result<Tokens, ParseError
             i += 1;
             continue;
         }
+        if arg == "--audit" {
+            cfg.audit = true;
+            i += 1;
+            continue;
+        }
         if arg == "--no-servers" {
             cfg.no_servers = true;
             i += 1;
@@ -332,6 +337,11 @@ fn parse_tokens(args: &[String], logical_cpus: u32) -> Result<Tokens, ParseError
 
 /// The whole-line option checks `parse_args` applies after the token loop.
 fn validate(cfg: &Config) -> Result<(), ParseError> {
+    if cfg.audit && cfg.wsl.is_some() {
+        return Err(ParseError::NoServersWslConflict(
+            "--audit cannot be combined with --wsl".to_string(),
+        ));
+    }
     if cfg.no_servers && cfg.wsl.is_some() {
         return Err(ParseError::NoServersWslConflict(
             "--no-servers cannot be combined with --wsl".to_string(),
@@ -389,8 +399,8 @@ pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, ParseErr
 }
 
 /// Parse a list that holds only `wnice` limit options (`-p -c -t -m -n -s`,
-/// `--boost`, `--no-servers`) and no command: the same token loop and the same value
-/// validation as `parse_args`, minus the command requirement. `cfg.command`
+/// `--boost`, `--audit`, `--no-servers`) and no command: same token loop and
+/// value validation as `parse_args`, minus the command requirement. `cfg.command`
 /// collects everything from the first non-option token on, so an empty
 /// `command` proves the list held options only. `--jobs` is not special here
 /// (an unknown option); `-h`/`--help`/`-V`/`--version` set no limit and are
@@ -424,6 +434,13 @@ mod tests {
     }
 
     #[test]
+    fn audit_conflicts_with_wsl() {
+        assert_eq!(
+            err(&["--audit", "--wsl", "cmd"]),
+            "--audit cannot be combined with --wsl"
+        );
+    }
+    #[test]
     fn no_servers_option_parsing_and_wsl_conflict() {
         let cfg = run(&["--no-servers", "-c", "25", "cmd"]);
         assert!(cfg.no_servers);
@@ -444,6 +461,13 @@ mod tests {
         let cfg = parse_options(&args(&["--no-servers"]), 8).unwrap();
         assert!(cfg.no_servers);
     }
+    #[test]
+    fn agent_options_accept_audit() {
+        let cfg = parse_options(&args(&["--audit"]), 8).unwrap();
+        assert!(cfg.audit);
+        assert!(!parse_options(&args(&[]), 8).unwrap().audit);
+    }
+
     #[test]
     fn empty_command_rejected() {
         assert!(parse_args(&[], 8).is_err());

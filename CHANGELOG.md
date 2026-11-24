@@ -6,6 +6,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `wnice --audit` reports job accounting and same-user process suspects after
+  the command ends. Legacy tools can opt in with `WNICE_AUDIT=1`; suspects are
+  based on validated parent chains and are not proven leaks.
+
 - `wnice --no-servers`: opt-in server-reuse settings for the launched command.
   It preserves user-set environment values, disables MSBuild node reuse,
   Roslyn shared compilation and Gradle daemons, and assigns a free loopback
