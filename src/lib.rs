@@ -330,6 +330,7 @@ pub struct Config {
     pub procs: Option<u32>,
     pub timeout_ms: Option<u32>,
     pub boost: bool,
+    pub audit: bool,
     pub command: Vec<String>,
     /// WSL mode: when set, `run` dispatches to the WSL guest engine
     /// (`run::wsl`) instead of the Job Object engine. `None` (the default)

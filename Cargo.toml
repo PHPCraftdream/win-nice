@@ -20,6 +20,11 @@ name = "compat"
 harness = false
 
 [[test]]
+name = "audit_report"
+harness = false
+path = "tests/probe_support/audit_report.rs"
+
+[[test]]
 name = "job_containment"
 harness = false
 

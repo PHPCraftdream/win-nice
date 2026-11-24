@@ -40,6 +40,7 @@ wnice -p idle -c 50 -t 4 -m 50 -n 64 -s 600 -- npm run build
 | `-n, --procs <n>` | `capn` | maximum simultaneously active processes |
 | `-s, --timeout <seconds>` | `caps` | wall-clock deadline, exit 124 |
 | `--boost` | — | with `-p`: skip the job priority limit and apply the priority to every process via the booster (see "Priority above NORMAL without elevation") |
+| `--audit` | — | after exit, report job accounting and same-user process suspects (not proven leaks) |
 | `--no-servers` | — | disable selected build-tool server/daemon reuse for the launched command (details below; also accepted by `WNICE_AGENT_LIMITS`) |
 | `--jobs` | — | read-only report of the wnice jobs running right now (see "Looking at what is running"); must be the whole command line, so it takes no command and no other option |
 | `-h` / `-V` | | help / version |
@@ -54,8 +55,14 @@ when unset. User-set values are preserved. A port-selection failure is a note,
 not a launch failure. This reduces servers for commands wnice starts; it does
 not stop servers already running, cover editors delegating to an existing
 instance, or affect tools not listed above. It cannot be combined with `--wsl`.
-The single-purpose tools below are the same machinery with one limit each,
-kept for their short positional syntax.
+`--audit` reports job accounting and same-user processes created after command
+start, outside the job, whose parent chain validates creation times back to the
+root command. These are suspects, not proven leaks; system-service starts (WMI,
+Task Scheduler, COM, UAC), reused servers, and broken parent chains are not
+visible. Legacy tools opt in with `WNICE_AUDIT=1` (exact value); other values
+are off. `cy`, `cx`, `admin`, and `uiup` do not take the flag or read the
+variable. The single-purpose tools below are the same machinery with one limit
+each, kept for their short positional syntax.
 
 Every tool has built-in help with examples: `wnice --help`, `capc --help`,
 `idle -h`, `admin /?`, ... (`cy`/`cx` pass `--help` on to `claude`/`codex`).

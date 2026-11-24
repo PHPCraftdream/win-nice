@@ -219,6 +219,7 @@ fn wsl_systemd_accepts_every_mapped_property() {
         procs: Some(50),
         timeout_ms: Some(60_000),
         boost: false,
+        audit: false,
         no_servers: false,
         wsl: Some(WslMode {
             distro: distro_override(),

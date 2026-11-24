@@ -30,12 +30,12 @@ wnice -p idle -c 50 -t 4 -m 50 -n 64 -s 600 -- npm run build
 `-c/--cpu <1-100>` (= `capc`), `-t/--threads <n>` (= `capt`),
 `-m/--memory <size>` (= `capm`), `-n/--procs <n>` (= `capn`),
 `-s/--timeout <seconds>` (= `caps`, exit 124), `--boost` (with `-p`: run the
-priority booster instead of a job priority limit), `-h`, `-V`. Options end at
-the first non-option token or `--`; the rest goes to the command verbatim.
-`--no-servers` sets selected build-tool server variables for the launched
-command (preserving user-set values); it reduces servers for commands wnice
-starts, but does not cover servers already running, editors delegating to an
-existing instance, or tools not listed here. It cannot be combined with
+priority booster instead of a job priority limit), `--audit`, `-h`, `-V`.
+Options end at the first non-option token or `--`; the rest goes to the command
+verbatim. `--no-servers` sets selected build-tool server variables for the
+launched command (preserving user-set values); it reduces servers for commands
+wnice starts, but does not cover servers already running, editors delegating to
+an existing instance, or tools not listed here. It cannot be combined with
 `--wsl`. The single-purpose tools below are the same machinery with one limit
 each.
 Every tool prints detailed help with examples for `--help` (`wnice --help`,
@@ -44,6 +44,13 @@ Every tool prints detailed help with examples for `--help` (`wnice --help`,
 a `--` is a usage error, one stderr line, exit 2) is a read-only report of
 the running wnice jobs;
 see "Units, and what a limit does not cover".
+
+`--audit` reports job accounting and same-user processes created after command
+start, outside the job, whose parent chain validates creation times back to the
+root command. Suspects are not proven leaks; service launches (WMI, Task
+Scheduler, COM, UAC), reused servers, and broken parent chains are not visible.
+Legacy tools opt in only with `WNICE_AUDIT=1` (exact value); `cy`, `cx`,
+`admin` and `uiup` neither accept the flag nor read the variable.
 
 ## Priority tools
 

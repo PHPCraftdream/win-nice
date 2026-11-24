@@ -137,7 +137,16 @@ no-servers (--no-servers):
                      choose one prints a note and does not stop the command.
                      This affects only servers started by this command, not
                      servers already running or tools delegating to them.
-                     Cannot be combined with --wsl (exit 2)."#;
+                     Cannot be combined with --wsl (exit 2).
+
+audit (--audit, or WNICE_AUDIT=1 for legacy tools):
+  Reports job accounting and same-user processes created after command start,
+  outside the job, whose parent chain validates creation times back to the root.
+  Suspects are not proven leaks. System-service starts (WMI, Task Scheduler,
+  COM servers, UAC), work in reused servers already running, and broken parent
+  chains are not visible.
+  cy, cx, admin and uiup do not accept this option; legacy tools use
+  WNICE_AUDIT=1 (exact value)."#;
 
 const PRIORITY: &str = r#"{tool} - run a command at {CLASS} priority
 
