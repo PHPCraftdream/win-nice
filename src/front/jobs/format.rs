@@ -30,7 +30,7 @@ const REASONS: [Uninspected; 6] = [
     Uninspected::JobType,
     Uninspected::JobQuery,
 ];
-/// Failures listed one per line before the footer collapses to a count.
+/// Failures listed up to the display cap; the omitted count is distinct owners.
 const MAX_FAILURES_SHOWN: usize = 20;
 
 /// Render the whole report (one trailing newline).
@@ -107,16 +107,30 @@ fn footer(failures: &[OwnerFailure]) -> Vec<String> {
     let summary: Vec<String> = REASONS
         .iter()
         .filter_map(|reason| {
-            let n = failures.iter().filter(|f| f.reason == *reason).count();
+            let mut owners_for_reason: Vec<u32> = Vec::new();
+            for failure in failures.iter().filter(|f| f.reason == *reason) {
+                if !owners_for_reason.contains(&failure.pid) {
+                    owners_for_reason.push(failure.pid);
+                }
+            }
+            let n = owners_for_reason.len();
             (n > 0).then(|| format!("{n} {}", reason.label()))
         })
         .collect();
+    let distinct_owners = failures
+        .iter()
+        .map(|failure| failure.pid)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     let mut lines = vec![format!(
         "owner processes not inspected: {} ({})",
-        failures.len(),
+        distinct_owners,
         summary.join(", ")
     )];
-    for failure in failures.iter().take(MAX_FAILURES_SHOWN) {
+    let shown = failures.iter().take(MAX_FAILURES_SHOWN);
+    let mut represented_owners = std::collections::BTreeSet::new();
+    for failure in shown {
+        represented_owners.insert(failure.pid);
         lines.push(format!(
             "  not inspected: {} {} ({})",
             failure.pid,
@@ -124,10 +138,14 @@ fn footer(failures: &[OwnerFailure]) -> Vec<String> {
             failure.reason.label()
         ));
     }
-    if let Some(more) = failures.len().checked_sub(MAX_FAILURES_SHOWN) {
-        if more > 0 {
-            lines.push(format!("  ... and {more} more"));
-        }
+    let omitted_owners = failures
+        .iter()
+        .map(|failure| failure.pid)
+        .collect::<std::collections::BTreeSet<_>>()
+        .difference(&represented_owners)
+        .count();
+    if omitted_owners > 0 {
+        lines.push(format!("  ... and {omitted_owners} more"));
     }
     lines
 }
@@ -397,6 +415,29 @@ mod tests {
             image: "capc.exe".to_string(),
             reason,
         }
+    }
+
+    #[test]
+    fn footer_counts_owners_once_but_retains_failure_rows() {
+        let mut failures = vec![
+            failure(4242, Uninspected::JobQuery),
+            failure(4242, Uninspected::JobQuery),
+        ];
+        failures.extend((100..119).map(|pid| failure(pid, Uninspected::JobQuery)));
+        failures.push(failure(100, Uninspected::AccessDenied));
+        let lines = footer(&failures);
+        assert_eq!(
+            lines[0],
+            "owner processes not inspected: 20 (1 access denied, 20 job query failed)"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("not inspected: 4242"))
+                .count(),
+            2
+        );
+        assert!(lines.contains(&"  ... and 1 more".to_string()));
     }
 
     #[test]

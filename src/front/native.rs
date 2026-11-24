@@ -96,7 +96,31 @@ pub fn run_elevated(file: &str, params: &str) -> Result<u32, u32> {
 /// `(image name, pid)` of every running process, or `None` when the snapshot
 /// itself failed (an empty list is a real answer).
 pub fn process_snapshot() -> Option<Vec<(String, u32)>> {
-    let mut out = Vec::new();
+    process_snapshot_with_completeness().map(|(processes, _)| processes)
+}
+
+/// Collect process rows from a Toolhelp-style enumerator. A false First/Next
+/// result carries its immediately captured Win32 error; only ERROR_NO_MORE_FILES
+/// denotes a complete enumeration.
+fn collect_process_rows<F>(mut enumerate: F) -> (Vec<(String, u32)>, bool)
+where
+    F: FnMut() -> Result<Option<(String, u32)>, u32>,
+{
+    const ERROR_NO_MORE_FILES: u32 = 18;
+    let mut rows = Vec::new();
+    loop {
+        match enumerate() {
+            Ok(Some(row)) => rows.push(row),
+            Ok(None) => return (rows, true),
+            Err(error) => return (rows, error == ERROR_NO_MORE_FILES),
+        }
+    }
+}
+
+/// Process rows and whether enumeration reached its normal end. Jobs needs the
+/// latter to avoid making a verdict from a partial Toolhelp snapshot; legacy
+/// callers keep the original `process_snapshot`/`processes` behavior.
+pub(crate) fn process_snapshot_with_completeness() -> Option<(Vec<(String, u32)>, bool)> {
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snap.is_null() || snap as isize == -1 {
@@ -104,22 +128,31 @@ pub fn process_snapshot() -> Option<Vec<(String, u32)>> {
         }
         let mut entry: PROCESSENTRY32W = std::mem::zeroed();
         entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
-        let mut ok = Process32FirstW(snap, &mut entry);
-        while ok != 0 {
+        let mut first = true;
+        let (rows, complete) = collect_process_rows(|| {
+            let ok = if first {
+                first = false;
+                Process32FirstW(snap, &mut entry)
+            } else {
+                Process32NextW(snap, &mut entry)
+            };
+            if ok == 0 {
+                // Capture immediately, before any other API call.
+                return Err(GetLastError());
+            }
             let len = entry
                 .szExeFile
                 .iter()
                 .position(|&c| c == 0)
                 .unwrap_or(entry.szExeFile.len());
-            out.push((
+            Ok(Some((
                 String::from_utf16_lossy(&entry.szExeFile[..len]),
                 entry.th32ProcessID,
-            ));
-            ok = Process32NextW(snap, &mut entry);
-        }
+            )))
+        });
         CloseHandle(snap);
+        Some((rows, complete))
     }
-    Some(out)
 }
 
 /// The process list; empty when the snapshot failed (callers that only want
@@ -211,5 +244,31 @@ pub fn caller_job() -> super::admin::CallerJob {
             cpu_control_flags: cpu.ControlFlags,
             cpu_rate: cpu.Anonymous.CpuRate,
         })
+    }
+}
+
+#[cfg(test)]
+mod process_enumeration_tests {
+    use super::collect_process_rows;
+
+    #[test]
+    fn yielded_rows_survive_incomplete_enumeration_and_no_more_files_is_normal() {
+        let mut results = vec![
+            Ok(Some(("one.exe".to_string(), 11))),
+            Ok(Some(("two.exe".to_string(), 22))),
+            Err(5),
+        ]
+        .into_iter();
+        let (rows, complete) = collect_process_rows(|| results.next().unwrap_or(Ok(None)));
+        assert_eq!(
+            rows,
+            vec![("one.exe".to_string(), 11), ("two.exe".to_string(), 22)]
+        );
+        assert!(!complete);
+
+        let mut results = vec![Ok(Some(("one.exe".to_string(), 11))), Err(18)].into_iter();
+        let (rows, complete) = collect_process_rows(|| results.next().unwrap_or(Ok(None)));
+        assert_eq!(rows, vec![("one.exe".to_string(), 11)]);
+        assert!(complete);
     }
 }

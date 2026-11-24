@@ -314,8 +314,14 @@ mod tests {
     fn a_failed_process_snapshot_keeps_the_tables_and_the_legend() {
         let mut inventory = Inventory::default();
         inventory.mark_incomplete();
-        let text = rendered(inventory_scan(inventory, Vec::new(), Vec::new()));
-        assert!(text.contains("PROCESSES: 0 busiest process(es) over 250 ms"));
+        let text = rendered(inventory_scan(
+            inventory,
+            Vec::new(),
+            vec![sampled(Some(vec![]))],
+        ));
+        assert!(text.contains("PROCESSES: 1 busiest process(es) over 250 ms"));
+        let row = text.lines().find(|line| line.starts_with("5000 ")).unwrap();
+        assert!(row.ends_with("no wnice job found - inventory incomplete"));
         assert_eq!(text.matches("note: \"inventory incomplete\"").count(), 1);
         assert!(text.ends_with("\nowner processes not inspected: 0\n"));
         assert!(!text.contains("NOT-IN-WNICE-JOB"));
@@ -341,11 +347,28 @@ mod tests {
 
     #[test]
     fn a_failed_limit_query_shows_unknown_cells_and_no_verdict() {
+        let limits = win::JobLimits {
+            cpu: CapState::Unknown,
+            extended: None,
+            active: None,
+        };
         let mut inventory = Inventory::default();
-        inventory.mark_incomplete();
+        if !limits.queries_ok() {
+            inventory.mark_incomplete();
+        }
+        let (cpu, extended, active) = (limits.cpu, limits.extended, limits.active);
         let scan = inventory_scan(
             inventory,
-            vec![job(1, CapState::Unknown)],
+            vec![JobInfo {
+                id: 1,
+                owner_pid: 101,
+                owner_image: "wnice.exe".to_string(),
+                owner_command: None,
+                cpu,
+                limits: extended,
+                active_processes: active,
+                nesting: Nesting::TopLevel,
+            }],
             vec![sampled(Some(vec![1]))],
         );
         let text = rendered(scan);

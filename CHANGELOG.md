@@ -79,6 +79,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Internal `wnice --jobs` edge cases now flag partial process enumeration, avoid naming unproven nested parents, and count failed owners once in footer summaries.
+
 - Documentation only: README.md and skills/win-nice/SKILL.md now state what
   `-c` measures (N percent of all logical processors, one hard cap per job -
   not a share of one core and not a machine-wide pool), list what Job Object
