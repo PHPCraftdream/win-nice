@@ -705,6 +705,10 @@ fn test_cy_cx_agent_limits_env() {
             "-c 20 --audit",
             "WNICE_AGENT_LIMITS: '--audit' is not allowed; only wnice options (-p, -c, -t, -m, -n, -s, --boost, --no-servers)\n",
         ),
+        (
+            "-c 20 --adopt=node",
+            "WNICE_AGENT_LIMITS: '--adopt=node' is not allowed; only wnice options (-p, -c, -t, -m, -n, -s, --boost, --no-servers)\n",
+        ),
     ] {
         let o = launch("cy", Some(value));
         assert_eq!(o.status.code(), Some(1), "{value}: stderr={}", stderr(&o));
@@ -852,6 +856,7 @@ const TESTS: &[(&str, fn())] = &[
         "daemon_survives_wrapper_exit",
         test_daemon_survives_wrapper_exit,
     ),
+    ("adopt_processes", probe_support::adopt::run),
     ("no_shell_layer_between", test_no_shell_layer_between),
     (
         "bat_target_with_space_in_path",

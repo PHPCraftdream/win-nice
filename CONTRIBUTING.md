@@ -139,7 +139,7 @@ Two gates hold it:
 - One multicall binary: `src/main.rs` dispatches on the argv[0] file stem.
   Help texts live in `src/front/help.rs`; keep them in step with README when
   an option or default changes.
-  `wnice` is the combined frontend (`src/cli.rs`); `src/front/` holds the
+  `wnice` is the combined frontend (`src/cli/`); `src/front/` holds the
   single-purpose ones. They all build a `Config` and call `run::run`, the one
   place that creates the Job Object, launches the command and waits.
 - Every Win32 call `run` makes goes through the `Sys` trait (`src/lib.rs`), so

@@ -221,6 +221,7 @@ fn wsl_systemd_accepts_every_mapped_property() {
         boost: false,
         audit: false,
         no_servers: false,
+        adopt: Vec::new(),
         wsl: Some(WslMode {
             distro: distro_override(),
         }),

@@ -7,6 +7,8 @@
 //! Every questioned value has an explicit unknown state: a failed query is
 //! reported as unknown, never as "no limit" or "no job".
 
+pub(crate) mod adopt;
+mod adopt_select;
 pub mod format;
 pub mod inspect;
 pub(crate) mod inventory;

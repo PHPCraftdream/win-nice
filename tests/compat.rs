@@ -473,7 +473,7 @@ const WNICE_ERRORS: &[(&str, &[&str])] = &[
     ("invalid -m/--memory <size>", &["-m", "101", "cmd"]),
     ("invalid -m/--memory <size>", &["-m", "50.5", "cmd"]),
     ("invalid -m/--memory <size>", &["-m", "512kb", "cmd"]),
-    // The distinct overflow diagnostic (src/cli.rs): too many digits, and a
+    // The distinct overflow diagnostic (src/cli/): too many digits, and a
     // byte value that does not fit in u64.
     (
         "invalid -m/--memory <size>: out of range",

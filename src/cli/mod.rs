@@ -3,6 +3,8 @@
 //! Options are parsed ONLY before the first non-option token or `--`;
 //! everything after belongs verbatim to the wrapped command.
 
+mod adopt;
+
 use crate::run::wsl::WslMode;
 use crate::{Config, MemSpec, PriorityClass};
 
@@ -41,6 +43,7 @@ pub enum ParseError {
     JobsConflict(String),
     /// `--no-servers` or `--audit` cannot be combined with `--wsl`: stderr, exit 2.
     NoServersWslConflict(String),
+    AdoptWslConflict(String),
 }
 
 impl ParseError {
@@ -48,7 +51,8 @@ impl ParseError {
         match self {
             ParseError::Usage(m)
             | ParseError::JobsConflict(m)
-            | ParseError::NoServersWslConflict(m) => m,
+            | ParseError::NoServersWslConflict(m)
+            | ParseError::AdoptWslConflict(m) => m,
         }
     }
 }
@@ -262,6 +266,8 @@ fn parse_tokens(args: &[String], logical_cpus: u32) -> Result<Tokens, ParseError
             "-p/--priority"
         } else if arg == "-c" || arg == "--cpu" {
             "-c/--cpu"
+        } else if arg == "--adopt" {
+            "--adopt"
         } else if arg == "-t" || arg == "--threads" {
             "-t/--threads"
         } else if arg == "-m" || arg == "--memory" {
@@ -294,6 +300,9 @@ fn parse_tokens(args: &[String], logical_cpus: u32) -> Result<Tokens, ParseError
                     return Err(ParseError::Usage(format!("invalid -c/--cpu value '{val}'")));
                 }
                 cfg.cpu_percent = Some(n);
+            }
+            "--adopt" => {
+                cfg.adopt = adopt::parse_adopt_names(val).map_err(ParseError::Usage)?;
             }
             "-t/--threads" => {
                 let n = strict_u32(val).ok_or_else(|| {
@@ -340,6 +349,11 @@ fn validate(cfg: &Config) -> Result<(), ParseError> {
     if cfg.audit && cfg.wsl.is_some() {
         return Err(ParseError::NoServersWslConflict(
             "--audit cannot be combined with --wsl".to_string(),
+        ));
+    }
+    if !cfg.adopt.is_empty() && cfg.wsl.is_some() {
+        return Err(ParseError::AdoptWslConflict(
+            "--adopt cannot be combined with --wsl".to_string(),
         ));
     }
     if cfg.no_servers && cfg.wsl.is_some() {
@@ -440,6 +454,21 @@ mod tests {
             "--audit cannot be combined with --wsl"
         );
     }
+
+    #[test]
+    fn adopt_option_and_wsl_conflict() {
+        assert_eq!(
+            run(&["--adopt", "node", "--", "cmd"]).adopt,
+            vec!["node.exe"]
+        );
+        assert_eq!(err(&["--adopt"]), "missing value for --adopt");
+        assert!(err(&["--adopt=node"]).contains("unknown option"));
+        assert_eq!(
+            parse_args(&args(&["--adopt", "node", "--wsl", "--", "cmd"]), 8).unwrap_err(),
+            ParseError::AdoptWslConflict("--adopt cannot be combined with --wsl".into())
+        );
+    }
+
     #[test]
     fn no_servers_option_parsing_and_wsl_conflict() {
         let cfg = run(&["--no-servers", "-c", "25", "cmd"]);

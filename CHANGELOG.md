@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `wnice --adopt NAME[,NAME...]`: opt-in, puts already running same-user
+  processes with these exact image names (`NAME` and `NAME.exe` are the same)
+  into the command's Job Object while it runs. An adopted process keeps the
+  limits until it exits and is killed with the job on `--timeout`. Not
+  accepted by the legacy names, `--wsl` or `WNICE_AGENT_LIMITS`.
+
 - `wnice --audit` reports job accounting and same-user process suspects after
   the command ends. Legacy tools can opt in with `WNICE_AUDIT=1`; suspects are
   based on validated parent chains and are not proven leaks.

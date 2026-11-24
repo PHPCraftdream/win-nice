@@ -39,6 +39,7 @@ fn all_flags_cfg() -> Config {
         boost: false,
         audit: false,
         no_servers: false,
+        adopt: Vec::new(),
         command: vecs(&["sleep", "1"]),
     }
 }

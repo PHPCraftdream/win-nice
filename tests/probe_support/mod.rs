@@ -26,6 +26,7 @@ use windows_sys::Win32::System::Threading::{
     TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
 };
 
+pub mod adopt;
 mod containment;
 pub use containment::hand_off_self;
 
@@ -124,6 +125,51 @@ pub fn probe_main(mode: &str) -> ! {
     }
     let rest = probe_args();
     match mode {
+        "adopt-wait" => {
+            let go = std::path::PathBuf::from(need(&rest, 0));
+            let out = std::path::PathBuf::from(need(&rest, 1));
+            while !go.exists() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // SAFETY: these queries use the current process and initialized output buffers.
+            unsafe {
+                let mut in_job = 0;
+                let membership = windows_sys::Win32::System::JobObjects::IsProcessInJob(
+                    windows_sys::Win32::System::Threading::GetCurrentProcess(),
+                    std::ptr::null_mut(),
+                    &mut in_job,
+                );
+                if membership == 0 {
+                    let _ = std::fs::write(&out, "query-error:membership");
+                    std::process::exit(2);
+                }
+                if in_job == 0 {
+                    std::fs::write(&out, "outside").expect("write outside-job report");
+                    std::process::exit(0);
+                }
+                let mut cpu: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = std::mem::zeroed();
+                let ok = windows_sys::Win32::System::JobObjects::QueryInformationJobObject(
+                    std::ptr::null_mut(),
+                    JobObjectCpuRateControlInformation,
+                    &mut cpu as *mut _ as *mut core::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
+                    std::ptr::null_mut(),
+                );
+                if ok == 0 {
+                    let _ = std::fs::write(out, "query-error:cpu");
+                    std::process::exit(2);
+                }
+                let flags = cpu.ControlFlags
+                    & windows_sys::Win32::System::JobObjects::JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP
+                    != 0;
+                std::fs::write(
+                    out,
+                    format!("member:{}:{}:{}", in_job != 0, cpu.Anonymous.CpuRate, flags),
+                )
+                .expect("write job report");
+            }
+            std::process::exit(0);
+        }
         "exit" => {
             let code: i32 = need(&rest, 0).parse().expect("exit code");
             std::process::exit(code);

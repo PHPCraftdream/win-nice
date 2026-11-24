@@ -356,6 +356,9 @@ pub fn run_with_writer_in(
         return 1;
     }
 
+    let _adopter = (!cfg.adopt.is_empty())
+        .then(|| crate::front::jobs::adopt::Poller::start(&job, child.pid, cfg.adopt.clone()));
+
     // Absolute deadline, armed into a one-shot manual-reset waitable timer and
     // waited on TOGETHER with the process handle (see caps.ps1 for why this
     // must never be a relative wait: suspend/resume counting).
@@ -385,7 +388,9 @@ pub fn run_with_writer_in(
     if let Some(t) = &timer {
         handles.push(t);
     }
-    let wait_index = match sys.wait_for_multiple_objects(&handles, false) {
+    let wait_result = sys.wait_for_multiple_objects(&handles, false);
+    drop(_adopter);
+    let wait_index = match wait_result {
         Ok(i) => i,
         Err(code) => {
             // WAIT_FAILED: the child's actual state is unknown — best-effort
