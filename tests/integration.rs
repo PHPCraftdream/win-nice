@@ -699,7 +699,7 @@ fn test_cy_cx_agent_limits_env() {
         ("-c 0", "WNICE_AGENT_LIMITS: invalid -c/--cpu value '0'\n"),
         (
             "-c 20 --",
-            "WNICE_AGENT_LIMITS: '--' is not allowed; only wnice limit options (-p, -c, -t, -m, -n, -s, --boost)\n",
+            "WNICE_AGENT_LIMITS: '--' is not allowed; only wnice options (-p, -c, -t, -m, -n, -s, --boost, --no-servers)\n",
         ),
     ] {
         let o = launch("cy", Some(value));
