@@ -92,8 +92,13 @@ impl super::Inspector for RealInspector {
 
         // A failed snapshot is an incomplete inventory, never just no
         // processes: nothing could have been recognised either.
-        let processes = match crate::front::native::process_snapshot() {
-            Some(list) => list,
+        let processes = match crate::front::native::process_snapshot_with_completeness() {
+            Some((list, complete)) => {
+                if !complete {
+                    inventory.mark_incomplete();
+                }
+                list
+            }
             None => {
                 inventory.mark_incomplete();
                 Vec::new()
@@ -121,7 +126,7 @@ impl super::Inspector for RealInspector {
             }
         };
 
-        let owned = with_nesting(owned, &owner_handles);
+        let owned = with_nesting(owned, &owner_handles, inventory.complete());
         let jobs: Vec<JobInfo> = owned.iter().map(|j| j.info.clone()).collect();
         let processes = sample(&processes, me, own_sid.as_ref(), &owned);
         let (complete, uninspected) = inventory.into_parts();
@@ -249,7 +254,11 @@ fn inspect_owners(
 }
 
 /// Number the rows in a deterministic order and classify each one's nesting.
-fn with_nesting(mut owned: Vec<OwnedJob>, owner_handles: &[Option<Handle>]) -> Vec<OwnedJob> {
+fn with_nesting(
+    mut owned: Vec<OwnedJob>,
+    owner_handles: &[Option<Handle>],
+    inventory_complete: bool,
+) -> Vec<OwnedJob> {
     owned.sort_by_key(|j| (j.info.owner_pid, j.object));
     for (i, job) in owned.iter_mut().enumerate() {
         job.info.id = i + 1;
@@ -262,7 +271,7 @@ fn with_nesting(mut owned: Vec<OwnedJob>, owner_handles: &[Option<Handle>]) -> V
         jobs: &owned,
     };
     let nestings: Vec<Nesting> = (0..count)
-        .map(|own_pos| classify_nesting(own_pos, count, &members))
+        .map(|own_pos| classify_nesting(own_pos, count, &members, inventory_complete))
         .collect();
     for (job, nesting) in owned.iter_mut().zip(nestings) {
         job.info.nesting = nesting;
@@ -272,8 +281,15 @@ fn with_nesting(mut owned: Vec<OwnedJob>, owner_handles: &[Option<Handle>]) -> V
 
 /// Nesting of the job at `own_pos`: candidates are the jobs whose member this
 /// job's OWN owner process is; the immediate parent is the deepest candidate,
-/// i.e. the one that is itself a member of every other candidate.
-fn classify_nesting(own_pos: usize, count: usize, members: &dyn OwnerMembership) -> Nesting {
+/// i.e. the one that is itself a member of every other candidate. An incomplete
+/// inventory can establish nesting but cannot prove that an intermediate owner
+/// was not omitted.
+fn classify_nesting(
+    own_pos: usize,
+    count: usize,
+    members: &dyn OwnerMembership,
+    inventory_complete: bool,
+) -> Nesting {
     let own_owner = members.owner_pos_of(own_pos);
     let mut candidates: Vec<usize> = Vec::new();
     let mut any_unknown = false;
@@ -297,6 +313,11 @@ fn classify_nesting(own_pos: usize, count: usize, members: &dyn OwnerMembership)
     // A candidate plus an unanswered pair: the job is nested, but which job
     // contains it cannot be proven, so no depth is scored.
     if any_unknown {
+        return Nesting::NestedUnnamed;
+    }
+    // The positive membership proves nesting, but an uninspected owner could
+    // be an intermediate job, so incomplete inventories cannot name a parent.
+    if !inventory_complete {
         return Nesting::NestedUnnamed;
     }
     // Depth of a candidate: how many other candidates contain its owner, plus
@@ -323,6 +344,12 @@ fn classify_nesting(own_pos: usize, count: usize, members: &dyn OwnerMembership)
     let Some(deepest) = depths.iter().map(|&(_, score, _)| score).max() else {
         return Nesting::NestedUnnamed;
     };
+    // A named parent must be contained by every other candidate. A merely
+    // deepest candidate among incomparable/partially related candidates is not
+    // enough to establish the immediate parent.
+    if deepest != candidates.len().saturating_sub(1) {
+        return Nesting::NestedUnnamed;
+    }
     let mut winners = depths.iter().filter(|&&(_, score, _)| score == deepest);
     match (winners.next(), winners.next()) {
         (Some(&(k, _, 0)), None) => Nesting::Nested(k + 1),
@@ -496,8 +523,14 @@ mod tests {
         // Job 0's owner sits at position 1, job 1's owner at position 2.
         let jobs = owned_jobs(&[1, 2]);
         let fake = FakeMembership::new(&jobs, &[(2, 0, Some(true))]);
-        assert_eq!(classify_nesting(1, jobs.len(), &fake), Nesting::Nested(1));
-        assert_eq!(classify_nesting(0, jobs.len(), &fake), Nesting::TopLevel);
+        assert_eq!(
+            classify_nesting(1, jobs.len(), &fake, true),
+            Nesting::Nested(1)
+        );
+        assert_eq!(
+            classify_nesting(0, jobs.len(), &fake, true),
+            Nesting::TopLevel
+        );
         // The question was about job 1's own owner (position 2), not about
         // the owner of the job it is nested in.
         assert!(fake.asked(2, 0));
@@ -512,9 +545,18 @@ mod tests {
             &jobs,
             &[(5, 0, Some(true)), (5, 1, Some(true)), (4, 0, Some(true))],
         );
-        assert_eq!(classify_nesting(2, jobs.len(), &fake), Nesting::Nested(2));
-        assert_eq!(classify_nesting(1, jobs.len(), &fake), Nesting::Nested(1));
-        assert_eq!(classify_nesting(0, jobs.len(), &fake), Nesting::TopLevel);
+        assert_eq!(
+            classify_nesting(2, jobs.len(), &fake, true),
+            Nesting::Nested(2)
+        );
+        assert_eq!(
+            classify_nesting(1, jobs.len(), &fake, true),
+            Nesting::Nested(1)
+        );
+        assert_eq!(
+            classify_nesting(0, jobs.len(), &fake, true),
+            Nesting::TopLevel
+        );
     }
 
     #[test]
@@ -522,12 +564,17 @@ mod tests {
         let jobs = owned_jobs(&[0, 1]);
         // No answer was true.
         assert_eq!(
-            classify_nesting(1, jobs.len(), &FakeMembership::new(&jobs, &[])),
+            classify_nesting(1, jobs.len(), &FakeMembership::new(&jobs, &[]), true),
             Nesting::TopLevel
         );
         // An unanswered pair and no candidate: no verdict.
         assert_eq!(
-            classify_nesting(1, jobs.len(), &FakeMembership::new(&jobs, &[(1, 0, None)])),
+            classify_nesting(
+                1,
+                jobs.len(),
+                &FakeMembership::new(&jobs, &[(1, 0, None)]),
+                true
+            ),
             Nesting::Unknown
         );
         // A candidate plus an unanswered pair is a nesting with no provable
@@ -535,7 +582,38 @@ mod tests {
         let three = owned_jobs(&[0, 1, 2]);
         let fake = FakeMembership::new(&three, &[(1, 0, Some(true)), (1, 2, None)]);
         assert_eq!(
-            classify_nesting(1, three.len(), &fake),
+            classify_nesting(1, three.len(), &fake, true),
+            Nesting::NestedUnnamed
+        );
+    }
+
+    #[test]
+    fn incomplete_inventory_keeps_known_nesting_unnamed() {
+        let jobs = owned_jobs(&[0, 1]);
+        let fake = FakeMembership::new(&jobs, &[(1, 0, Some(true))]);
+        assert_eq!(
+            classify_nesting(1, jobs.len(), &fake, false),
+            Nesting::NestedUnnamed
+        );
+    }
+
+    #[test]
+    fn nesting_requires_candidate_containment_to_prove_immediate_parent() {
+        // Job 3's owner is in all three candidates. The apparent deepest
+        // candidate is not contained by candidate 1, so it is not proven
+        // immediate even though its score is uniquely highest.
+        let jobs = owned_jobs(&[0, 1, 2, 3]);
+        let fake = FakeMembership::new(
+            &jobs,
+            &[
+                (3, 0, Some(true)),
+                (3, 1, Some(true)),
+                (3, 2, Some(true)),
+                (2, 0, Some(true)),
+            ],
+        );
+        assert_eq!(
+            classify_nesting(3, jobs.len(), &fake, true),
             Nesting::NestedUnnamed
         );
     }
@@ -547,7 +625,7 @@ mod tests {
         let jobs = owned_jobs(&[0, 1, 2]);
         let fake = FakeMembership::new(&jobs, &[(2, 0, Some(true)), (2, 1, Some(true))]);
         assert_eq!(
-            classify_nesting(2, jobs.len(), &fake),
+            classify_nesting(2, jobs.len(), &fake, true),
             Nesting::NestedUnnamed
         );
     }
@@ -562,7 +640,7 @@ mod tests {
             &[(2, 0, Some(true)), (2, 1, Some(true)), (1, 0, None)],
         );
         assert_eq!(
-            classify_nesting(2, jobs.len(), &fake),
+            classify_nesting(2, jobs.len(), &fake, true),
             Nesting::NestedUnnamed
         );
     }
