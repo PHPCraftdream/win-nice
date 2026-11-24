@@ -45,6 +45,15 @@ a `--` is a usage error, one stderr line, exit 2) is a read-only report of
 the running wnice jobs;
 see "Units, and what a limit does not cover".
 
+`wnice --adopt NAME[,NAME...] [limit options] -- <command> [args...]` puts
+already running processes of the same user with these exact image names into
+the command's job while it runs (`NAME` and `NAME.exe` are the same; paths and
+wildcards are rejected). An adopted process keeps the limits until it exits and
+is killed with the job on `--timeout`. Processes it started before adoption are
+not covered. Do not adopt editors, IDEs, or anything that must outlive the
+command. A process in an incompatible job may refuse (one stderr line). Not
+available to the legacy names, `--wsl` or `WNICE_AGENT_LIMITS`.
+
 ## Priority tools
 
 Windows priority classes, lowest to highest, set as a Job Object limit so they

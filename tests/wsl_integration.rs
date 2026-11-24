@@ -220,6 +220,7 @@ fn wsl_systemd_accepts_every_mapped_property() {
         timeout_ms: Some(60_000),
         boost: false,
         no_servers: false,
+        adopt: Vec::new(),
         wsl: Some(WslMode {
             distro: distro_override(),
         }),

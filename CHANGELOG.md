@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `wnice --adopt NAME[,NAME...]`: opt-in, puts already running same-user
+  processes with these exact image names (`NAME` and `NAME.exe` are the same)
+  into the command's Job Object while it runs. An adopted process keeps the
+  limits until it exits and is killed with the job on `--timeout`. Not
+  accepted by the legacy names, `--wsl` or `WNICE_AGENT_LIMITS`.
+
 - `wnice --no-servers`: opt-in server-reuse settings for the launched command.
   It preserves user-set environment values, disables MSBuild node reuse,
   Roslyn shared compilation and Gradle daemons, and assigns a free loopback

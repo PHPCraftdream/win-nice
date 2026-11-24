@@ -41,6 +41,7 @@ pub enum ParseError {
     JobsConflict(String),
     /// `--no-servers` cannot be combined with `--wsl`: stderr, exit 2.
     NoServersWslConflict(String),
+    AdoptWslConflict(String),
 }
 
 impl ParseError {
@@ -48,7 +49,8 @@ impl ParseError {
         match self {
             ParseError::Usage(m)
             | ParseError::JobsConflict(m)
-            | ParseError::NoServersWslConflict(m) => m,
+            | ParseError::NoServersWslConflict(m)
+            | ParseError::AdoptWslConflict(m) => m,
         }
     }
 }
@@ -57,6 +59,36 @@ impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.message())
     }
+}
+
+fn parse_adopt_names(value: &str) -> Result<Vec<String>, String> {
+    let invalid = || "invalid --adopt value".to_string();
+    let parts: Vec<&str> = value.split(',').collect();
+    if parts.is_empty() || parts.len() > 16 {
+        return Err(invalid());
+    }
+    let mut names = Vec::with_capacity(parts.len());
+    for part in parts {
+        if part.is_empty()
+            || part.chars().count() > 64
+            || part
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?'))
+        {
+            return Err(invalid());
+        }
+        // `NAME` and `NAME.exe` are the same image name.
+        let lower = part.to_lowercase();
+        let name = if lower.ends_with(".exe") {
+            lower
+        } else {
+            format!("{lower}.exe")
+        };
+        if !names.iter().any(|existing| existing == &name) {
+            names.push(name);
+        }
+    }
+    Ok(names)
 }
 
 fn strict_u32(s: &str) -> Option<u32> {
@@ -257,6 +289,8 @@ fn parse_tokens(args: &[String], logical_cpus: u32) -> Result<Tokens, ParseError
             "-p/--priority"
         } else if arg == "-c" || arg == "--cpu" {
             "-c/--cpu"
+        } else if arg == "--adopt" {
+            "--adopt"
         } else if arg == "-t" || arg == "--threads" {
             "-t/--threads"
         } else if arg == "-m" || arg == "--memory" {
@@ -289,6 +323,9 @@ fn parse_tokens(args: &[String], logical_cpus: u32) -> Result<Tokens, ParseError
                     return Err(ParseError::Usage(format!("invalid -c/--cpu value '{val}'")));
                 }
                 cfg.cpu_percent = Some(n);
+            }
+            "--adopt" => {
+                cfg.adopt = parse_adopt_names(val).map_err(ParseError::Usage)?;
             }
             "-t/--threads" => {
                 let n = strict_u32(val).ok_or_else(|| {
@@ -332,6 +369,11 @@ fn parse_tokens(args: &[String], logical_cpus: u32) -> Result<Tokens, ParseError
 
 /// The whole-line option checks `parse_args` applies after the token loop.
 fn validate(cfg: &Config) -> Result<(), ParseError> {
+    if !cfg.adopt.is_empty() && cfg.wsl.is_some() {
+        return Err(ParseError::AdoptWslConflict(
+            "--adopt cannot be combined with --wsl".to_string(),
+        ));
+    }
     if cfg.no_servers && cfg.wsl.is_some() {
         return Err(ParseError::NoServersWslConflict(
             "--no-servers cannot be combined with --wsl".to_string(),
@@ -421,6 +463,51 @@ mod tests {
             .expect_err("usage error")
             .message()
             .to_string()
+    }
+
+    #[test]
+    fn adopt_names_are_normalized_and_validated() {
+        assert_eq!(
+            parse_adopt_names("Microsoft Edge,Tool Name.exe").unwrap(),
+            vec!["microsoft edge.exe", "tool name.exe"]
+        );
+        assert_eq!(
+            parse_adopt_names("MSBuild,msbuild.EXE,node").unwrap(),
+            vec!["msbuild.exe", "node.exe"]
+        );
+        for value in [
+            "",
+            ",node",
+            "node,",
+            "node,,tool",
+            "../x",
+            "a\\b",
+            "*",
+            "?",
+            &"a".repeat(65),
+            "a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q",
+            "name:stream.exe",
+        ] {
+            assert_eq!(
+                parse_adopt_names(value),
+                Err("invalid --adopt value".into()),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn adopt_option_and_wsl_conflict() {
+        assert_eq!(
+            run(&["--adopt", "node", "--", "cmd"]).adopt,
+            vec!["node.exe"]
+        );
+        assert_eq!(err(&["--adopt"]), "missing value for --adopt");
+        assert!(err(&["--adopt=node"]).contains("unknown option"));
+        assert_eq!(
+            parse_args(&args(&["--adopt", "node", "--wsl", "--", "cmd"]), 8).unwrap_err(),
+            ParseError::AdoptWslConflict("--adopt cannot be combined with --wsl".into())
+        );
     }
 
     #[test]

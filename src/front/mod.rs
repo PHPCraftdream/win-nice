@@ -33,8 +33,9 @@ const AGENT_LIMITS_ONLY: &str =
 fn forbidden_token(token: &str) -> Option<String> {
     let forbidden = matches!(
         token,
-        "--" | "--wsl" | "--jobs" | "-h" | "--help" | "-V" | "--version"
-    ) || token.starts_with("--wsl=");
+        "--" | "--wsl" | "--jobs" | "-h" | "--help" | "-V" | "--version" | "--adopt"
+    ) || token.starts_with("--wsl=")
+        || token.starts_with("--adopt=");
     forbidden.then(|| format!("'{token}' is not allowed; {AGENT_LIMITS_ONLY}"))
 }
 
@@ -186,6 +187,8 @@ mod tests {
             "-h",
             "--version",
             "-V",
+            "--adopt",
+            "--adopt=node",
         ] {
             let raw = format!("-c 20 {bad}");
             let err = limits_err(&raw);

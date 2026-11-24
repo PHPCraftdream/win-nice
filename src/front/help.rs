@@ -137,7 +137,20 @@ no-servers (--no-servers):
                      choose one prints a note and does not stop the command.
                      This affects only servers started by this command, not
                      servers already running or tools delegating to them.
-                     Cannot be combined with --wsl (exit 2)."#;
+                     Cannot be combined with --wsl (exit 2).
+
+adopt (--adopt):
+  wnice --adopt NAME[,NAME...] [limit options] -- <command> [args...]
+                     while the command runs, put already running processes of
+                     the same user whose image name is NAME (exact match,
+                     case-insensitive, no wildcards or paths; NAME and
+                     NAME.exe are the same) into the command's job. An adopted
+                     process keeps the limits until it exits; --timeout (exit
+                     124) kills it with the job, a normal wrapper exit does
+                     not. Do not adopt editors, IDEs or anything that must
+                     outlive the command. A process in an incompatible job may
+                     refuse (one line per process on stderr). Not available to
+                     the legacy names, --wsl or WNICE_AGENT_LIMITS."#;
 
 const PRIORITY: &str = r#"{tool} - run a command at {CLASS} priority
 

@@ -39,6 +39,7 @@ wnice -p idle -c 50 -t 4 -m 50 -n 64 -s 600 -- npm run build
 | `-m, --memory <size>` | `capm` | job memory ceiling (`50` = 50% of RAM, `512m`, `2g`) |
 | `-n, --procs <n>` | `capn` | maximum simultaneously active processes |
 | `-s, --timeout <seconds>` | `caps` | wall-clock deadline, exit 124 |
+| `--adopt <NAME[,NAME...]>` | — | put already running same-user processes with these exact image names into the command's job (details below; not accepted by the legacy names or `WNICE_AGENT_LIMITS`) |
 | `--boost` | — | with `-p`: skip the job priority limit and apply the priority to every process via the booster (see "Priority above NORMAL without elevation") |
 | `--no-servers` | — | disable selected build-tool server/daemon reuse for the launched command (details below; also accepted by `WNICE_AGENT_LIMITS`) |
 | `--jobs` | — | read-only report of the wnice jobs running right now (see "Looking at what is running"); must be the whole command line, so it takes no command and no other option |
@@ -54,6 +55,20 @@ when unset. User-set values are preserved. A port-selection failure is a note,
 not a launch failure. This reduces servers for commands wnice starts; it does
 not stop servers already running, cover editors delegating to an existing
 instance, or affect tools not listed above. It cannot be combined with `--wsl`.
+
+`--adopt NAME[,NAME...]` puts already running processes with these image names
+into this command's job while the command runs (about once a second wnice looks
+for them), so its limits also cover a server that was started before the
+wrapper. Only processes of the same user are considered. Names are exact and
+case-insensitive; `NAME` and `NAME.exe` are the same, paths and wildcards are
+rejected. An adopted process keeps the limits until it exits; it is killed with
+the job on `--timeout` (exit 124), but not on a normal wrapper exit. Processes
+it had started before adoption are not covered, processes it starts afterwards
+are. Do not adopt editors, IDEs, or anything that must outlive the command. A
+process that already lives in an incompatible job refuses: wnice prints one line
+for that process and goes on. `--adopt` cannot be combined with `--wsl` and is
+not accepted by the legacy names or by `WNICE_AGENT_LIMITS`.
+
 The single-purpose tools below are the same machinery with one limit each,
 kept for their short positional syntax.
 

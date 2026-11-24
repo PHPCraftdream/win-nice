@@ -150,6 +150,15 @@ mod tests {
     }
 
     #[test]
+    fn value_frontend_rejects_adopt_as_required_limit_value() {
+        let usage = "usage: capc <percent 1-100> <command> [args...]";
+        assert_eq!(
+            parse("capc", &a(&["--adopt", "cmd"]), 8).unwrap_err(),
+            usage
+        );
+    }
+
+    #[test]
     fn invalid_or_missing_values_give_the_tool_usage() {
         let usage = "usage: capc <percent 1-100> <command> [args...]";
         assert_eq!(parse("capc", &a(&["0", "cmd"]), 8).unwrap_err(), usage);

@@ -336,6 +336,7 @@ pub struct Config {
     /// keeps Windows behavior untouched.
     pub wsl: Option<crate::run::wsl::WslMode>,
     pub no_servers: bool,
+    pub adopt: Vec<String>,
 }
 
 // Constants
