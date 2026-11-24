@@ -100,6 +100,50 @@ fn skip(reason: &str) {
 
 // ------------------------------------------------------------------ tests --
 
+fn test_no_servers_child_environment() {
+    check_probe_depth();
+    let output = Command::new(env!("CARGO_BIN_EXE_wnice"))
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["--no-servers", "--", probe_exe().to_str().unwrap(), "env"])
+        .env("WNICE_PROBE", "env")
+        .env("WNICE_PROBE_DEPTH", (probe_depth() + 1).to_string())
+        .env_remove("MSBUILDDISABLENODEREUSE")
+        .env("UseSharedCompilation", "user-value")
+        .env_remove("GRADLE_OPTS")
+        .env_remove("SCCACHE_SERVER_PORT")
+        .output()
+        .expect("spawn wnice");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("MSBUILDDISABLENODEREUSE=1"), "{text}");
+    assert!(text.contains("UseSharedCompilation=user-value"), "{text}");
+    assert!(
+        text.contains("GRADLE_OPTS=-Dorg.gradle.daemon=false"),
+        "{text}"
+    );
+    let port = text
+        .lines()
+        .find_map(|line| line.strip_prefix("SCCACHE_SERVER_PORT="))
+        .expect("SCCACHE_SERVER_PORT in probe output");
+    assert!(port.bytes().all(|byte| byte.is_ascii_digit()), "{port:?}");
+    let port: u16 = port.parse().expect("SCCACHE_SERVER_PORT is a u16");
+    assert_ne!(port, 0, "SCCACHE_SERVER_PORT must not be zero");
+
+    let off = Command::new(env!("CARGO_BIN_EXE_wnice"))
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["--", probe_exe().to_str().unwrap(), "env"])
+        .env("WNICE_PROBE", "env")
+        .env("WNICE_PROBE_DEPTH", (probe_depth() + 1).to_string())
+        .env_remove("MSBUILDDISABLENODEREUSE")
+        .env_remove("UseSharedCompilation")
+        .env_remove("GRADLE_OPTS")
+        .env_remove("SCCACHE_SERVER_PORT")
+        .output()
+        .expect("spawn wnice without no-servers");
+    assert_eq!(off.status.code(), Some(0), "{}", stderr(&off));
+    assert_eq!(stdout(&off), "\n");
+}
+
 fn test_exit_code_propagation() {
     let o = wnice_probe(&["-s", "10"], "exit", &["5"]);
     assert_eq!(o.status.code(), Some(5), "stdout={}", stdout(&o));
@@ -655,7 +699,7 @@ fn test_cy_cx_agent_limits_env() {
         ("-c 0", "WNICE_AGENT_LIMITS: invalid -c/--cpu value '0'\n"),
         (
             "-c 20 --",
-            "WNICE_AGENT_LIMITS: '--' is not allowed; only wnice limit options (-p, -c, -t, -m, -n, -s, --boost)\n",
+            "WNICE_AGENT_LIMITS: '--' is not allowed; only wnice options (-p, -c, -t, -m, -n, -s, --boost, --no-servers)\n",
         ),
     ] {
         let o = launch("cy", Some(value));
@@ -782,6 +826,10 @@ const TESTS: &[(&str, fn())] = &[
     ),
     ("legacy_usage_errors", test_legacy_usage_errors),
     ("exit_code_propagation", test_exit_code_propagation),
+    (
+        "no_servers_child_environment",
+        test_no_servers_child_environment,
+    ),
     ("negative_exit_code", test_negative_exit_code),
     ("timeout_kills_whole_tree", test_timeout_kills_whole_tree),
     ("priority_job_wide", test_priority_job_wide),
@@ -838,6 +886,23 @@ fn main() {
     // more wnice/probe processes -> recursive multiplication / process flood.
     // harness = false makes that structurally impossible.)
     if let Ok(mode) = std::env::var("WNICE_PROBE") {
+        if mode == "env" {
+            let values = [
+                "MSBUILDDISABLENODEREUSE",
+                "UseSharedCompilation",
+                "GRADLE_OPTS",
+                "SCCACHE_SERVER_PORT",
+            ]
+            .iter()
+            .filter_map(|key| {
+                std::env::var(key)
+                    .ok()
+                    .map(|value| format!("{key}={value}"))
+            })
+            .collect::<Vec<_>>();
+            println!("{}", values.join("\n"));
+            std::process::exit(0);
+        }
         probe_main(&mode); // diverges: never runs the test loop below
     }
 

@@ -124,7 +124,20 @@ inspection (--jobs):
                      user) is counted in the footer instead of being dropped.
                      -c is a percent of ALL logical processors, so a 10% cap is
                      160% of one processor on 16 of them.
-                     --jobs takes no command and no other option (exit 2)."#;
+                     --jobs takes no command and no other option (exit 2).
+
+no-servers (--no-servers):
+  wnice --no-servers [limit options] -- <command> [args...]
+                     disable MSBuild node reuse, Roslyn shared compilation,
+                     Gradle daemons, and the sccache server for the launched
+                     command when those variables are not already set. Existing
+                     GRADLE_OPTS is preserved and gets -Dorg.gradle.daemon=false
+                     unless it already contains org.gradle.daemon=. SCCACHE_SERVER_PORT
+                     uses a currently free loopback port when unset; failure to
+                     choose one prints a note and does not stop the command.
+                     This affects only servers started by this command, not
+                     servers already running or tools delegating to them.
+                     Cannot be combined with --wsl (exit 2)."#;
 
 const PRIORITY: &str = r#"{tool} - run a command at {CLASS} priority
 

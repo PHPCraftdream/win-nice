@@ -25,7 +25,8 @@ fn agent_prefix(stem: &str) -> Option<[&'static str; 2]> {
 /// quoting.
 pub const AGENT_LIMITS_VAR: &str = "WNICE_AGENT_LIMITS";
 
-const AGENT_LIMITS_ONLY: &str = "only wnice limit options (-p, -c, -t, -m, -n, -s, --boost)";
+const AGENT_LIMITS_ONLY: &str =
+    "only wnice options (-p, -c, -t, -m, -n, -s, --boost, --no-servers)";
 
 /// Tokens the variable must never carry: everything a `wnice` command line
 /// could use to do more than set limits.
@@ -162,6 +163,10 @@ mod tests {
         assert_eq!(c.priority, Some(PriorityClass::High));
         assert_eq!(c.cpu_percent, Some(50));
         assert!(c.boost);
+        assert!(c.command.is_empty());
+
+        let c = limits("--no-servers");
+        assert!(c.no_servers);
         assert!(c.command.is_empty());
 
         // Percent memory and sub-second timeout: exactly what wnice accepts.

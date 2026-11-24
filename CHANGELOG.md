@@ -6,6 +6,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `wnice --no-servers`: opt-in server-reuse settings for the launched command.
+  It preserves user-set environment values, disables MSBuild node reuse,
+  Roslyn shared compilation and Gradle daemons, and assigns a free loopback
+  port to sccache when unset. It does not affect servers already running.
+
 - `wnice --jobs`: a read-only report of the wnice-family Job Objects the
   current user's wrappers hold right now (owner process and command line,
   CPU cap, memory and process limits, affinity mask, priority class, active

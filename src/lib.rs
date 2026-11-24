@@ -6,6 +6,174 @@ pub mod launch;
 pub mod limits;
 pub mod run;
 
+fn windows_environment_block(environment: &[(std::ffi::OsString, std::ffi::OsString)]) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut entries: Vec<Vec<u16>> = environment
+        .iter()
+        .map(|(key, value)| {
+            let mut entry: Vec<u16> = key.encode_wide().collect();
+            entry.push(b'=' as u16);
+            entry.extend(value.encode_wide());
+            entry.push(0);
+            entry
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        String::from_utf16_lossy(a)
+            .to_ascii_lowercase()
+            .cmp(&String::from_utf16_lossy(b).to_ascii_lowercase())
+    });
+    let mut block: Vec<u16> = entries.into_iter().flatten().collect();
+    block.push(0);
+    if block.len() == 1 {
+        block.push(0);
+    }
+    block
+}
+
+#[cfg(test)]
+mod windows_environment_block_tests {
+    use super::windows_environment_block;
+    use std::ffi::OsString;
+
+    #[test]
+    fn empty_environment_has_double_nul_terminator() {
+        assert_eq!(windows_environment_block(&[]), [0, 0]);
+    }
+
+    #[test]
+    fn non_empty_environment_has_double_nul_terminator() {
+        let block = windows_environment_block(&[(OsString::from("KEY"), OsString::from("value"))]);
+        assert_eq!(
+            block,
+            [
+                b'K' as u16,
+                b'E' as u16,
+                b'Y' as u16,
+                b'=' as u16,
+                b'v' as u16,
+                b'a' as u16,
+                b'l' as u16,
+                b'u' as u16,
+                b'e' as u16,
+                0,
+                0,
+            ]
+        );
+        assert_eq!(&block[block.len() - 2..], [0, 0]);
+    }
+}
+
+fn no_servers_environment<F>(
+    inherited: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    choose_port: F,
+) -> (Vec<(std::ffi::OsString, std::ffi::OsString)>, bool)
+where
+    F: FnOnce() -> std::io::Result<u16>,
+{
+    use std::ffi::OsString;
+    let mut vars: Vec<(OsString, OsString)> = inherited.into_iter().collect();
+    let has = |name: &str, vars: &[(OsString, OsString)]| {
+        vars.iter()
+            .any(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case(name))
+    };
+    for (key, value) in [
+        ("MSBUILDDISABLENODEREUSE", "1"),
+        ("UseSharedCompilation", "false"),
+    ] {
+        if !has(key, &vars) {
+            vars.push((key.into(), value.into()));
+        }
+    }
+    if !has("GRADLE_OPTS", &vars) {
+        vars.push(("GRADLE_OPTS".into(), "-Dorg.gradle.daemon=false".into()));
+    } else if let Some((_, value)) = vars
+        .iter_mut()
+        .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("GRADLE_OPTS"))
+    {
+        let current = value.to_string_lossy();
+        if !current.contains("org.gradle.daemon=") {
+            value.push(" -Dorg.gradle.daemon=false");
+        }
+    }
+    let port_failed = if has("SCCACHE_SERVER_PORT", &vars) {
+        false
+    } else {
+        match choose_port() {
+            Ok(port) => vars.push(("SCCACHE_SERVER_PORT".into(), port.to_string().into())),
+            Err(_) => return (vars, true),
+        }
+        false
+    };
+    (vars, port_failed)
+}
+
+#[cfg(test)]
+mod no_servers_tests {
+    use super::no_servers_environment;
+    use std::ffi::OsString;
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).into(), (*v).into()))
+            .collect()
+    }
+
+    fn get(vars: &[(OsString, OsString)], key: &str) -> Option<String> {
+        vars.iter()
+            .find(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn injects_unset_server_controls_and_port() {
+        let (vars, failed) = no_servers_environment(env(&[("PATH", "x")]), || Ok(1234));
+        assert!(!failed);
+        assert_eq!(get(&vars, "MSBUILDDISABLENODEREUSE").as_deref(), Some("1"));
+        assert_eq!(get(&vars, "UseSharedCompilation").as_deref(), Some("false"));
+        assert_eq!(
+            get(&vars, "GRADLE_OPTS").as_deref(),
+            Some("-Dorg.gradle.daemon=false")
+        );
+        assert_eq!(get(&vars, "SCCACHE_SERVER_PORT").as_deref(), Some("1234"));
+    }
+
+    #[test]
+    fn preserves_user_values_and_gradle_daemon_option() {
+        let (vars, failed) = no_servers_environment(
+            env(&[
+                ("MSBUILDDISABLENODEREUSE", "0"),
+                ("UseSharedCompilation", "true"),
+                ("GRADLE_OPTS", "-Xmx2g -Dorg.gradle.daemon=true"),
+                ("SCCACHE_SERVER_PORT", "4321"),
+            ]),
+            || panic!("must not choose port when user supplied it"),
+        );
+        assert!(!failed);
+        assert_eq!(get(&vars, "MSBUILDDISABLENODEREUSE").as_deref(), Some("0"));
+        assert_eq!(get(&vars, "UseSharedCompilation").as_deref(), Some("true"));
+        assert_eq!(
+            get(&vars, "GRADLE_OPTS").as_deref(),
+            Some("-Xmx2g -Dorg.gradle.daemon=true")
+        );
+        assert_eq!(get(&vars, "SCCACHE_SERVER_PORT").as_deref(), Some("4321"));
+    }
+
+    #[test]
+    fn appends_gradle_option_and_reports_port_failure() {
+        let (vars, failed) = no_servers_environment(env(&[("GRADLE_OPTS", "-Xmx2g")]), || {
+            Err(std::io::Error::other("no port"))
+        });
+        assert!(failed);
+        assert_eq!(
+            get(&vars, "GRADLE_OPTS").as_deref(),
+            Some("-Xmx2g -Dorg.gradle.daemon=false")
+        );
+        assert_eq!(get(&vars, "SCCACHE_SERVER_PORT"), None);
+    }
+}
+
 /// RAII wrapper around a raw Win32 HANDLE. Not Clone.
 ///
 /// `Drop` calls `CloseHandle` exactly once, directly via windows-sys.
@@ -167,6 +335,7 @@ pub struct Config {
     /// (`run::wsl`) instead of the Job Object engine. `None` (the default)
     /// keeps Windows behavior untouched.
     pub wsl: Option<crate::run::wsl::WslMode>,
+    pub no_servers: bool,
 }
 
 // Constants
@@ -218,6 +387,16 @@ pub trait Sys: Send + Sync {
         cmdline: &str,
         creation_flags: u32,
     ) -> Result<Child, u32>;
+    fn create_process_with_environment(
+        &self,
+        app_name: Option<&str>,
+        cmdline: &str,
+        creation_flags: u32,
+        environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    ) -> Result<Child, u32> {
+        let _ = environment;
+        self.create_process(app_name, cmdline, creation_flags)
+    }
     fn assign_process_to_job_object(&self, job: &Handle, proc: &Handle) -> Result<(), u32>;
     fn resume_thread(&self, t: &Handle) -> Result<(), u32>;
     fn create_waitable_timer(&self) -> Result<Handle, u32>;
@@ -267,7 +446,7 @@ use windows_sys::Win32::System::SystemInformation::{
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, CreateWaitableTimerW, GetExitCodeProcess, GetProcessTimes, OpenProcess,
     ResumeThread, SetPriorityClass, SetWaitableTimer, TerminateProcess, WaitForMultipleObjects,
-    INFINITE, PROCESS_INFORMATION, STARTUPINFOW,
+    CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION, STARTUPINFOW,
 };
 use windows_sys::Win32::System::IO::{
     CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED,
@@ -335,6 +514,53 @@ impl Sys for RealSys {
                 1, // bInheritHandles = TRUE
                 creation_flags,
                 std::ptr::null(),
+                std::ptr::null(),
+                &si,
+                &mut pi,
+            ) == 0
+            {
+                Err(windows_sys::Win32::Foundation::GetLastError())
+            } else {
+                Ok(Child {
+                    process: Handle::from_raw(pi.hProcess),
+                    thread: Handle::from_raw(pi.hThread),
+                    pid: pi.dwProcessId,
+                })
+            }
+        }
+    }
+
+    fn create_process_with_environment(
+        &self,
+        app_name: Option<&str>,
+        cmdline: &str,
+        creation_flags: u32,
+        environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    ) -> Result<Child, u32> {
+        let app_wide: Option<Vec<u16>> = app_name.map(|a| {
+            let mut v: Vec<u16> = a.encode_utf16().collect();
+            v.push(0);
+            v
+        });
+        let app_ptr = app_wide.as_ref().map_or(std::ptr::null(), |v| v.as_ptr());
+        let mut wide: Vec<u16> = cmdline.encode_utf16().collect();
+        wide.push(0);
+        let mut env_wide = windows_environment_block(environment);
+        let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: The pointers refer to live NUL-terminated UTF-16 command and environment
+        // buffers, and initialized STARTUPINFO/PROCESS_INFORMATION, for the duration of
+        // CreateProcessW.
+        unsafe {
+            if CreateProcessW(
+                app_ptr,
+                wide.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                creation_flags | CREATE_UNICODE_ENVIRONMENT,
+                env_wide.as_mut_ptr().cast(),
                 std::ptr::null(),
                 &si,
                 &mut pi,

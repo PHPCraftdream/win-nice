@@ -154,6 +154,10 @@ mod tests {
         let usage = "usage: capc <percent 1-100> <command> [args...]";
         assert_eq!(parse("capc", &a(&["0", "cmd"]), 8).unwrap_err(), usage);
         assert_eq!(parse("capc", &a(&["101", "cmd"]), 8).unwrap_err(), usage);
+        assert_eq!(
+            parse("capc", &a(&["--no-servers", "cmd"]), 8).unwrap_err(),
+            usage
+        );
         assert_eq!(parse("capc", &a(&["50"]), 8).unwrap_err(), usage);
         assert_eq!(
             parse("capt", &a(&["9", "cmd"]), 8).unwrap_err(),
