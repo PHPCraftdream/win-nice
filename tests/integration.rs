@@ -702,6 +702,10 @@ fn test_cy_cx_agent_limits_env() {
             "WNICE_AGENT_LIMITS: '--' is not allowed; only wnice options (-p, -c, -t, -m, -n, -s, --boost, --no-servers)\n",
         ),
         (
+            "-c 20 --audit",
+            "WNICE_AGENT_LIMITS: '--audit' is not allowed; only wnice options (-p, -c, -t, -m, -n, -s, --boost, --no-servers)\n",
+        ),
+        (
             "-c 20 --adopt=node",
             "WNICE_AGENT_LIMITS: '--adopt=node' is not allowed; only wnice options (-p, -c, -t, -m, -n, -s, --boost, --no-servers)\n",
         ),

@@ -3,6 +3,8 @@
 //! Options are parsed ONLY before the first non-option token or `--`;
 //! everything after belongs verbatim to the wrapped command.
 
+mod adopt;
+
 use crate::run::wsl::WslMode;
 use crate::{Config, MemSpec, PriorityClass};
 
@@ -39,7 +41,7 @@ pub enum ParseError {
     Usage(String),
     /// `--jobs` combined with anything else: `<msg>` on stderr, exit 2.
     JobsConflict(String),
-    /// `--no-servers` cannot be combined with `--wsl`: stderr, exit 2.
+    /// `--no-servers` or `--audit` cannot be combined with `--wsl`: stderr, exit 2.
     NoServersWslConflict(String),
     AdoptWslConflict(String),
 }
@@ -59,36 +61,6 @@ impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.message())
     }
-}
-
-fn parse_adopt_names(value: &str) -> Result<Vec<String>, String> {
-    let invalid = || "invalid --adopt value".to_string();
-    let parts: Vec<&str> = value.split(',').collect();
-    if parts.is_empty() || parts.len() > 16 {
-        return Err(invalid());
-    }
-    let mut names = Vec::with_capacity(parts.len());
-    for part in parts {
-        if part.is_empty()
-            || part.chars().count() > 64
-            || part
-                .chars()
-                .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?'))
-        {
-            return Err(invalid());
-        }
-        // `NAME` and `NAME.exe` are the same image name.
-        let lower = part.to_lowercase();
-        let name = if lower.ends_with(".exe") {
-            lower
-        } else {
-            format!("{lower}.exe")
-        };
-        if !names.iter().any(|existing| existing == &name) {
-            names.push(name);
-        }
-    }
-    Ok(names)
 }
 
 fn strict_u32(s: &str) -> Option<u32> {
@@ -280,6 +252,11 @@ fn parse_tokens(args: &[String], logical_cpus: u32) -> Result<Tokens, ParseError
             i += 1;
             continue;
         }
+        if arg == "--audit" {
+            cfg.audit = true;
+            i += 1;
+            continue;
+        }
         if arg == "--no-servers" {
             cfg.no_servers = true;
             i += 1;
@@ -325,7 +302,7 @@ fn parse_tokens(args: &[String], logical_cpus: u32) -> Result<Tokens, ParseError
                 cfg.cpu_percent = Some(n);
             }
             "--adopt" => {
-                cfg.adopt = parse_adopt_names(val).map_err(ParseError::Usage)?;
+                cfg.adopt = adopt::parse_adopt_names(val).map_err(ParseError::Usage)?;
             }
             "-t/--threads" => {
                 let n = strict_u32(val).ok_or_else(|| {
@@ -369,6 +346,11 @@ fn parse_tokens(args: &[String], logical_cpus: u32) -> Result<Tokens, ParseError
 
 /// The whole-line option checks `parse_args` applies after the token loop.
 fn validate(cfg: &Config) -> Result<(), ParseError> {
+    if cfg.audit && cfg.wsl.is_some() {
+        return Err(ParseError::NoServersWslConflict(
+            "--audit cannot be combined with --wsl".to_string(),
+        ));
+    }
     if !cfg.adopt.is_empty() && cfg.wsl.is_some() {
         return Err(ParseError::AdoptWslConflict(
             "--adopt cannot be combined with --wsl".to_string(),
@@ -431,8 +413,8 @@ pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, ParseErr
 }
 
 /// Parse a list that holds only `wnice` limit options (`-p -c -t -m -n -s`,
-/// `--boost`, `--no-servers`) and no command: the same token loop and the same value
-/// validation as `parse_args`, minus the command requirement. `cfg.command`
+/// `--boost`, `--audit`, `--no-servers`) and no command: same token loop and
+/// value validation as `parse_args`, minus the command requirement. `cfg.command`
 /// collects everything from the first non-option token on, so an empty
 /// `command` proves the list held options only. `--jobs` is not special here
 /// (an unknown option); `-h`/`--help`/`-V`/`--version` set no limit and are
@@ -466,34 +448,11 @@ mod tests {
     }
 
     #[test]
-    fn adopt_names_are_normalized_and_validated() {
+    fn audit_conflicts_with_wsl() {
         assert_eq!(
-            parse_adopt_names("Microsoft Edge,Tool Name.exe").unwrap(),
-            vec!["microsoft edge.exe", "tool name.exe"]
+            err(&["--audit", "--wsl", "cmd"]),
+            "--audit cannot be combined with --wsl"
         );
-        assert_eq!(
-            parse_adopt_names("MSBuild,msbuild.EXE,node").unwrap(),
-            vec!["msbuild.exe", "node.exe"]
-        );
-        for value in [
-            "",
-            ",node",
-            "node,",
-            "node,,tool",
-            "../x",
-            "a\\b",
-            "*",
-            "?",
-            &"a".repeat(65),
-            "a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q",
-            "name:stream.exe",
-        ] {
-            assert_eq!(
-                parse_adopt_names(value),
-                Err("invalid --adopt value".into()),
-                "{value}"
-            );
-        }
     }
 
     #[test]
@@ -531,6 +490,13 @@ mod tests {
         let cfg = parse_options(&args(&["--no-servers"]), 8).unwrap();
         assert!(cfg.no_servers);
     }
+    #[test]
+    fn agent_options_accept_audit() {
+        let cfg = parse_options(&args(&["--audit"]), 8).unwrap();
+        assert!(cfg.audit);
+        assert!(!parse_options(&args(&[]), 8).unwrap().audit);
+    }
+
     #[test]
     fn empty_command_rejected() {
         assert!(parse_args(&[], 8).is_err());

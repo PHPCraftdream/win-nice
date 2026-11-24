@@ -128,6 +128,7 @@ fn all_flags_cfg() -> Config {
         procs: Some(64),
         timeout_ms: Some(2500),
         boost: false,
+        audit: false,
         no_servers: false,
         adopt: Vec::new(),
         command: vecs(&["sleep", "1"]),

@@ -25,6 +25,10 @@ fn agent_prefix(stem: &str) -> Option<[&'static str; 2]> {
 /// quoting.
 pub const AGENT_LIMITS_VAR: &str = "WNICE_AGENT_LIMITS";
 
+pub fn audit_env_enabled(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
 const AGENT_LIMITS_ONLY: &str =
     "only wnice options (-p, -c, -t, -m, -n, -s, --boost, --no-servers)";
 
@@ -33,7 +37,7 @@ const AGENT_LIMITS_ONLY: &str =
 fn forbidden_token(token: &str) -> Option<String> {
     let forbidden = matches!(
         token,
-        "--" | "--wsl" | "--jobs" | "-h" | "--help" | "-V" | "--version" | "--adopt"
+        "--" | "--wsl" | "--jobs" | "-h" | "--help" | "-V" | "--version" | "--audit" | "--adopt"
     ) || token.starts_with("--wsl=")
         || token.starts_with("--adopt=");
     forbidden.then(|| format!("'{token}' is not allowed; {AGENT_LIMITS_ONLY}"))
@@ -72,7 +76,10 @@ pub fn dispatch(stem: &str, args: &[String]) -> Option<i32> {
     if legacy::is_legacy(stem) {
         return Some(
             match legacy::parse(stem, args, sys.logical_processor_count()) {
-                Ok(cfg) => crate::run::run(&cfg, sys.clone()),
+                Ok(mut cfg) => {
+                    cfg.audit = audit_env_enabled(std::env::var("WNICE_AUDIT").ok().as_deref());
+                    crate::run::run(&cfg, sys.clone())
+                }
                 Err(usage) => {
                     eprintln!("{usage}");
                     eprintln!("{}", help::hint(stem));
@@ -116,6 +123,15 @@ pub fn dispatch(stem: &str, args: &[String]) -> Option<i32> {
 mod tests {
     use super::*;
     use crate::{MemSpec, PriorityClass};
+
+    #[test]
+    fn audit_environment_is_exact_one() {
+        assert!(!audit_env_enabled(None));
+        assert!(audit_env_enabled(Some("1")));
+        for value in ["", "0", "true", " 1", "1 ", "01"] {
+            assert!(!audit_env_enabled(Some(value)));
+        }
+    }
 
     #[test]
     fn agent_prefixes() {
@@ -178,6 +194,10 @@ mod tests {
 
     #[test]
     fn agent_limits_refuse_every_forbidden_token() {
+        assert_eq!(
+            forbidden_token("--audit").as_deref(),
+            Some("'--audit' is not allowed; only wnice options (-p, -c, -t, -m, -n, -s, --boost, --no-servers)")
+        );
         for bad in [
             "--",
             "--jobs",
@@ -187,6 +207,7 @@ mod tests {
             "-h",
             "--version",
             "-V",
+            "--audit",
             "--adopt",
             "--adopt=node",
         ] {

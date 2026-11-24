@@ -30,6 +30,8 @@ use crate::win32_err;
 use crate::{Config, Sys};
 use std::sync::Arc;
 
+pub mod audit;
+
 /// WSL mode: the command runs inside a WSL2 distro under a systemd scope
 /// instead of in a Job Object. Public so `Config` can name its mode type.
 pub mod wsl;
@@ -250,6 +252,13 @@ pub fn run_with_writer_in(
                 "wnice: '{}': command not found (searched PATH; the current directory is never searched)",
                 cfg.command[0]
             ));
+            if cfg.audit {
+                if let Err(message) =
+                    audit::collect_and_report(&job, None, None, audit::now_filetime(), err)
+                {
+                    err(&format!("wnice audit: {message}"));
+                }
+            }
             return 127;
         }
         Some(launch::Resolved::Direct(abs)) => abs,
@@ -320,6 +329,12 @@ pub fn run_with_writer_in(
         }
     }
     let child = child.expect("child set by one of the branches above");
+    let root_created = if cfg.audit {
+        audit::process_creation(&child.process).ok()
+    } else {
+        None
+    };
+    let audit_started = root_created.unwrap_or(0);
 
     if let Err(code) = sys.assign_process_to_job_object(&job, &child.process) {
         // Can't guarantee the limits - kill instead of letting it run unmanaged.
@@ -425,6 +440,13 @@ pub fn run_with_writer_in(
             "wnice: timed out after {} - job and every process in it were force-killed",
             timeout_display(cfg.timeout_ms.unwrap_or(0))
         ));
+        if cfg.audit {
+            if let Err(message) =
+                audit::collect_and_report(&job, Some(child.pid), root_created, audit_started, err)
+            {
+                err(&format!("wnice audit: {message}"));
+            }
+        }
         return 124;
     }
 
@@ -454,6 +476,13 @@ pub fn run_with_writer_in(
     }
 
     // Pass negative NTSTATUS codes through unchanged (bit-cast).
+    if cfg.audit {
+        if let Err(message) =
+            audit::collect_and_report(&job, Some(child.pid), root_created, audit_started, err)
+        {
+            err(&format!("wnice audit: {message}"));
+        }
+    }
     exit_code as i32
 }
 
