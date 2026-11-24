@@ -250,14 +250,17 @@ fn test_pool_membership_probes() {
                 .and_then(|v| v.parse().ok())
         })
         .expect("numeric sibling Win32 error");
-    println!(
-        "pool sibling: sibling_error={code}; hypothesis/expected Windows result is 5 (ERROR_ACCESS_DENIED), unmeasured locally"
+    // Measured on windows-2022 and windows-2025: a job has one parent chain, so
+    // a process in an unrelated job tree cannot join a pool nested elsewhere.
+    assert_eq!(
+        code, ACCESS_DENIED,
+        "unrelated job tree must be refused with ERROR_ACCESS_DENIED: {sibling}"
     );
     assert!(
         sibling.contains("assign_x=ok"),
         "sibling_error={code}: child must join X2 before trying P: {sibling}"
     );
-    let expected_child_p = u32::from(code == 0);
+    let expected_child_p = 0;
     assert_eq!(
         field(&sibling, "child_x"),
         Some(1),

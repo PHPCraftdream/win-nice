@@ -91,7 +91,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Backward-compatibility safety net for the published CLI contract: a `cargo test` suite with committed `--help`/usage goldens, exact message and exit-code checks and the Job Object lifecycle (`tests/compat.rs`), plus a CI differential gate that replays a fixed command set against the published `win-nice@0.4.0` binary (`scripts/compat-differential.js`; its allowlist gained its first entry with `--jobs`). No runtime, CLI or version change.
 - Job Object containment regression suite (`tests/job_containment.rs`): no breakaway from the tree's job, a nested job cannot loosen the outer one, and the wrapper's job handle is not inheritable; plus strict probe-report parsing, atomic scratch-dir creation and a kill-on-drop survivor guard in `tests/compat.rs`. No runtime, CLI or version change.
-- Job Object pool-probe coverage (`tests/job_containment.rs`): named-job membership and queried CPU-cap observations; expected Windows sibling-assignment error 5 remains unmeasured locally. No runtime, CLI or version change.
+- Job Object pool-probe coverage (`tests/job_containment.rs`): named-job membership and queried CPU-cap observations. Pinned finding: a process in an unrelated job tree cannot join a named pool job that is nested in another tree (`ERROR_ACCESS_DENIED`, measured on windows-2022 and windows-2025), so one shared CPU pool across independent terminal tabs is not possible with Job Objects alone; processes of one job chain do share a pool. No runtime, CLI or version change.
 
 ## [0.4.0] - 2026-11-15
 
