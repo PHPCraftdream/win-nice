@@ -267,11 +267,33 @@ pub fn run_with_writer_in(
         launch::shell_command_line(&cmd_exe, &launch::build_cmd_fallback_command_line(&argv));
 
     let creation_flags = crate::CREATE_SUSPENDED | creation_priority.unwrap_or(0);
+    let environment = if cfg.no_servers {
+        let (environment, port_failed) = crate::no_servers_environment(std::env::vars_os(), || {
+            std::net::TcpListener::bind(("127.0.0.1", 0))
+                .and_then(|listener| listener.local_addr().map(|addr| addr.port()))
+        });
+        if port_failed {
+            err("wnice: note: SCCACHE_SERVER_PORT was not set; sccache port unavailable");
+        }
+        Some(environment)
+    } else {
+        None
+    };
 
     let mut child = None;
     if !shell_target {
         // Direct launch: resolved exe as lpApplicationName.
-        if let Ok(c) = sys.create_process(Some(&argv0_abs), &direct_cmdline, creation_flags) {
+        let launched = if let Some(environment) = &environment {
+            sys.create_process_with_environment(
+                Some(&argv0_abs),
+                &direct_cmdline,
+                creation_flags,
+                environment,
+            )
+        } else {
+            sys.create_process(Some(&argv0_abs), &direct_cmdline, creation_flags)
+        };
+        if let Ok(c) = launched {
             child = Some(c);
         }
     }
@@ -284,7 +306,12 @@ pub fn run_with_writer_in(
             err(&format!("wnice: {}", launch::PERCENT_REFUSAL_MESSAGE));
             return 1;
         }
-        match sys.create_process(None, &shell_cmdline, creation_flags) {
+        let launched = if let Some(environment) = &environment {
+            sys.create_process_with_environment(None, &shell_cmdline, creation_flags, environment)
+        } else {
+            sys.create_process(None, &shell_cmdline, creation_flags)
+        };
+        match launched {
             Ok(c) => child = Some(c),
             Err(code) => {
                 err(&win32_err("CreateProcess", code));

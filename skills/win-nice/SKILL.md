@@ -31,8 +31,13 @@ wnice -p idle -c 50 -t 4 -m 50 -n 64 -s 600 -- npm run build
 `-m/--memory <size>` (= `capm`), `-n/--procs <n>` (= `capn`),
 `-s/--timeout <seconds>` (= `caps`, exit 124), `--boost` (with `-p`: run the
 priority booster instead of a job priority limit), `-h`, `-V`. Options end at
-the first non-option token or `--`; the rest goes to the command verbatim. The
-single-purpose tools below are the same machinery with one limit each.
+the first non-option token or `--`; the rest goes to the command verbatim.
+`--no-servers` sets selected build-tool server variables for the launched
+command (preserving user-set values); it reduces servers for commands wnice
+starts, but does not cover servers already running, editors delegating to an
+existing instance, or tools not listed here. It cannot be combined with
+`--wsl`. The single-purpose tools below are the same machinery with one limit
+each.
 Every tool prints detailed help with examples for `--help` (`wnice --help`,
 `capc --help`, ...); usage errors exit `1`.
 `wnice --jobs` on its own (no command, no other option; anything else before
@@ -322,7 +327,8 @@ Not covered here: `cy`/`cx`, convenience launchers for
 that ship in the same binary.
 
 They read `WNICE_AGENT_LIMITS`: whitespace-separated wnice limit options
-(`-p -c -t -m -n -s` with values, `--boost`) that run every agent they start
-under one job with those limits; unset keeps the old behaviour (a job
-without limits), an invalid value
-exits 1 with one line and starts nothing.
+(`-p -c -t -m -n -s` with values, `--boost`) and the child-environment
+option `--no-servers` (not a limit) that sets selected build-tool server
+variables; those options run every agent they start under one job with the
+limits specified. Unset keeps the old behaviour (a job without limits), an
+invalid value exits 1 with one line and starts nothing.

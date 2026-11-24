@@ -40,13 +40,22 @@ wnice -p idle -c 50 -t 4 -m 50 -n 64 -s 600 -- npm run build
 | `-n, --procs <n>` | `capn` | maximum simultaneously active processes |
 | `-s, --timeout <seconds>` | `caps` | wall-clock deadline, exit 124 |
 | `--boost` | — | with `-p`: skip the job priority limit and apply the priority to every process via the booster (see "Priority above NORMAL without elevation") |
+| `--no-servers` | — | disable selected build-tool server/daemon reuse for the launched command (details below; also accepted by `WNICE_AGENT_LIMITS`) |
 | `--jobs` | — | read-only report of the wnice jobs running right now (see "Looking at what is running"); must be the whole command line, so it takes no command and no other option |
 | `-h` / `-V` | | help / version |
 
 Options are parsed only up to the first non-option token or `--`; everything
-after belongs to the wrapped command verbatim. The single-purpose tools below
-are the same machinery with one limit each, kept for their short positional
-syntax.
+after belongs to the wrapped command verbatim. `--no-servers` changes only the
+environment passed to the command it starts: it sets `MSBUILDDISABLENODEREUSE=1`
+and `UseSharedCompilation=false` when unset, appends
+`-Dorg.gradle.daemon=false` to `GRADLE_OPTS` unless that option is already
+present, and chooses a currently free loopback port for `SCCACHE_SERVER_PORT`
+when unset. User-set values are preserved. A port-selection failure is a note,
+not a launch failure. This reduces servers for commands wnice starts; it does
+not stop servers already running, cover editors delegating to an existing
+instance, or affect tools not listed above. It cannot be combined with `--wsl`.
+The single-purpose tools below are the same machinery with one limit each,
+kept for their short positional syntax.
 
 Every tool has built-in help with examples: `wnice --help`, `capc --help`,
 `idle -h`, `admin /?`, ... (`cy`/`cx` pass `--help` on to `claude`/`codex`).
@@ -790,13 +799,15 @@ of their own — the flag names describe exactly what they do.
 ### Limiting what `cy`/`cx` start: `WNICE_AGENT_LIMITS`
 
 Both launchers read one environment variable. If `WNICE_AGENT_LIMITS` is set,
-its whitespace-separated value must be `wnice` limit options (`-p`, `-c`,
-`-t`, `-m`, `-n`, `-s` each with its value, or `--boost`) and the agent then
+its whitespace-separated value may contain `wnice` limit options (`-p`, `-c`,
+`-t`, `-m`, `-n`, `-s` each with its value, or `--boost`) and `--no-servers`,
+which is accepted as a child-environment option, not a limit. The agent then
 runs under exactly the job `wnice <those options> -- claude ...` (resp.
 `codex ...`) would create: one job with those limits around the agent and
-everything it starts, `cy -c` continuation sessions included. Unset or blank
-keeps the 0.4.0 behaviour: the agent still runs in a job, but that job
-carries no limit and no CPU cap.
+everything it starts, `cy -c` continuation sessions included. `--no-servers`
+applies to the launched agent command's environment; it is not a job limit.
+Unset or blank keeps the 0.4.0 behaviour: the agent still runs in a job, but
+that job carries no limit and no CPU cap.
 
 cmd.exe, for this shell (every `cy`/`cx` started from it is capped):
 
@@ -824,7 +835,9 @@ The value goes through the same parser and validation as the `wnice` command
 line, so values and error wording cannot drift. A command token, `--`,
 `--wsl`, `--jobs`, `--help`/`--version`, an invalid value or a non-Unicode
 value is refused: one stderr line naming the variable, exit code 1, nothing
-started. `wnice`, the single-purpose tools, `admin` and `uiup` never read it.
+started. `--no-servers` is accepted but sets only the launched command's
+environment; it is not a limit. `wnice`, the single-purpose tools, `admin` and
+`uiup` never read it.
 
 ## Install
 

@@ -39,12 +39,16 @@ pub enum ParseError {
     Usage(String),
     /// `--jobs` combined with anything else: `<msg>` on stderr, exit 2.
     JobsConflict(String),
+    /// `--no-servers` cannot be combined with `--wsl`: stderr, exit 2.
+    NoServersWslConflict(String),
 }
 
 impl ParseError {
     pub fn message(&self) -> &str {
         match self {
-            ParseError::Usage(m) | ParseError::JobsConflict(m) => m,
+            ParseError::Usage(m)
+            | ParseError::JobsConflict(m)
+            | ParseError::NoServersWslConflict(m) => m,
         }
     }
 }
@@ -244,6 +248,11 @@ fn parse_tokens(args: &[String], logical_cpus: u32) -> Result<Tokens, ParseError
             i += 1;
             continue;
         }
+        if arg == "--no-servers" {
+            cfg.no_servers = true;
+            i += 1;
+            continue;
+        }
         let flag: &str = if arg == "-p" || arg == "--priority" {
             "-p/--priority"
         } else if arg == "-c" || arg == "--cpu" {
@@ -323,6 +332,11 @@ fn parse_tokens(args: &[String], logical_cpus: u32) -> Result<Tokens, ParseError
 
 /// The whole-line option checks `parse_args` applies after the token loop.
 fn validate(cfg: &Config) -> Result<(), ParseError> {
+    if cfg.no_servers && cfg.wsl.is_some() {
+        return Err(ParseError::NoServersWslConflict(
+            "--no-servers cannot be combined with --wsl".to_string(),
+        ));
+    }
     if cfg.boost && cfg.wsl.is_some() {
         return Err(ParseError::Usage(
             "--boost does not apply to --wsl: the guest priority comes from the WSL cgroup (nice/CPUWeight), not from a Windows job"
@@ -375,7 +389,7 @@ pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, ParseErr
 }
 
 /// Parse a list that holds only `wnice` limit options (`-p -c -t -m -n -s`,
-/// `--boost`) and no command: the same token loop and the same value
+/// `--boost`, `--no-servers`) and no command: the same token loop and the same value
 /// validation as `parse_args`, minus the command requirement. `cfg.command`
 /// collects everything from the first non-option token on, so an empty
 /// `command` proves the list held options only. `--jobs` is not special here
@@ -409,6 +423,27 @@ mod tests {
             .to_string()
     }
 
+    #[test]
+    fn no_servers_option_parsing_and_wsl_conflict() {
+        let cfg = run(&["--no-servers", "-c", "25", "cmd"]);
+        assert!(cfg.no_servers);
+        assert_eq!(cfg.cpu_percent, Some(25));
+        assert_eq!(
+            parse_args(&args(&["--no-servers", "--wsl", "--", "cmd"]), 8).unwrap_err(),
+            ParseError::NoServersWslConflict("--no-servers cannot be combined with --wsl".into())
+        );
+        assert_eq!(err(&["--no-servers"]), "no command given");
+        assert_eq!(
+            err(&["--no-servers-old", "cmd"]),
+            "unknown option '--no-servers-old'"
+        );
+    }
+
+    #[test]
+    fn agent_options_accept_no_servers() {
+        let cfg = parse_options(&args(&["--no-servers"]), 8).unwrap();
+        assert!(cfg.no_servers);
+    }
     #[test]
     fn empty_command_rejected() {
         assert!(parse_args(&[], 8).is_err());

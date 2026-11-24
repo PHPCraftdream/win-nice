@@ -37,6 +37,7 @@ fn all_flags_cfg() -> Config {
         procs: Some(64),
         timeout_ms: Some(2500),
         boost: false,
+        no_servers: false,
         command: vecs(&["sleep", "1"]),
     }
 }
