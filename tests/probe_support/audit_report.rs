@@ -11,12 +11,16 @@
 mod probe_support;
 use probe_support::{check_probe_depth, probe_depth, probe_exe, CREATE_NO_WINDOW};
 use std::os::windows::process::CommandExt;
-use std::process::{Child, Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 
 struct ChildGuard(Option<Child>);
 
 impl ChildGuard {
     fn spawn(mut command: Command) -> Self {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         Self(Some(command.spawn().expect("spawn child")))
     }
 
