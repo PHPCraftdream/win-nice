@@ -1,7 +1,7 @@
 //! Job-containment probes: part of tests/probe_support, included by the
 //! harness=false suites.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 
@@ -37,6 +37,45 @@ impl Drop for Kids {
 pub fn try_run(mode: &str) -> Option<i32> {
     let rest = probe_args();
     match mode {
+        "pool-self"
+        | "pool-sibling"
+        | "pool-nested"
+        | "pool-shared"
+        | "pool-child-sibling"
+        | "pool-child-nested"
+        | "pool-child-gated"
+        | "pool-child-first-gated" => {
+            let args = probe_args();
+            // SAFETY: pool helpers use Win32 handles and buffers created or validated in the probe.
+            let result = unsafe {
+                match mode {
+                    "pool-self" => pool_self(&need(&args, 0)),
+                    "pool-sibling" => pool_sibling(&need(&args, 0)),
+                    "pool-nested" => pool_nested(&need(&args, 0)),
+                    "pool-shared" => pool_shared(&need(&args, 0)),
+                    "pool-child-nested" => {
+                        pool_child_nested(&need(&args, 0), &need(&args, 1), &need(&args, 2))
+                    }
+                    "pool-child-sibling" => {
+                        pool_child_sibling(&need(&args, 0), &need(&args, 1), &need(&args, 2))
+                    }
+                    "pool-child-gated" => pool_child_gated(&need(&args, 0), &need(&args, 1)),
+                    "pool-child-first-gated" => {
+                        pool_child_first_gated(&need(&args, 0), &need(&args, 1))
+                    }
+                    _ => pool_child(&need(&args, 0), &need(&args, 1)),
+                }
+            };
+            match result {
+                Ok(line) => raw_println(&line),
+                Err(e) => {
+                    eprintln!("pool probe failed: {e}");
+                    raw_println(&format!("pool probe failed: {e}"));
+                    return Some(3);
+                }
+            }
+            Some(0)
+        }
         "wait-eof" => {
             // Alive on its stdin pipe, not a sleep: returns when the owner
             // closes the write end (or dies).
@@ -219,6 +258,431 @@ pub fn try_run(mode: &str) -> Option<i32> {
 
         _ => None,
     }
+}
+
+use std::sync::atomic::{AtomicU64, Ordering};
+static JOB_COUNTER: AtomicU64 = AtomicU64::new(1);
+fn unique_base(base: &str) -> String {
+    format!(
+        "{base}-{}-{}",
+        std::process::id(),
+        JOB_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+struct Job(HANDLE);
+impl Drop for Job {
+    fn drop(&mut self) {
+        // SAFETY: this handle was returned by CreateJobObjectW and is owned by Job.
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+fn job_name(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+unsafe fn create_named(name: &str) -> Result<Job, String> {
+    let n = job_name(name);
+    let h = CreateJobObjectW(std::ptr::null(), n.as_ptr());
+    if h.is_null() {
+        Err(format!("CreateJobObjectW: {}", GetLastError()))
+    } else {
+        Ok(Job(h))
+    }
+}
+unsafe fn open_named(name: &str) -> Result<Job, String> {
+    let n = job_name(name);
+    let h = windows_sys::Win32::System::JobObjects::OpenJobObjectW(0x0004 | 0x0001, 0, n.as_ptr());
+    if h.is_null() {
+        Err(format!("OpenJobObjectW: {}", GetLastError()))
+    } else {
+        Ok(Job(h))
+    }
+}
+unsafe fn query_cpu(j: &Job) -> Result<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, String> {
+    let mut info: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = std::mem::zeroed();
+    if windows_sys::Win32::System::JobObjects::QueryInformationJobObject(
+        j.0,
+        JobObjectCpuRateControlInformation,
+        &mut info as *mut _ as *mut _,
+        std::mem::size_of_val(&info) as u32,
+        std::ptr::null_mut(),
+    ) == 0
+    {
+        return Err(format!(
+            "QueryInformationJobObject(cpu): {}",
+            GetLastError()
+        ));
+    }
+    Ok(info)
+}
+unsafe fn assign_current(j: &Job) -> Result<(), u32> {
+    if AssignProcessToJobObject(j.0, GetCurrentProcess()) != 0 {
+        Ok(())
+    } else {
+        Err(GetLastError())
+    }
+}
+unsafe fn is_member(j: &Job) -> Result<u32, String> {
+    let mut v = 0;
+    if IsProcessInJob(GetCurrentProcess(), j.0, &mut v) == 0 {
+        Err(format!("IsProcessInJob: {}", GetLastError()))
+    } else {
+        Ok(v as u32)
+    }
+}
+struct PoolChild(std::process::Child);
+impl Drop for PoolChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn spawn_pool(mode: &str, names: &[&str]) -> Result<PoolChild, String> {
+    check_probe_depth();
+    Command::new(probe_exe())
+        .creation_flags(CREATE_NO_WINDOW)
+        .env("WNICE_PROBE", mode)
+        .env("WNICE_PROBE_ARGS", names.join("\u{1f}"))
+        .env("WNICE_PROBE_DEPTH", (probe_depth() + 1).to_string())
+        .stdin(
+            if mode == "pool-child-gated"
+                || mode == "pool-child-first-gated"
+                || mode == "pool-child-sibling"
+            {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            },
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(PoolChild)
+        .map_err(|e| format!("spawn: {e}"))
+}
+fn collect_pool(mut child: PoolChild) -> Result<String, String> {
+    let mut s = String::new();
+    child
+        .0
+        .stdout
+        .take()
+        .ok_or("missing stdout")?
+        .read_to_string(&mut s)
+        .map_err(|e| e.to_string())?;
+    let status = child.0.wait().map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(format!("child status {status}: {s}"));
+    }
+    Ok(s.trim().to_string())
+}
+unsafe fn pool_self(base: &str) -> Result<String, String> {
+    let base = unique_base(base);
+    let x = create_named(&format!("{base}-X1"))?;
+    let p = create_named(&format!("{base}-P"))?;
+    assign_current(&x).map_err(|e| e.to_string())?;
+    assign_current(&p).map_err(|e| e.to_string())?;
+    let _ = query_cpu(&x)?;
+    let _ = query_cpu(&p)?;
+    Ok(format!(
+        "assign_x=ok assign_p=ok in_x={} in_p={} query_x=ok query_p=ok",
+        is_member(&x)?,
+        is_member(&p)?
+    ))
+}
+unsafe fn pool_sibling(base: &str) -> Result<String, String> {
+    let base = unique_base(base);
+    let x1 = create_named(&format!("{base}-X1"))?;
+    let p = create_named(&format!("{base}-P"))?;
+    let child = spawn_pool(
+        "pool-child-sibling",
+        &[
+            &format!("{base}-X2"),
+            &format!("{base}-P"),
+            &format!("{base}-X1"),
+        ],
+    )?;
+    assign_current(&x1).map_err(|e| e.to_string())?;
+    assign_current(&p).map_err(|e| e.to_string())?;
+    let mut child = child;
+    child
+        .0
+        .stdin
+        .take()
+        .ok_or("missing sibling release pipe")?
+        .write_all(b"x")
+        .map_err(|e| e.to_string())?;
+    let child_result = collect_pool(child)?;
+    Ok(format!(
+        "{child_result} parent_x={} parent_p={}",
+        is_member(&x1)?,
+        is_member(&p)?
+    ))
+}
+unsafe fn pool_nested(base: &str) -> Result<String, String> {
+    let base = unique_base(base);
+    let x = create_named(&format!("{base}-X1"))?;
+    let p = create_named(&format!("{base}-P"))?;
+    assign_current(&x).map_err(|e| e.to_string())?;
+    assign_current(&p).map_err(|e| e.to_string())?;
+    let c = create_named(&format!("{base}-C"))?;
+    let mut cpu: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = std::mem::zeroed();
+    cpu.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+    cpu.Anonymous.CpuRate = 1_000;
+    if SetInformationJobObject(
+        c.0,
+        JobObjectCpuRateControlInformation,
+        &cpu as *const _ as *const _,
+        std::mem::size_of_val(&cpu) as u32,
+    ) == 0
+    {
+        return Err(format!("SetInformationJobObject: {}", GetLastError()));
+    }
+    let child = spawn_pool(
+        "pool-child-nested",
+        &[
+            &format!("{base}-X1"),
+            &format!("{base}-P"),
+            &format!("{base}-C"),
+        ],
+    )?;
+    let result = collect_pool(child)?;
+    Ok(result)
+}
+unsafe fn pool_shared(base: &str) -> Result<String, String> {
+    let base = unique_base(base);
+    let x = create_named(&format!("{base}-X1"))?;
+    let _p = create_named(&format!("{base}-P"))?;
+    assign_current(&x).map_err(|e| e.to_string())?;
+    let mut second = spawn_pool(
+        "pool-child-gated",
+        &[&format!("{base}-X1"), &format!("{base}-P")],
+    )?;
+    let mut second_out =
+        std::io::BufReader::new(second.0.stdout.take().ok_or("missing gated stdout")?);
+    let mut second_ready = String::new();
+    second_out
+        .read_line(&mut second_ready)
+        .map_err(|e| e.to_string())?;
+    if second_ready.trim() != "second_x=1 ready" {
+        return Err(format!("unexpected second readiness: {second_ready:?}"));
+    }
+
+    let mut first = spawn_pool(
+        "pool-child-first-gated",
+        &[&format!("{base}-X1"), &format!("{base}-P")],
+    )?;
+    let mut first_out =
+        std::io::BufReader::new(first.0.stdout.take().ok_or("missing first stdout")?);
+    let mut first_ready = String::new();
+    first_out
+        .read_line(&mut first_ready)
+        .map_err(|e| e.to_string())?;
+    if first_ready.trim() != "first_x=1 ready" {
+        return Err(format!("unexpected first readiness: {first_ready:?}"));
+    }
+
+    // P requests assignment; Q releases a child only after both observations.
+    first
+        .0
+        .stdin
+        .as_mut()
+        .ok_or("missing first control pipe")?
+        .write_all(b"P")
+        .map_err(|e| e.to_string())?;
+    let mut first_joined = String::new();
+    first_out
+        .read_line(&mut first_joined)
+        .map_err(|e| e.to_string())?;
+    if !first_joined.contains("first_join_p=ok first_x=1 first_p=1") {
+        return Err(format!(
+            "first assignment/membership failed: {first_joined:?}"
+        ));
+    }
+
+    second
+        .0
+        .stdin
+        .as_mut()
+        .ok_or("missing second control pipe")?
+        .write_all(b"P")
+        .map_err(|e| e.to_string())?;
+    let mut second_result = String::new();
+    second_out
+        .read_line(&mut second_result)
+        .map_err(|e| e.to_string())?;
+    if !second_result.contains("second_assign_p=ok second_x=1 second_p=1") {
+        return Err(format!(
+            "second assignment/membership failed: {second_result:?}"
+        ));
+    }
+
+    first
+        .0
+        .stdin
+        .as_mut()
+        .ok_or("missing first control pipe")?
+        .write_all(b"R")
+        .map_err(|e| e.to_string())?;
+    let mut first_result = String::new();
+    first_out
+        .read_line(&mut first_result)
+        .map_err(|e| e.to_string())?;
+    if !first_result.contains("first_assign_p=ok first_x=1 first_p=1") {
+        return Err(format!("first report failed: {first_result:?}"));
+    }
+
+    first
+        .0
+        .stdin
+        .take()
+        .ok_or("missing first control pipe")?
+        .write_all(b"Q")
+        .map_err(|e| e.to_string())?;
+    second
+        .0
+        .stdin
+        .take()
+        .ok_or("missing second control pipe")?
+        .write_all(b"Q")
+        .map_err(|e| e.to_string())?;
+    let first_status = first.0.wait().map_err(|e| e.to_string())?;
+    let second_status = second.0.wait().map_err(|e| e.to_string())?;
+    if !first_status.success() || !second_status.success() {
+        return Err(format!(
+            "gated child statuses: {first_status}, {second_status}"
+        ));
+    }
+    Ok(format!("{} {}", first_result.trim(), second_result.trim()))
+}
+unsafe fn pool_child_nested(xname: &str, pname: &str, cname: &str) -> Result<String, String> {
+    let x = open_named(xname)?;
+    let p = open_named(pname)?;
+    let c = open_named(cname)?;
+    assign_current(&c).map_err(|e| e.to_string())?;
+    let cpu = query_cpu(&c)?;
+    let flags = cpu.ControlFlags;
+    let rate = cpu.Anonymous.CpuRate;
+    if flags != (JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP)
+        || rate != 1_000
+    {
+        return Err(format!("unexpected CPU cap flags={flags} rate={rate}"));
+    }
+    Ok(format!(
+        "child_x={} child_p={} child_c={} query_c=ok cpuctrl={flags} cpurate={rate}",
+        is_member(&x)?,
+        is_member(&p)?,
+        is_member(&c)?
+    ))
+}
+unsafe fn pool_child_gated(xname: &str, pname: &str) -> Result<String, String> {
+    let x = open_named(xname)?;
+    // SAFETY: inherited membership is verified before any pool assignment.
+    if is_member(&x)? != 1 {
+        return Err("second child not inherited in X1".into());
+    }
+    raw_println("second_x=1 ready");
+    let mut phase = [0u8; 1];
+    std::io::stdin()
+        .read_exact(&mut phase)
+        .map_err(|e| e.to_string())?;
+    if phase[0] != b'P' {
+        return Err(format!("expected P gate, got {phase:?}"));
+    }
+    let p = open_named(pname)?;
+    let result = assign_current(&p);
+    let report = format!(
+        "second_assign_p={} second_x={} second_p={}",
+        result.map_or_else(|e| format!("err:{e}"), |_| "ok".into()),
+        is_member(&x)?,
+        is_member(&p)?
+    );
+    raw_println(&report);
+    std::io::stdin()
+        .read_exact(&mut phase)
+        .map_err(|e| e.to_string())?;
+    if phase[0] != b'Q' {
+        return Err(format!("expected Q release, got {phase:?}"));
+    }
+    Ok(report)
+}
+unsafe fn pool_child_first_gated(xname: &str, pname: &str) -> Result<String, String> {
+    let x = open_named(xname)?;
+    let p = open_named(pname)?;
+    // SAFETY: inherited membership is tested; no reassignment to X1 is needed.
+    if is_member(&x)? != 1 {
+        return Err("first child not inherited in X1".into());
+    }
+    raw_println("first_x=1 ready");
+    let mut phase = [0u8; 1];
+    std::io::stdin()
+        .read_exact(&mut phase)
+        .map_err(|e| e.to_string())?;
+    if phase[0] != b'P' {
+        return Err(format!("expected P gate, got {phase:?}"));
+    }
+    let result = assign_current(&p);
+    let joined = format!(
+        "first_join_p={} first_x={} first_p={}",
+        result.map_or_else(|e| format!("err:{e}"), |_| "ok".into()),
+        is_member(&x)?,
+        is_member(&p)?
+    );
+    raw_println(&joined);
+    if !joined.contains("first_join_p=ok first_x=1 first_p=1") {
+        return Err(format!("first assignment/membership failed: {joined}"));
+    }
+    std::io::stdin()
+        .read_exact(&mut phase)
+        .map_err(|e| e.to_string())?;
+    if phase[0] != b'R' {
+        return Err(format!("expected R report gate, got {phase:?}"));
+    }
+    let report = format!(
+        "first_assign_p={} first_x={} first_p={}",
+        result.map_or_else(|e| format!("err:{e}"), |_| "ok".into()),
+        is_member(&x)?,
+        is_member(&p)?
+    );
+    raw_println(&report);
+    std::io::stdin()
+        .read_exact(&mut phase)
+        .map_err(|e| e.to_string())?;
+    if phase[0] != b'Q' {
+        return Err(format!("expected Q release, got {phase:?}"));
+    }
+    Ok(report)
+}
+unsafe fn pool_child_sibling(xname: &str, pname: &str, x1name: &str) -> Result<String, String> {
+    let mut release = [0u8; 1];
+    std::io::stdin()
+        .read_exact(&mut release)
+        .map_err(|e| e.to_string())?;
+    let x = create_named(xname)?;
+    let p = open_named(pname)?;
+    assign_current(&x).map_err(|e| e.to_string())?;
+    let ap = assign_current(&p);
+    let code = ap.map_or_else(|e| e, |_| 0);
+    let x1 = open_named(x1name)?;
+    Ok(format!(
+        "assign_x=ok sibling_error={code} child_x={} child_x1={} child_p={}",
+        is_member(&x)?,
+        is_member(&x1)?,
+        is_member(&p)?
+    ))
+}
+unsafe fn pool_child(xname: &str, pname: &str) -> Result<String, String> {
+    let x = open_named(xname)?;
+    let p = open_named(pname)?;
+    let ap = assign_current(&p);
+    let ix = is_member(&x)?;
+    let ip = is_member(&p)?;
+    let _ = query_cpu(&x)?;
+    let _ = query_cpu(&p)?;
+    Ok(format!(
+        "first_assign_p={} first_x={ix} first_p={ip} query_x=ok query_p=ok",
+        ap.map_or_else(|e| format!("err:{e}"), |_| "ok".into())
+    ))
 }
 
 // ------------------------------------------------------------ handle audit
