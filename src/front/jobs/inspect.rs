@@ -169,25 +169,6 @@ impl super::Inspector for RealInspector {
     }
 }
 
-/// How many wnice-family jobs this very process is a member of, and whether
-/// the inventory behind that count was complete; `None` when a membership
-/// query failed. Two or more prove that its own job is nested; fewer prove
-/// nothing about a job that is not a wnice job or that was not inspected.
-pub fn jobs_containing_this_process() -> Option<(usize, bool)> {
-    let me = std::process::id();
-    let found = discover(me);
-    let own = win::open_query(me)?;
-    // One entry per kernel job object; row ids are not assigned yet, so the
-    // members are counted, never deduplicated by id.
-    let mut count = 0;
-    for job in &found.owned {
-        if win::is_in_job(&own, &job.handle)? {
-            count += 1;
-        }
-    }
-    Some((count, found.inventory.complete()))
-}
-
 /// The wrapper processes worth inspecting, pid-ascending: this order decides
 /// which owner claims a job object that several wrappers share.
 fn recognised_owners(processes: &[(String, u32)], me: u32) -> Vec<(u32, String)> {
