@@ -142,19 +142,33 @@ audit (--audit, or WNICE_AUDIT=1 for legacy tools):
   outside the job, whose parent chain validates creation times back to the root.
   Suspects are not proven leaks. System-service starts (WMI, Task Scheduler,
   COM servers, UAC), work in reused servers already running, and broken parent
-  chains are not visible.
+  chains are not visible. The command's exit code is passed through unchanged.
   cy, cx, admin and uiup do not accept this option; legacy tools use
-  WNICE_AUDIT=1 (exact value).
+  WNICE_AUDIT=1 (exact value). Cannot be combined with --wsl (exit 2).
 
 adopt (--adopt):
   wnice --adopt NAME[,NAME...] [limit options] -- <command> [args...]
                      while the command runs, put already running processes of
                      the same user whose image name is NAME (exact match,
-                     case-insensitive, no wildcards or paths; NAME and
-                     NAME.exe are the same) into the command's job. An adopted
-                     process keeps the limits until it exits; --timeout (exit
-                     124) kills it with the job, a normal wrapper exit does
-                     not. Do not adopt editors, IDEs or anything that must
-                     outlive the command. A process in an incompatible job may
-                     refuse (one line per process on stderr). Not available to
-                     the legacy names, --wsl or WNICE_AGENT_LIMITS.
+                     case-insensitive, no wildcards, paths or leading '-';
+                     NAME and NAME.exe are the same) into the command's job.
+                     An adopted process keeps the limits until it exits;
+                     --timeout (exit 124) kills it with the job, a normal
+                     wrapper exit does not. Do not adopt editors, IDEs or
+                     anything that must outlive the command. A process in an
+                     incompatible job may refuse (one line per process on
+                     stderr). Not available to the legacy names or
+                     WNICE_AGENT_LIMITS; with --wsl: usage error (exit 2).
+
+agent limits (WNICE_AGENT_LIMITS, read only by cy and cx):
+  set WNICE_AGENT_LIMITS=-p idle -c 10 -m 10g
+                     cy and cx then run the agent under the job that
+                     'wnice <those options> -- claude ...' (or codex) would
+                     create: one job around the agent and everything it
+                     starts, 'cy -c' sessions included. Allowed: -p, -c, -t,
+                     -m, -n, -s with values, --boost and --no-servers. A
+                     command, '--', --wsl, --jobs, --audit, --adopt, a help or
+                     version flag, or an invalid value is refused: one line on
+                     stderr, exit 1, nothing started. Unset or blank: the
+                     agent's job has no limits, as before. wnice and the other
+                     tools never read it.

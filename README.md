@@ -69,7 +69,8 @@ into this command's job while the command runs (about once a second wnice looks
 for them), so its limits also cover a server that was started before the
 wrapper. Only processes of the same user are considered. Names are exact and
 case-insensitive; `NAME` and `NAME.exe` are the same, paths and wildcards are
-rejected. An adopted process keeps the limits until it exits; it is killed with
+rejected, and so is a name starting with `-` (a forgotten name in
+`wnice --adopt -- cmd` is a usage error, not a search for `--.exe`). An adopted process keeps the limits until it exits; it is killed with
 the job on `--timeout` (exit 124), but not on a normal wrapper exit. Processes
 it had started before adoption are not covered, processes it starts afterwards
 are. Do not adopt editors, IDEs, or anything that must outlive the command. A
@@ -82,7 +83,10 @@ kept for their short positional syntax.
 
 Every tool has built-in help with examples: `wnice --help`, `capc --help`,
 `idle -h`, `admin /?`, ... (`cy`/`cx` pass `--help` on to `claude`/`codex`).
-A usage error prints the tool's usage line and exits `1`.
+A usage error prints the tool's usage line and exits `1`. The newer opt-in
+`wnice` flags use exit `2` with one stderr line for their own conflicts:
+`--jobs` with anything else, and `--no-servers`, `--audit` or `--adopt`
+together with `--wsl`.
 
 ### What a CPU share actually guarantees
 
@@ -856,8 +860,8 @@ in a nested job and its percentage would be a share of the wrapper's.
 
 The value goes through the same parser and validation as the `wnice` command
 line, so values and error wording cannot drift. A command token, `--`,
-`--wsl`, `--jobs`, `--help`/`--version`, an invalid value or a non-Unicode
-value is refused: one stderr line naming the variable, exit code 1, nothing
+`--wsl`, `--jobs`, `--audit`, `--adopt`, `--help`/`--version`, an invalid
+value or a non-Unicode value is refused: one stderr line naming the variable, exit code 1, nothing
 started. `--no-servers` is accepted but sets only the launched command's
 environment; it is not a limit. `wnice`, the single-purpose tools, `admin` and
 `uiup` never read it.
@@ -998,6 +1002,9 @@ package ships it.
 - `WNICE_AGENT_LIMITS` — `wnice` limit options applied to the agent that
   `cy`/`cx` start (see "Limiting what `cy`/`cx` start" above). Read only by
   those two launchers; unset or blank means no limits.
+- `WNICE_AUDIT` — exactly `1` turns on the `--audit` report for the
+  single-purpose tools (`idle`, `capc`, ...) and for `wnice`; any other value
+  is off. `cy`, `cx`, `admin` and `uiup` never read it.
 
 ## Testing
 

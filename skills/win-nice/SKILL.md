@@ -39,7 +39,9 @@ an existing instance, or tools not listed here. It cannot be combined with
 `--wsl`. The single-purpose tools below are the same machinery with one limit
 each.
 Every tool prints detailed help with examples for `--help` (`wnice --help`,
-`capc --help`, ...); usage errors exit `1`.
+`capc --help`, ...); usage errors exit `1`, except the conflicts of the newer
+opt-in flags (`--jobs` with anything else; `--no-servers`, `--audit` or
+`--adopt` with `--wsl`), which exit `2` with one stderr line.
 `wnice --jobs` on its own (no command, no other option; anything else before
 a `--` is a usage error, one stderr line, exit 2) is a read-only report of
 the running wnice jobs;
@@ -54,8 +56,9 @@ Legacy tools opt in only with `WNICE_AUDIT=1` (exact value); `cy`, `cx`,
 
 `wnice --adopt NAME[,NAME...] [limit options] -- <command> [args...]` puts
 already running processes of the same user with these exact image names into
-the command's job while it runs (`NAME` and `NAME.exe` are the same; paths and
-wildcards are rejected). An adopted process keeps the limits until it exits and
+the command's job while it runs (`NAME` and `NAME.exe` are the same; paths,
+wildcards and names starting with `-` are rejected, so `--adopt -- cmd` is a
+usage error). An adopted process keeps the limits until it exits and
 is killed with the job on `--timeout`. Processes it started before adoption are
 not covered. Do not adopt editors, IDEs, or anything that must outlive the
 command. A process in an incompatible job may refuse (one stderr line). Not
@@ -347,4 +350,7 @@ They read `WNICE_AGENT_LIMITS`: whitespace-separated wnice limit options
 option `--no-servers` (not a limit) that sets selected build-tool server
 variables; those options run every agent they start under one job with the
 limits specified. Unset keeps the old behaviour (a job without limits), an
-invalid value exits 1 with one line and starts nothing.
+invalid value exits 1 with one line and starts nothing; so do a command
+token, `--`, `--wsl`, `--jobs`, `--audit`, `--adopt` and help/version flags.
+Example: `setx WNICE_AGENT_LIMITS "-p idle -c 10 -m 10g"` (new terminals) caps
+every `cy`/`cx` agent, `cy -c` sessions included.

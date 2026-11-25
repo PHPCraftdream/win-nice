@@ -4,7 +4,7 @@
     {
       "case": "help-wnice",
       "field": "stdout",
-      "reason": "wnice --help documents the read-only --jobs view, opt-in --no-servers environment settings, the appended --audit accounting/suspect report and opt-in --adopt process attachment; the pinned 0.4.0 reference predates these additions. No other case, field, message or exit code differs."
+      "reason": "wnice --help documents the read-only --jobs view, opt-in --no-servers environment settings, the appended --audit accounting/suspect report, opt-in --adopt process attachment and the WNICE_AGENT_LIMITS section for cy/cx; the pinned 0.4.0 reference predates these additions. No other case, field, message or exit code differs."
     },
     {
       "case": "help-admin",

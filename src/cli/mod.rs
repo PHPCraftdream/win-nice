@@ -462,6 +462,7 @@ mod tests {
             vec!["node.exe"]
         );
         assert_eq!(err(&["--adopt"]), "missing value for --adopt");
+        assert_eq!(err(&["--adopt", "--", "cmd"]), "invalid --adopt value");
         assert!(err(&["--adopt=node"]).contains("unknown option"));
         assert_eq!(
             parse_args(&args(&["--adopt", "node", "--wsl", "--", "cmd"]), 8).unwrap_err(),
