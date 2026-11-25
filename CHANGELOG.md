@@ -9,20 +9,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `wnice --adopt NAME[,NAME...]`: opt-in, puts already running same-user
   processes with these exact image names (`NAME` and `NAME.exe` are the same)
   into the command's Job Object while it runs. An adopted process keeps the
-  limits until it exits and is killed with the job on `--timeout`. Not
-  accepted by the legacy names, `--wsl` or `WNICE_AGENT_LIMITS`. A name
+  limits until it exits and is killed with the job on `--timeout` or when
+  wnice itself is killed (Ctrl+C, closed terminal), but not on a normal exit.
+  Names are image names, so `--adopt node` takes every `node.exe` of the
+  user, not only the one meant. Not accepted by the legacy names, `--wsl` or
+  `WNICE_AGENT_LIMITS`; refusals for other users' processes print nothing. A name
   starting with `-` is refused like a path or wildcard, so a forgotten name
   (`wnice --adopt -- cmd`) is a usage error instead of a silent search for
   `--.exe`.
 
 - `wnice --audit` reports job accounting and same-user process suspects after
-  the command ends. Legacy tools can opt in with `WNICE_AUDIT=1`; suspects are
-  based on validated parent chains and are not proven leaks.
+  the command ends. Legacy tools can opt in with `WNICE_AUDIT=1` (`wnice
+  --wsl` ignores the variable; only an explicit `--audit --wsl` is an error);
+  suspects are based on validated parent chains and are not proven leaks.
 
 - `wnice --no-servers`: opt-in server-reuse settings for the launched command.
   It preserves user-set environment values, disables MSBuild node reuse,
   Roslyn shared compilation and Gradle daemons, and assigns a free loopback
-  port to sccache when unset. It does not affect servers already running.
+  port to sccache when unset (new on every run, so a sccache server the build
+  starts lives on until its idle timeout and is not shared). It does not
+  affect servers already running.
 
 - `wnice --jobs`: a read-only report of the wnice-family Job Objects the
   current user's wrappers hold right now (owner process and command line,
@@ -46,16 +52,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   all / Y% one (...)` for a nested job, the product of the hard caps along its
   proven parent chain (an uncapped link passes the others through, a soft cap
   is no ceiling, an unknown or unproven link shows `?`). `--jobs` is decided
-  before any other argument is
-  interpreted and is accepted only as the whole command line: any other
-  argument before the first `--` - a command, an option, a help or version
-  flag, an invalid option value, or a repeated `--jobs` - is a usage error
-  with exit 2 and a single line on stderr, so `wnice cmd --jobs` is that
-  error too, while a `--jobs` at or after the first `--` is an ordinary
-  argument of the wrapped command (`wnice -- cmd --jobs`). Of the help texts
-  only `wnice --help` documents it; only invocations whose arguments
-  contain `--jobs` change, and every other invocation behaves exactly as
-  before.
+  before any other option is interpreted and is accepted only as the whole
+  command line: when it stands among the wnice options, any other argument -
+  a command, an option, a help or version flag, an invalid option value, or a
+  repeated `--jobs` - makes it a usage error with exit 2 and a single line on
+  stderr. From the command's first word on, and after the first `--`, it is
+  an ordinary argument of the wrapped command, exactly as in 0.4.0 (`wnice
+  cargo build --jobs 4`, `wnice -- cmd --jobs`). Of the help texts only
+  `wnice --help` documents it; every invocation without `--jobs` among the
+  wnice options behaves exactly as before.
 
 - `admin --keep-limits <command> [args...]`: opt-in, keeps the limits of the
   job `admin` itself runs in when it has to elevate. A UAC-elevated process is

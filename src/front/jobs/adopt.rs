@@ -89,6 +89,11 @@ fn ancestry(rows: &[Row], own: u32) -> HashSet<u32> {
     out
 }
 
+/// Whether `pid` is provably a process of the current user (query-only open).
+fn same_user_pid(pid: u32, own: &win::OwnedSid) -> bool {
+    win::open_query(pid).is_some_and(|process| win::same_user(&process, own) == Some(true))
+}
+
 pub struct Poller {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -169,12 +174,16 @@ impl Poller {
                     if process.is_null() {
                         // SAFETY: GetLastError reads the immediately preceding OpenProcess failure.
                         let code = unsafe { GetLastError() };
-                        eprintln!(
-                            "wnice: could not adopt {} (pid {}): OpenProcess failed: {}",
-                            row.name,
-                            row.pid,
-                            std::io::Error::from_raw_os_error(code as i32)
-                        );
+                        // Only a refusal for a process of this user is worth a
+                        // line: other users' processes are never candidates.
+                        if same_user_pid(row.pid, &own_sid) {
+                            eprintln!(
+                                "wnice: could not adopt {} (pid {}): OpenProcess failed: {}",
+                                row.name,
+                                row.pid,
+                                std::io::Error::from_raw_os_error(code as i32)
+                            );
+                        }
                         continue;
                     }
                     let process = Handle::from_raw(process);
@@ -267,5 +276,19 @@ impl Drop for Poller {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_user_pid_accepts_this_process_and_refuses_the_system_process() {
+        let own = win::current_user().expect("current user SID");
+        assert!(same_user_pid(std::process::id(), &own));
+        // PID 4 (System) belongs to another account, or cannot be opened at all.
+        assert!(!same_user_pid(4, &own));
+        assert!(!same_user_pid(0, &own));
     }
 }

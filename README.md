@@ -52,8 +52,11 @@ environment passed to the command it starts: it sets `MSBUILDDISABLENODEREUSE=1`
 and `UseSharedCompilation=false` when unset, appends
 `-Dorg.gradle.daemon=false` to `GRADLE_OPTS` unless that option is already
 present, and chooses a currently free loopback port for `SCCACHE_SERVER_PORT`
-when unset. User-set values are preserved. A port-selection failure is a note,
-not a launch failure. This reduces servers for commands wnice starts; it does
+when unset (a new port on every run, so a sccache server the build starts is not
+shared with other runs and, left running inside the job, lives until sccache's
+idle timeout - 10 minutes by default, `SCCACHE_IDLE_TIMEOUT`; the cache itself
+is not affected). User-set values are preserved. A port-selection failure is a
+note, not a launch failure. This reduces servers for commands wnice starts; it does
 not stop servers already running, cover editors delegating to an existing
 instance, or affect tools not listed above. It cannot be combined with `--wsl`.
 `--audit` reports job accounting and same-user processes created after command
@@ -61,7 +64,8 @@ start, outside the job, whose parent chain validates creation times back to the
 root command. These are suspects, not proven leaks; system-service starts (WMI,
 Task Scheduler, COM, UAC), reused servers, and broken parent chains are not
 visible. Legacy tools opt in with `WNICE_AUDIT=1` (exact value); other values
-are off. `cy`, `cx`, `admin`, and `uiup` do not take the flag or read the
+are off, and `wnice --wsl` ignores the variable (only the explicit `--audit`
+with `--wsl` is a usage error). `cy`, `cx`, `admin`, and `uiup` do not take the flag or read the
 variable.
 
 `--adopt NAME[,NAME...]` puts already running processes with these image names
@@ -70,8 +74,15 @@ for them), so its limits also cover a server that was started before the
 wrapper. Only processes of the same user are considered. Names are exact and
 case-insensitive; `NAME` and `NAME.exe` are the same, paths and wildcards are
 rejected, and so is a name starting with `-` (a forgotten name in
-`wnice --adopt -- cmd` is a usage error, not a search for `--.exe`). An adopted process keeps the limits until it exits; it is killed with
-the job on `--timeout` (exit 124), but not on a normal wrapper exit. Processes
+`wnice --adopt -- cmd` is a usage error, not a search for `--.exe`). A name is
+an image name, not a command line: `--adopt node` takes every `node.exe` of
+the user - other tools' and the helper processes of an agent session
+included - except wnice itself, its ancestors and the command. An adopted
+process keeps the limits until it exits; it is killed with the job on
+`--timeout` (exit 124) and when wnice itself is killed (Ctrl+C in its
+console, a closed terminal, `taskkill`), because closing the job kills its
+members - an adopted server in another window dies then although nothing was
+sent to it - but not on a normal wrapper exit. Processes
 it had started before adoption are not covered, processes it starts afterwards
 are. Do not adopt editors, IDEs, or anything that must outlive the command. A
 process that already lives in an incompatible job refuses: wnice prints one line
@@ -147,8 +158,10 @@ shows `?`.
 It changes nothing, needs no elevation (an owner it cannot inspect is counted,
 not dropped), and is accepted only as the whole command line: `wnice --jobs`
 with a command or any other option is a usage error - one stderr line, exit
-code 2. After the first `--` it is an ordinary argument of the command:
-`wnice -- cmd --jobs` runs `cmd` with that argument.
+code 2 - as long as `--jobs` stands among the wnice options. From the
+command's first word on, and after the first `--`, it is an ordinary argument
+of the command, as in 0.4.0: `wnice cargo build --jobs 4` and
+`wnice -- cmd --jobs` run the command with that argument.
 
 ## What a CPU cap covers
 

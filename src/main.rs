@@ -23,12 +23,10 @@ fn main() -> ExitCode {
                 return ExitCode::from(0);
             }
             Ok(wnice::cli::Action::Run(mut cfg)) => {
-                cfg.audit |=
-                    wnice::front::audit_env_enabled(std::env::var("WNICE_AUDIT").ok().as_deref());
-                if cfg.audit && cfg.wsl.is_some() {
-                    eprintln!("wnice: --audit cannot be combined with --wsl");
-                    return ExitCode::from(2);
-                }
+                wnice::front::apply_audit_env(
+                    &mut cfg,
+                    std::env::var("WNICE_AUDIT").ok().as_deref(),
+                );
                 let code = wnice::run::run(&cfg, sys);
                 // process::exit passes the full 32-bit code on Windows, so a
                 // negative NTSTATUS from run() passes through bit-cast.

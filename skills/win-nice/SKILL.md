@@ -42,25 +42,30 @@ Every tool prints detailed help with examples for `--help` (`wnice --help`,
 `capc --help`, ...); usage errors exit `1`, except the conflicts of the newer
 opt-in flags (`--jobs` with anything else; `--no-servers`, `--audit` or
 `--adopt` with `--wsl`), which exit `2` with one stderr line.
-`wnice --jobs` on its own (no command, no other option; anything else before
-a `--` is a usage error, one stderr line, exit 2) is a read-only report of
-the running wnice jobs;
+`wnice --jobs` on its own (no command, no other option; anything else beside
+a `--jobs` among the wnice options is a usage error, one stderr line, exit 2;
+from the command's first word on it is the command's own argument) is a
+read-only report of the running wnice jobs;
 see "Units, and what a limit does not cover".
 
 `--audit` reports job accounting and same-user processes created after command
 start, outside the job, whose parent chain validates creation times back to the
 root command. Suspects are not proven leaks; service launches (WMI, Task
 Scheduler, COM, UAC), reused servers, and broken parent chains are not visible.
-Legacy tools opt in only with `WNICE_AUDIT=1` (exact value); `cy`, `cx`,
-`admin` and `uiup` neither accept the flag nor read the variable.
+Legacy tools opt in only with `WNICE_AUDIT=1` (exact value; `wnice --wsl`
+ignores it); `cy`, `cx`, `admin` and `uiup` neither accept the flag nor read
+the variable.
 
 `wnice --adopt NAME[,NAME...] [limit options] -- <command> [args...]` puts
 already running processes of the same user with these exact image names into
 the command's job while it runs (`NAME` and `NAME.exe` are the same; paths,
 wildcards and names starting with `-` are rejected, so `--adopt -- cmd` is a
-usage error). An adopted process keeps the limits until it exits and
-is killed with the job on `--timeout`. Processes it started before adoption are
-not covered. Do not adopt editors, IDEs, or anything that must outlive the
+usage error). A name is an image name, not a command line: `--adopt node` takes
+every `node.exe` of the user, an agent session's helper processes included
+(not wnice, its ancestors or the command). An adopted process keeps the limits
+until it exits; it is killed with the job on `--timeout` and when wnice itself
+is killed (Ctrl+C, closed terminal), but not on a normal exit. Processes it
+started before adoption are not covered. Do not adopt editors, IDEs, or anything that must outlive the
 command. A process in an incompatible job may refuse (one stderr line). Not
 available to the legacy names, `--wsl` or `WNICE_AGENT_LIMITS`.
 

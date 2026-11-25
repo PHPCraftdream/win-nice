@@ -129,7 +129,8 @@ inspection (--jobs):
                      and for a nested job 'job N machine share: at most X% all
                      / Y% one (...)', the product of the hard caps along its
                      proven parent chain ('?' when a link is unknown).
-                     --jobs takes no command and no other option (exit 2).
+                     --jobs takes no command and no other option (exit 2); after
+                     the command's first word it is the command's own argument.
 
 no-servers (--no-servers):
   wnice --no-servers [limit options] -- <command> [args...]
@@ -138,8 +139,10 @@ no-servers (--no-servers):
                      command when those variables are not already set. Existing
                      GRADLE_OPTS is preserved and gets -Dorg.gradle.daemon=false
                      unless it already contains org.gradle.daemon=. SCCACHE_SERVER_PORT
-                     uses a currently free loopback port when unset; failure to
-                     choose one prints a note and does not stop the command.
+                     uses a currently free loopback port when unset (new on
+                     every run: a sccache server it starts is not shared and
+                     lives until sccache's idle timeout); failure to choose
+                     one prints a note and does not stop the command.
                      This affects only servers started by this command, not
                      servers already running or tools delegating to them.
                      Cannot be combined with --wsl (exit 2).
@@ -151,7 +154,8 @@ audit (--audit, or WNICE_AUDIT=1 for legacy tools):
   COM servers, UAC), work in reused servers already running, and broken parent
   chains are not visible. The command's exit code is passed through unchanged.
   cy, cx, admin and uiup do not accept this option; legacy tools use
-  WNICE_AUDIT=1 (exact value). Cannot be combined with --wsl (exit 2).
+  WNICE_AUDIT=1 (exact value), which --wsl ignores. --audit cannot be combined
+  with --wsl (exit 2).
 
 adopt (--adopt):
   wnice --adopt NAME[,NAME...] [limit options] -- <command> [args...]
@@ -159,9 +163,11 @@ adopt (--adopt):
                      the same user whose image name is NAME (exact match,
                      case-insensitive, no wildcards, paths or leading '-';
                      NAME and NAME.exe are the same) into the command's job.
-                     An adopted process keeps the limits until it exits;
-                     --timeout (exit 124) kills it with the job, a normal
-                     wrapper exit does not. Do not adopt editors, IDEs or
+                     A name is an image name, so 'node' takes every node.exe
+                     of the user. An adopted process keeps the limits until it
+                     exits; --timeout (exit 124) or a killed wnice (Ctrl+C,
+                     closed terminal) kills it with the job, a normal wrapper
+                     exit does not. Do not adopt editors, IDEs or
                      anything that must outlive the command. A process in an
                      incompatible job may refuse (one line per process on
                      stderr). Not available to the legacy names or
@@ -400,6 +406,21 @@ mod tests {
         }
         assert_eq!(text("normal"), None);
         assert_eq!(text("cy"), None, "cy/cx forward --help to the agent");
+    }
+
+    #[test]
+    fn wnice_help_states_the_adopt_audit_and_servers_caveats() {
+        let t = text("wnice").unwrap();
+        for want in [
+            "takes every node.exe",
+            "closed terminal",
+            "which --wsl ignores",
+            "idle timeout",
+            "after
+                     the command's first word it is the command's own argument",
+        ] {
+            assert!(t.contains(want), "{want}");
+        }
     }
 
     #[test]
