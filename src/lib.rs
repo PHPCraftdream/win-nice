@@ -8,8 +8,20 @@ pub mod run;
 
 fn windows_environment_block(environment: &[(std::ffi::OsString, std::ffi::OsString)]) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
-    let mut entries: Vec<Vec<u16>> = environment
-        .iter()
+    // Sorted by name, case-insensitively (ASCII upper-cased, as the OS does for
+    // names): `ProgramFiles` before `ProgramFiles(x86)`. The `=` of an entry
+    // is no part of the name, so it must not take part in the comparison.
+    let upper = |unit: u16| {
+        if (b'a' as u16..=b'z' as u16).contains(&unit) {
+            unit - 32
+        } else {
+            unit
+        }
+    };
+    let mut sorted: Vec<&(std::ffi::OsString, std::ffi::OsString)> = environment.iter().collect();
+    sorted.sort_by_cached_key(|(key, _)| key.encode_wide().map(upper).collect::<Vec<u16>>());
+    let entries: Vec<Vec<u16>> = sorted
+        .into_iter()
         .map(|(key, value)| {
             let mut entry: Vec<u16> = key.encode_wide().collect();
             entry.push(b'=' as u16);
@@ -18,11 +30,6 @@ fn windows_environment_block(environment: &[(std::ffi::OsString, std::ffi::OsStr
             entry
         })
         .collect();
-    entries.sort_by(|a, b| {
-        String::from_utf16_lossy(a)
-            .to_ascii_lowercase()
-            .cmp(&String::from_utf16_lossy(b).to_ascii_lowercase())
-    });
     let mut block: Vec<u16> = entries.into_iter().flatten().collect();
     block.push(0);
     if block.len() == 1 {
@@ -35,6 +42,40 @@ fn windows_environment_block(environment: &[(std::ffi::OsString, std::ffi::OsStr
 mod windows_environment_block_tests {
     use super::windows_environment_block;
     use std::ffi::OsString;
+
+    #[test]
+    fn entries_are_sorted_by_name_case_insensitively() {
+        let pairs = [
+            ("ProgramFiles(x86)", "a"),
+            ("zeta", "1"),
+            ("ProgramFiles", "b"),
+            ("Alpha", "2"),
+            ("=C:", "C:\\x"),
+            ("alpha2", "3"),
+        ];
+        let env: Vec<(OsString, OsString)> = pairs
+            .iter()
+            .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+            .collect();
+        let block = windows_environment_block(&env);
+        let text: Vec<String> = block
+            .split(|unit| *unit == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(String::from_utf16_lossy)
+            .collect();
+        assert_eq!(
+            text,
+            [
+                "=C:=C:\\x",
+                "Alpha=2",
+                "alpha2=3",
+                "ProgramFiles=b",
+                "ProgramFiles(x86)=a",
+                "zeta=1",
+            ]
+        );
+        assert_eq!(&block[block.len() - 2..], [0, 0]);
+    }
 
     #[test]
     fn empty_environment_has_double_nul_terminator() {

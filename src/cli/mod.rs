@@ -4,6 +4,7 @@
 //! everything after belongs verbatim to the wrapped command.
 
 mod adopt;
+mod jobs;
 
 use crate::run::wsl::WslMode;
 use crate::{Config, MemSpec, PriorityClass};
@@ -384,10 +385,10 @@ fn validate(cfg: &Config) -> Result<(), ParseError> {
 /// whole command line a `ParseError::JobsConflict` unless it is the only
 /// argument. Anything at or after the first `--` is an ordinary command token.
 pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, ParseError> {
-    // `--jobs` is a whole-process action, decided before any other argument is
-    // interpreted, so an invalid neighbour cannot change the verdict.
-    let before_dash_dash = args.iter().position(|a| a == "--").unwrap_or(args.len());
-    if args[..before_dash_dash].iter().any(|a| a == "--jobs") {
+    // `--jobs` is a whole-process action, decided before any other option is
+    // interpreted, so an invalid neighbour cannot change the verdict. Past the
+    // options (the command's first word, or `--`) it is the command's argument.
+    if jobs::among_options(args) {
         return if args.len() == 1 {
             Ok(Action::Jobs)
         } else {
@@ -902,7 +903,6 @@ mod tests {
             &["-V", "--jobs"],
             &["-c", "10", "--jobs", "cmd"],
             &["--jobs", "idle"],
-            &["cmd", "--jobs"],
         ] {
             assert_eq!(jobs_conflict(v), JOBS_CONFLICT, "args {v:?}");
         }
@@ -921,6 +921,37 @@ mod tests {
             Some(Action::Version)
         );
         assert_eq!(parse_args(&args(&["-V"]), 8).ok(), Some(Action::Version));
+    }
+
+    #[test]
+    fn jobs_after_the_command_word_is_an_ordinary_argument() {
+        // 0.4.0 passed everything after the first non-option token on verbatim.
+        for (v, want) in [
+            (&["cmd", "--jobs"][..], &["cmd", "--jobs"][..]),
+            (&["-c", "10", "cmd", "--jobs"], &["cmd", "--jobs"]),
+            (
+                &["-p", "idle", "cargo", "build", "--jobs", "4"],
+                &["cargo", "build", "--jobs", "4"],
+            ),
+            (
+                &["cmd", "-c", "10", "--jobs"],
+                &["cmd", "-c", "10", "--jobs"],
+            ),
+            (&["-", "--jobs"], &["-", "--jobs"]),
+            (&["--wsl=Debian", "cmd", "--jobs"], &["cmd", "--jobs"]),
+        ] {
+            assert_eq!(run(v).command, want, "args {v:?}");
+        }
+    }
+
+    #[test]
+    fn jobs_as_an_option_value_is_that_options_value_error() {
+        assert_eq!(err(&["-c", "--jobs"]), "invalid -c/--cpu value '--jobs'");
+        assert_eq!(
+            err(&["-p", "--jobs", "cmd"]),
+            "invalid -p/--priority value '--jobs'"
+        );
+        assert_eq!(err(&["--adopt", "--jobs", "cmd"]), "invalid --adopt value");
     }
 
     #[test]

@@ -112,15 +112,12 @@ fn jobs_row(text: &str, pid: u32) -> String {
     panic!("no JOBS row owned by pid {pid} in the report:\n{text}");
 }
 
-// ------------------------------------------------------------------- tests
-
-fn test_jobs_report_lists_a_real_capped_tree() {
-    // Breaks if the report stops attributing a capped job to its owner, or
-    // reports `-c 20` as anything but a hard 20%-of-all-cores cap.
-    check_probe_depth();
+/// Start a `-c <cap>` wrapper around a blocking probe and wait for its ready
+/// line. The returned guard ends the tree on every exit path.
+fn start_tree(cap: &str) -> Tree {
     let mut child = Command::new(env!("CARGO_BIN_EXE_wnice"))
         .creation_flags(CREATE_NO_WINDOW)
-        .args(["-c", "20", "--"])
+        .args(["-c", cap, "--"])
         .arg(probe_exe())
         .env("WNICE_PROBE", "ready-wait-eof")
         .env("WNICE_PROBE_DEPTH", (probe_depth() + 1).to_string())
@@ -144,6 +141,16 @@ fn test_jobs_report_lists_a_real_capped_tree() {
         stderr_tail(&mut tree.child)
     );
     assert_eq!(line.trim(), "ready", "probe announced {line:?}");
+    tree
+}
+
+// ------------------------------------------------------------------- tests
+
+fn test_jobs_report_lists_a_real_capped_tree() {
+    // Breaks if the report stops attributing a capped job to its owner, or
+    // reports `-c 20` as anything but a hard 20%-of-all-cores cap.
+    check_probe_depth();
+    let tree = start_tree("20");
 
     let report = run(&["--jobs"]);
     let code = report.status.code();
@@ -200,7 +207,6 @@ fn test_jobs_flag_usage_errors() {
         vec!["--jobs", "-c"],
         vec!["-V", "--jobs"],
         vec!["--jobs", "idle"],
-        vec!["cmd", "--jobs"],
     ] {
         let o = run(&args);
         let code = o.status.code();
@@ -264,6 +270,67 @@ fn test_jobs_flag_usage_errors() {
     );
 }
 
+fn test_jobs_report_lists_two_separate_trees() {
+    // Two unrelated wrappers hold two different job objects; the report must
+    // keep them as two rows, each with its own cap. A report that merged jobs
+    // (for example because the kernel object address is hidden from an
+    // unprivileged caller) would show one row, or the wrong cap, here.
+    check_probe_depth();
+    let first = start_tree("20");
+    let second = start_tree("30");
+
+    let report = run(&["--jobs"]);
+    assert_eq!(
+        report.status.code(),
+        Some(0),
+        "wnice --jobs failed: stderr={}",
+        stderr(&report)
+    );
+    let text = stdout(&report);
+    let row_a = jobs_row(&text, first.child.id());
+    let row_b = jobs_row(&text, second.child.id());
+    assert_ne!(
+        row_a, row_b,
+        "two jobs must be two rows:
+{text}"
+    );
+    assert!(
+        row_a.contains("20.0% all"),
+        "first tree: {row_a:?}
+{text}"
+    );
+    assert!(
+        row_b.contains("30.0% all"),
+        "second tree: {row_b:?}
+{text}"
+    );
+    let id = |row: &str| row.split_whitespace().next().map(str::to_owned);
+    assert_ne!(id(&row_a), id(&row_b), "rows must carry distinct ids");
+
+    assert_eq!(first.end(), Some(0));
+    assert_eq!(second.end(), Some(0));
+}
+
+fn test_jobs_after_the_command_is_an_ordinary_argument() {
+    // 0.4.0 passed every argument after the first non-option token to the
+    // command verbatim; `--jobs` there must not become the report or an error.
+    for args in [
+        vec!["cmd", "/c", "echo", "--jobs"],
+        vec!["-c", "50", "cmd", "/c", "echo", "--jobs"],
+        vec!["--", "cmd", "/c", "echo", "--jobs"],
+    ] {
+        let o = run(&args);
+        assert_eq!(
+            o.status.code(),
+            Some(0),
+            "args {args:?}: stderr={}",
+            stderr(&o)
+        );
+        assert_eq!(stdout(&o).trim(), "--jobs", "args {args:?}");
+        assert!(o.stderr.is_empty(), "args {args:?}: {}", stderr(&o));
+    }
+}
+
 // -------------------------------------------------------------------- main --
 
 const TESTS: &[(&str, fn())] = &[
@@ -272,6 +339,14 @@ const TESTS: &[(&str, fn())] = &[
         test_jobs_report_lists_a_real_capped_tree,
     ),
     ("jobs_flag_usage_errors", test_jobs_flag_usage_errors),
+    (
+        "jobs_report_lists_two_separate_trees",
+        test_jobs_report_lists_two_separate_trees,
+    ),
+    (
+        "jobs_after_the_command_is_an_ordinary_argument",
+        test_jobs_after_the_command_is_an_ordinary_argument,
+    ),
 ];
 
 fn main() {

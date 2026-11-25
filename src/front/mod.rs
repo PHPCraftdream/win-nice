@@ -29,6 +29,15 @@ pub fn audit_env_enabled(value: Option<&str>) -> bool {
     value == Some("1")
 }
 
+/// Apply `WNICE_AUDIT` to a parsed run. An explicit `--audit` stays; the
+/// variable only reaches the Windows engine, since `--wsl` has no audit, so a
+/// global `WNICE_AUDIT=1` never turns a `--wsl` run into an error.
+pub fn apply_audit_env(cfg: &mut Config, value: Option<&str>) {
+    if cfg.wsl.is_none() && audit_env_enabled(value) {
+        cfg.audit = true;
+    }
+}
+
 const AGENT_LIMITS_ONLY: &str =
     "only wnice options (-p, -c, -t, -m, -n, -s, --boost, --no-servers)";
 
@@ -123,6 +132,33 @@ pub fn dispatch(stem: &str, args: &[String]) -> Option<i32> {
 mod tests {
     use super::*;
     use crate::{MemSpec, PriorityClass};
+
+    #[test]
+    fn audit_environment_never_reaches_a_wsl_run() {
+        let wsl = || Some(crate::run::wsl::WslMode { distro: None });
+        let mut cfg = Config::default();
+        apply_audit_env(&mut cfg, Some("1"));
+        assert!(cfg.audit);
+
+        let mut cfg = Config::default();
+        apply_audit_env(&mut cfg, Some("yes"));
+        apply_audit_env(&mut cfg, None);
+        assert!(!cfg.audit);
+
+        let mut cfg = Config {
+            wsl: wsl(),
+            ..Config::default()
+        };
+        apply_audit_env(&mut cfg, Some("1"));
+        assert!(!cfg.audit, "the variable is ignored with --wsl");
+
+        let mut cfg = Config {
+            audit: true,
+            ..Config::default()
+        };
+        apply_audit_env(&mut cfg, None);
+        assert!(cfg.audit, "an explicit --audit is never cleared");
+    }
 
     #[test]
     fn audit_environment_is_exact_one() {

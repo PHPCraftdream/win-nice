@@ -128,6 +128,22 @@ fn legacy_wnice_env_audit() {
     assert!(o.stdout.is_empty());
 }
 
+fn explicit_audit_with_wsl_is_a_usage_conflict() {
+    // Parse-level, so no WSL process is ever started: the flag itself conflicts
+    // (exit 2, one line). WNICE_AUDIT=1 with --wsl is covered by the unit test
+    // of front::apply_audit_env, because the run would reach the real engine.
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_wnice"));
+    cmd.creation_flags(CREATE_NO_WINDOW)
+        .args(["--audit", "--wsl", "--", "true"])
+        .env("WNICE_AUDIT", "1");
+    let o = ChildGuard::spawn(cmd).output();
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert_eq!(
+        stderr(&o).trim_end(),
+        "wnice: --audit cannot be combined with --wsl"
+    );
+}
+
 fn main() {
     if let Ok(mode) = std::env::var("WNICE_PROBE") {
         probe_support::probe_main(&mode);
@@ -138,4 +154,6 @@ fn main() {
     println!("ok legacy_capc_audit_env");
     legacy_wnice_env_audit();
     println!("ok legacy_wnice_env_audit");
+    explicit_audit_with_wsl_is_a_usage_conflict();
+    println!("ok explicit_audit_with_wsl_is_a_usage_conflict");
 }
