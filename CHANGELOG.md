@@ -10,7 +10,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   processes with these exact image names (`NAME` and `NAME.exe` are the same)
   into the command's Job Object while it runs. An adopted process keeps the
   limits until it exits and is killed with the job on `--timeout`. Not
-  accepted by the legacy names, `--wsl` or `WNICE_AGENT_LIMITS`.
+  accepted by the legacy names, `--wsl` or `WNICE_AGENT_LIMITS`. A name
+  starting with `-` is refused like a path or wildcard, so a forgotten name
+  (`wnice --adopt -- cmd`) is a usage error instead of a silent search for
+  `--.exe`.
 
 - `wnice --audit` reports job accounting and same-user process suspects after
   the command ends. Legacy tools can opt in with `WNICE_AUDIT=1`; suspects are
@@ -42,8 +45,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   flag, an invalid option value, or a repeated `--jobs` - is a usage error
   with exit 2 and a single line on stderr, so `wnice cmd --jobs` is that
   error too, while a `--jobs` at or after the first `--` is an ordinary
-  argument of the wrapped command (`wnice -- cmd --jobs`). `wnice --help`
-  is the only place it is documented; only invocations whose arguments
+  argument of the wrapped command (`wnice -- cmd --jobs`). Of the help texts
+  only `wnice --help` documents it; only invocations whose arguments
   contain `--jobs` change, and every other invocation behaves exactly as
   before.
 
@@ -84,15 +87,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `set WNICE_AGENT_LIMITS=-p idle -c 10 -m 10g` once per shell instead of
   editing every `cy` command. No quoting rules beyond whitespace separation,
   and the value goes through the same parser and validation as the `wnice`
-  command line, so values and error wording cannot drift. A command or any
-  other non-option token, `--`, `--wsl`, `--jobs`, `--help` and `--version`
-  are refused: one stderr line naming the variable with the reason, exit 1,
+  command line, so values and error wording cannot drift. `--no-servers` is
+  accepted too (it sets the agent's environment, it is not a limit). A
+  command or any other non-option token, `--`, `--wsl`, `--jobs`, `--audit`,
+  `--adopt`, `--help` and `--version` are refused: one stderr line naming the variable with the reason, exit 1,
   nothing started. Unset, empty or whitespace-only is exactly the 0.4.0
   behaviour (`cy`/`cx` stdout, stderr, exit code and the job they create are
   unchanged), and `wnice`, the legacy tools, `admin` and `uiup` never read
   the variable.
 
 ### Changed
+
+- `wnice --help` documents every new opt-in feature in sections appended
+  after the 0.4.0 text (which stays an exact prefix): `--jobs`,
+  `--no-servers`, `--audit` / `WNICE_AUDIT=1`, `--adopt` and
+  `WNICE_AGENT_LIMITS` for `cy`/`cx`, including which combinations are a
+  usage error with exit 2. Of the other tools only `admin --help` grew
+  (`--keep-limits`, above).
 
 - Internal `wnice --jobs` edge cases now flag partial process enumeration, avoid naming unproven nested parents, and count failed owners once in footer summaries.
 

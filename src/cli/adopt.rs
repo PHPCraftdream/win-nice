@@ -2,7 +2,8 @@
 
 /// Normalized image names: lower case, always with the `.exe` suffix (`NAME`
 /// and `NAME.exe` are the same), duplicates dropped. No paths, wildcards or
-/// empty elements; at most 16 names of at most 64 characters.
+/// empty elements, no element starting with `-`; at most 16 names of at most
+/// 64 characters.
 pub(super) fn parse_adopt_names(value: &str) -> Result<Vec<String>, String> {
     let invalid = || "invalid --adopt value".to_string();
     let parts: Vec<&str> = value.split(',').collect();
@@ -11,7 +12,9 @@ pub(super) fn parse_adopt_names(value: &str) -> Result<Vec<String>, String> {
     }
     let mut names = Vec::with_capacity(parts.len());
     for part in parts {
+        // A leading '-' is a forgotten value (`--adopt -- cmd`), not a name.
         if part.is_empty()
+            || part.starts_with('-')
             || part.chars().count() > 64
             || part
                 .chars()
@@ -62,6 +65,9 @@ mod tests {
             "*",
             "?",
             "name:stream.exe",
+            "--",
+            "-p",
+            "node,-x",
             long.as_str(),
             many,
         ] {
