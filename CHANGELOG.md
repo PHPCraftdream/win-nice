@@ -39,7 +39,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   A nested job (e.g. `capc 50 capm 50 ...`) shows its rate as a share of
   its parent job's allowance, never of the whole machine: the immediate
   parent is named when the answers prove it, otherwise the row shows it as
-  `nested (parent ?)`. `--jobs` is decided before any other argument is
+  `nested (parent ?)`. Lines under the job table add what the fixed-width
+  cells cannot: `job N command: ...` with the whole command line of a row
+  whose `command` cell was cut (control characters flattened, 1024 characters
+  at most; arguments may hold secrets), and `job N machine share: at most X%
+  all / Y% one (...)` for a nested job, the product of the hard caps along its
+  proven parent chain (an uncapped link passes the others through, a soft cap
+  is no ceiling, an unknown or unproven link shows `?`). `--jobs` is decided
+  before any other argument is
   interpreted and is accepted only as the whole command line: any other
   argument before the first `--` - a command, an option, a help or version
   flag, an invalid option value, or a repeated `--jobs` - is a usage error

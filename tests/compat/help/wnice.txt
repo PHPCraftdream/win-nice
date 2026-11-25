@@ -122,6 +122,11 @@ inspection (--jobs):
                      user) is counted in the footer instead of being dropped.
                      -c is a percent of ALL logical processors, so a 10% cap is
                      160% of one processor on 16 of them.
+                     Under the job table: 'job N command: ...' with the whole
+                     command line of a row that was cut (may contain secrets),
+                     and for a nested job 'job N machine share: at most X% all
+                     / Y% one (...)', the product of the hard caps along its
+                     proven parent chain ('?' when a link is unknown).
                      --jobs takes no command and no other option (exit 2).
 
 no-servers (--no-servers):

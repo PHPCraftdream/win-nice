@@ -204,7 +204,11 @@ none of them (neither rules out a cap from a non-wnice job or an uninspected
 wrapper), `?` for a value no
 query established, and a `- inventory incomplete` qualifier when some owner
 could not be inspected. A nested cap there is printed as a share of its
-parent, not of the machine.
+parent, not of the machine; the lines under the job table add the full command
+of a cut row (`job N command: ...`, may contain secrets) and, for a nested job,
+`job N machine share: at most X% all / Y% one (...)`, the product of the hard
+caps along its proven parent chain (`?` when a link is unknown or unproven,
+`no hard ceiling` for soft caps only).
 
 ## Chaining
 

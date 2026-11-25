@@ -5,6 +5,8 @@
 //! up. No line carries trailing spaces. An unknown value renders as `"?"`, so a
 //! failed query is never mistaken for "no limit" or "no job".
 
+mod details;
+
 use super::{
     CapState, CpuCap, JobInfo, LimitFields, Nesting, OwnerFailure, ProcInfo, Scan, Uninspected,
 };
@@ -66,6 +68,11 @@ pub fn render(scan: &Scan) -> String {
         );
     }
     lines.push(String::new());
+    let extra = details::lines(scan);
+    if !extra.is_empty() {
+        lines.extend(extra);
+        lines.push(String::new());
+    }
     lines.push(format!(
         "PROCESSES: {} busiest process(es) over {} ms (percent of all logical processors / of one)",
         scan.processes.len(),
