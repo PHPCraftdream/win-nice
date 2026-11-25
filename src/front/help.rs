@@ -170,8 +170,13 @@ adopt (--adopt):
                      exit does not. Do not adopt editors, IDEs or
                      anything that must outlive the command. A process in an
                      incompatible job may refuse (one line per process on
-                     stderr). Not available to the legacy names or
-                     WNICE_AGENT_LIMITS; with --wsl: usage error (exit 2).
+                     stderr). An adopted process counts toward -m (the job's
+                     committed memory), so a large server may start failing
+                     allocations. -n is refused with --adopt (exit 2): a
+                     process that would pass the active-process limit is
+                     terminated when it joins. Not available to the legacy
+                     names or WNICE_AGENT_LIMITS; with --wsl: usage error
+                     (exit 2).
 
 agent limits (WNICE_AGENT_LIMITS, read only by cy and cx):
   set WNICE_AGENT_LIMITS=-p idle -c 10 -m 10g
@@ -317,7 +322,10 @@ a CPU rate control that is not a hard cap, an affinity mask that is not a
 contiguous run from CPU 0, an unknown priority class - gets its own stderr
 line and is left out; the rest is still kept. Not kept by design: the
 wall-clock timeout -s (it lives in the wrapper process, not in the job),
-and the caps of outer jobs when the caller's job is nested. In no job, or
+and the caps of outer jobs when the caller's job is nested; when two or more
+wnice jobs around admin prove the nesting, one line on stderr says so (a CPU
+cap there is a share of its parent's allowance, so the elevated tree may get
+a larger share of the machine than the caller). In no job, or
 with none of those limits, admin prints one note and behaves exactly like
 plain admin. When the caller's job limits cannot be read, or the wnice.exe
 next to admin.exe is not this executable's front, admin refuses to elevate
@@ -414,6 +422,8 @@ mod tests {
         for want in [
             "takes every node.exe",
             "closed terminal",
+            "counts toward -m",
+            "-n is refused with --adopt (exit 2)",
             "which --wsl ignores",
             "idle timeout",
             "after

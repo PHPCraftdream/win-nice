@@ -482,6 +482,17 @@ pub fn cpu_time_100ns(proc: &Handle) -> Option<u64> {
     Some(ticks(&kernel) + ticks(&user))
 }
 
+/// Creation time of `proc` (FILETIME ticks): with the PID it names one process.
+pub fn creation_time(proc: &Handle) -> Option<u64> {
+    let mut creation: FILETIME = unsafe { std::mem::zeroed() };
+    let mut exit: FILETIME = unsafe { std::mem::zeroed() };
+    let mut kernel: FILETIME = unsafe { std::mem::zeroed() };
+    let mut user: FILETIME = unsafe { std::mem::zeroed() };
+    let ok =
+        unsafe { GetProcessTimes(proc.raw(), &mut creation, &mut exit, &mut kernel, &mut user) };
+    (ok != 0).then(|| ticks(&creation))
+}
+
 fn ticks(t: &FILETIME) -> u64 {
     (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime)
 }

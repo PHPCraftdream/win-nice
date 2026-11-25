@@ -41,9 +41,7 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
             Err(
-                wnice::cli::ParseError::JobsConflict(msg)
-                | wnice::cli::ParseError::NoServersWslConflict(msg)
-                | wnice::cli::ParseError::AdoptWslConflict(msg),
+                wnice::cli::ParseError::JobsConflict(msg) | wnice::cli::ParseError::Conflict(msg),
             ) => {
                 eprintln!("wnice: {msg}");
                 return ExitCode::from(2);

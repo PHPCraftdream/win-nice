@@ -39,7 +39,7 @@ wnice -p idle -c 50 -t 4 -m 50 -n 64 -s 600 -- npm run build
 | `-m, --memory <size>` | `capm` | job memory ceiling (`50` = 50% of RAM, `512m`, `2g`) |
 | `-n, --procs <n>` | `capn` | maximum simultaneously active processes |
 | `-s, --timeout <seconds>` | `caps` | wall-clock deadline, exit 124 |
-| `--adopt <NAME[,NAME...]>` | — | put already running same-user processes with these exact image names into the command's job (details below; not accepted by the legacy names or `WNICE_AGENT_LIMITS`) |
+| `--adopt <NAME[,NAME...]>` | — | put already running same-user processes with these exact image names into the command's job (details below; not accepted by the legacy names or `WNICE_AGENT_LIMITS`, and not together with `-n`) |
 | `--boost` | — | with `-p`: skip the job priority limit and apply the priority to every process via the booster (see "Priority above NORMAL without elevation") |
 | `--audit` | — | after exit, report job accounting and same-user process suspects (not proven leaks) |
 | `--no-servers` | — | disable selected build-tool server reuse for the launched command (details below; also accepted by `WNICE_AGENT_LIMITS`) |
@@ -86,8 +86,13 @@ sent to it - but not on a normal wrapper exit. Processes
 it had started before adoption are not covered, processes it starts afterwards
 are. Do not adopt editors, IDEs, or anything that must outlive the command. A
 process that already lives in an incompatible job refuses: wnice prints one line
-for that process and goes on. `--adopt` cannot be combined with `--wsl` and is
-not accepted by the legacy names or by `WNICE_AGENT_LIMITS`.
+for that process and goes on. An adopted process counts toward `-m`: the job's
+memory limit covers the committed memory of every member, so a large server
+may start failing allocations. `--adopt` cannot be combined with `-n`: Windows
+terminates a process that joins a job past its active-process limit, so wnice
+would kill the very servers it was asked to cap (usage error, exit 2). `--adopt`
+cannot be combined with `--wsl` and is not accepted by the legacy names or by
+`WNICE_AGENT_LIMITS`.
 
 The single-purpose tools below are the same machinery with one limit each,
 kept for their short positional syntax.
@@ -96,8 +101,8 @@ Every tool has built-in help with examples: `wnice --help`, `capc --help`,
 `idle -h`, `admin /?`, ... (`cy`/`cx` pass `--help` on to `claude`/`codex`).
 A usage error prints the tool's usage line and exits `1`. The newer opt-in
 `wnice` flags use exit `2` with one stderr line for their own conflicts:
-`--jobs` with anything else, and `--no-servers`, `--audit` or `--adopt`
-together with `--wsl`.
+`--jobs` with anything else, `--no-servers`, `--audit` or `--adopt` together
+with `--wsl`, and `--adopt` together with `-n`.
 
 ### What a CPU share actually guarantees
 
@@ -825,7 +830,12 @@ below 1, with a note on stderr. Every limit that cannot be kept - a soft cap,
 a sparse affinity mask, an unknown priority class - gets its own stderr line
 and is left out; the rest is still kept. Not carried: `-s` (the deadline lives
 in the wrapper process, not in the job) and the caps of outer jobs when the
-caller's job is nested. No job, or a job with none of those limits: one note,
+caller's job is nested. When two or more wnice jobs around `admin` prove the
+nesting, one stderr line says so: a CPU cap in the caller's job is a share of
+its parent's allowance, so the elevated command may get a larger share of the
+machine than the caller had (`wnice --jobs` shows the machine-wide ceiling). A
+nesting through a job that is not a wnice job, or that could not be inspected,
+is not detected and stays silent. No job, or a job with none of those limits: one note,
 then plain `admin`. If the limits cannot be read, or the `wnice.exe` next to
 `admin.exe` is not this executable's front, it exits 1 before any UAC prompt
 instead of running unlimited. Already elevated, the flag changes nothing - the
@@ -1028,7 +1038,8 @@ package ships it.
   those two launchers; unset or blank means no limits.
 - `WNICE_AUDIT` — exactly `1` turns on the `--audit` report for the
   single-purpose tools (`idle`, `capc`, ...) and for `wnice`; any other value
-  is off. `cy`, `cx`, `admin` and `uiup` never read it.
+  is off, and `wnice --wsl` ignores it (the explicit `--audit --wsl` is a usage
+  error, exit 2). `cy`, `cx`, `admin` and `uiup` never read it.
 
 ## Testing
 

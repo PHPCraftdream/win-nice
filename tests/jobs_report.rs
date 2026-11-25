@@ -331,6 +331,51 @@ fn test_jobs_after_the_command_is_an_ordinary_argument() {
     }
 }
 
+/// The number of wnice jobs a probe reports itself in, started under `wrappers`
+/// nested `wnice -c` wrappers (0: started directly by this harness).
+fn nesting_seen_through(wrappers: &[&str]) -> usize {
+    check_probe_depth();
+    let (first, rest) = match wrappers.split_first() {
+        Some((first, rest)) => (Some(*first), rest),
+        None => (None, wrappers),
+    };
+    let mut command = match first {
+        Some(cap) => {
+            let mut c = Command::new(env!("CARGO_BIN_EXE_wnice"));
+            c.args(["-c", cap, "--"]);
+            for cap in rest {
+                c.arg(env!("CARGO_BIN_EXE_wnice")).args(["-c", cap, "--"]);
+            }
+            c.arg(probe_exe());
+            c
+        }
+        None => Command::new(probe_exe()),
+    };
+    let o = command
+        .creation_flags(CREATE_NO_WINDOW)
+        .env("WNICE_PROBE", "nesting-count")
+        .env("WNICE_PROBE_DEPTH", (probe_depth() + 1).to_string())
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn the nesting probe");
+    assert_eq!(o.status.code(), Some(0), "stderr={}", stderr(&o));
+    let text = stdout(&o);
+    let line = text.lines().last().unwrap_or("");
+    line.strip_prefix("nesting:")
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no nesting count in {text:?}"))
+}
+
+fn test_nesting_count_follows_the_job_chain() {
+    // The count behind admin's nested-caller note: every wnice job around the
+    // process counts once, and the harness's own surroundings are the baseline
+    // (a CI job that no wnice wrapper owns is not counted).
+    let base = nesting_seen_through(&[]);
+    assert_eq!(nesting_seen_through(&["20"]), base + 1);
+    assert_eq!(nesting_seen_through(&["20", "30"]), base + 2);
+    assert_eq!(nesting_seen_through(&["20", "30", "40"]), base + 3);
+}
+
 // -------------------------------------------------------------------- main --
 
 const TESTS: &[(&str, fn())] = &[
@@ -346,6 +391,10 @@ const TESTS: &[(&str, fn())] = &[
     (
         "jobs_after_the_command_is_an_ordinary_argument",
         test_jobs_after_the_command_is_an_ordinary_argument,
+    ),
+    (
+        "nesting_count_follows_the_job_chain",
+        test_nesting_count_follows_the_job_chain,
     ),
 ];
 

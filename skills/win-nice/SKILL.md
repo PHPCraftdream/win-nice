@@ -41,7 +41,7 @@ each.
 Every tool prints detailed help with examples for `--help` (`wnice --help`,
 `capc --help`, ...); usage errors exit `1`, except the conflicts of the newer
 opt-in flags (`--jobs` with anything else; `--no-servers`, `--audit` or
-`--adopt` with `--wsl`), which exit `2` with one stderr line.
+`--adopt` with `--wsl` or `-n`), which exit `2` with one stderr line.
 `wnice --jobs` on its own (no command, no other option; anything else beside
 a `--jobs` among the wnice options is a usage error, one stderr line, exit 2;
 from the command's first word on it is the command's own argument) is a
@@ -66,7 +66,10 @@ every `node.exe` of the user, an agent session's helper processes included
 until it exits; it is killed with the job on `--timeout` and when wnice itself
 is killed (Ctrl+C, closed terminal), but not on a normal exit. Processes it
 started before adoption are not covered. Do not adopt editors, IDEs, or anything that must outlive the
-command. A process in an incompatible job may refuse (one stderr line). Not
+command. A process in an incompatible job may refuse (one stderr line). An
+adopted process counts toward `-m` (the job's committed memory), so a large
+server may start failing allocations. `--adopt` cannot be combined with `-n`
+(a process joining past the active-process limit is terminated; exit 2). Not
 available to the legacy names, `--wsl` or `WNICE_AGENT_LIMITS`.
 
 ## Priority tools
@@ -293,8 +296,10 @@ the scope keeps running in the guest until
   a whole percent, never below 1; job memory; active-process limit;
   contiguous affinity; priority class) into the new job the elevated `wnice`
   creates. Every limit that cannot be kept is reported on stderr; the
-  wall-clock timeout and outer-job caps are not carried; `admin` without the
-  flag is unchanged.
+  wall-clock timeout and outer-job caps are not carried (two or more wnice jobs
+  around `admin` prove the nesting and add one stderr line: a CPU cap there is
+  a share of its parent's, so the elevated command may get more of the machine;
+  other nesting is not detected); `admin` without the flag is unchanged.
 - `uiup` (no arguments) — one-shot `HIGH` priority boost for the live
   shell/UI/audio processes (`explorer`, `dwm`, `sihost`,
   `ShellExperienceHost`, `StartMenuExperienceHost`, `StartMenu`, `SearchApp`,

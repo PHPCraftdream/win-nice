@@ -42,18 +42,15 @@ pub enum ParseError {
     Usage(String),
     /// `--jobs` combined with anything else: `<msg>` on stderr, exit 2.
     JobsConflict(String),
-    /// `--no-servers` or `--audit` cannot be combined with `--wsl`: stderr, exit 2.
-    NoServersWslConflict(String),
-    AdoptWslConflict(String),
+    /// Options that cannot be combined (`--audit`, `--no-servers` or `--adopt`
+    /// with `--wsl`; `--adopt` with `-n`): `<msg>` on stderr, exit 2.
+    Conflict(String),
 }
 
 impl ParseError {
     pub fn message(&self) -> &str {
         match self {
-            ParseError::Usage(m)
-            | ParseError::JobsConflict(m)
-            | ParseError::NoServersWslConflict(m)
-            | ParseError::AdoptWslConflict(m) => m,
+            ParseError::Usage(m) | ParseError::JobsConflict(m) | ParseError::Conflict(m) => m,
         }
     }
 }
@@ -348,17 +345,21 @@ fn parse_tokens(args: &[String], logical_cpus: u32) -> Result<Tokens, ParseError
 /// The whole-line option checks `parse_args` applies after the token loop.
 fn validate(cfg: &Config) -> Result<(), ParseError> {
     if cfg.audit && cfg.wsl.is_some() {
-        return Err(ParseError::NoServersWslConflict(
+        return Err(ParseError::Conflict(
             "--audit cannot be combined with --wsl".to_string(),
         ));
     }
     if !cfg.adopt.is_empty() && cfg.wsl.is_some() {
-        return Err(ParseError::AdoptWslConflict(
+        return Err(ParseError::Conflict(
             "--adopt cannot be combined with --wsl".to_string(),
         ));
     }
+    // Joining a process past the job's active-process limit terminates it.
+    if !cfg.adopt.is_empty() && cfg.procs.is_some() {
+        return Err(ParseError::Conflict(adopt::PROCS_CONFLICT.to_string()));
+    }
     if cfg.no_servers && cfg.wsl.is_some() {
-        return Err(ParseError::NoServersWslConflict(
+        return Err(ParseError::Conflict(
             "--no-servers cannot be combined with --wsl".to_string(),
         ));
     }
@@ -381,9 +382,11 @@ fn validate(cfg: &Config) -> Result<(), ParseError> {
 /// `logical_cpus` is the machine's logical processor count, used as the upper
 /// bound for `-t/--threads`.
 ///
-/// `--jobs` is a pre-scan: a `--jobs` token before the first `--` makes the
-/// whole command line a `ParseError::JobsConflict` unless it is the only
-/// argument. Anything at or after the first `--` is an ordinary command token.
+/// `--jobs` is a pre-scan over the wnice options only (before the command's
+/// first word and before `--`; value-taking options consume their value): found
+/// there it makes the whole command line a `ParseError::JobsConflict` unless it
+/// is the only argument. From the command's first word on it is an ordinary
+/// command token.
 pub fn parse_args(args: &[String], logical_cpus: u32) -> Result<Action, ParseError> {
     // `--jobs` is a whole-process action, decided before any other option is
     // interpreted, so an invalid neighbour cannot change the verdict. Past the
@@ -467,7 +470,7 @@ mod tests {
         assert!(err(&["--adopt=node"]).contains("unknown option"));
         assert_eq!(
             parse_args(&args(&["--adopt", "node", "--wsl", "--", "cmd"]), 8).unwrap_err(),
-            ParseError::AdoptWslConflict("--adopt cannot be combined with --wsl".into())
+            ParseError::Conflict("--adopt cannot be combined with --wsl".into())
         );
     }
 
@@ -478,7 +481,7 @@ mod tests {
         assert_eq!(cfg.cpu_percent, Some(25));
         assert_eq!(
             parse_args(&args(&["--no-servers", "--wsl", "--", "cmd"]), 8).unwrap_err(),
-            ParseError::NoServersWslConflict("--no-servers cannot be combined with --wsl".into())
+            ParseError::Conflict("--no-servers cannot be combined with --wsl".into())
         );
         assert_eq!(err(&["--no-servers"]), "no command given");
         assert_eq!(

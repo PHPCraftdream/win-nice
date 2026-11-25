@@ -77,54 +77,81 @@ impl OwnerMembership for RetainedJobs<'_> {
 /// The real inspector: no state, one snapshot per `Inspector::scan` call.
 pub struct RealInspector;
 
+/// The job inventory of one pass: every wnice-family job the current user's
+/// wrappers hold, before nesting is classified.
+struct Discovery {
+    processes: Vec<(String, u32)>,
+    owned: Vec<OwnedJob>,
+    owner_handles: Vec<Option<Handle>>,
+    inventory: Inventory,
+    own_sid: Option<win::OwnedSid>,
+}
+
+fn discover(me: u32) -> Discovery {
+    let mut inventory = Inventory::default();
+
+    // The handle table is the only way to reach another process's job
+    // handles; the job type index is resolved at runtime from a probe job.
+    let table = HandleTable::query();
+    let job_type = table.as_ref().and_then(win::job_type_index);
+    let own_sid = win::current_user();
+
+    // A failed snapshot is an incomplete inventory, never just no
+    // processes: nothing could have been recognised either.
+    let processes = match crate::front::native::process_snapshot_with_completeness() {
+        Some((list, complete)) => {
+            if !complete {
+                inventory.mark_incomplete();
+            }
+            list
+        }
+        None => {
+            inventory.mark_incomplete();
+            Vec::new()
+        }
+    };
+    let owners = recognised_owners(&processes, me);
+
+    // A failure that precedes every per-owner step leaves no owner
+    // inspected at all, but never stops the sampling pass.
+    let (owned, owner_handles) = match (&own_sid, &table, job_type) {
+        (None, ..) => {
+            inventory.discovery_failed(&owners, Uninspected::TokenQuery);
+            (Vec::new(), Vec::new())
+        }
+        (Some(_), None, _) => {
+            inventory.discovery_failed(&owners, Uninspected::HandleTable);
+            (Vec::new(), Vec::new())
+        }
+        (Some(_), Some(_), None) => {
+            inventory.discovery_failed(&owners, Uninspected::JobType);
+            (Vec::new(), Vec::new())
+        }
+        (Some(sid), Some(table), Some(job_type)) => {
+            inspect_owners(sid, table, job_type, &owners, &mut inventory)
+        }
+    };
+    Discovery {
+        processes,
+        owned,
+        owner_handles,
+        inventory,
+        own_sid,
+    }
+}
+
 impl super::Inspector for RealInspector {
     fn scan(&self) -> Scan {
         let logical_cpus = win::logical_cpus();
         let window_ms = SAMPLE_WINDOW.as_millis() as u64;
         let me = std::process::id();
-        let mut inventory = Inventory::default();
-
-        // The handle table is the only way to reach another process's job
-        // handles; the job type index is resolved at runtime from a probe job.
-        let table = HandleTable::query();
-        let job_type = table.as_ref().and_then(win::job_type_index);
-        let own_sid = win::current_user();
-
-        // A failed snapshot is an incomplete inventory, never just no
-        // processes: nothing could have been recognised either.
-        let processes = match crate::front::native::process_snapshot_with_completeness() {
-            Some((list, complete)) => {
-                if !complete {
-                    inventory.mark_incomplete();
-                }
-                list
-            }
-            None => {
-                inventory.mark_incomplete();
-                Vec::new()
-            }
-        };
-        let owners = recognised_owners(&processes, me);
-
-        // A failure that precedes every per-owner step leaves no owner
-        // inspected at all, but never stops the sampling pass.
-        let (owned, owner_handles) = match (&own_sid, &table, job_type) {
-            (None, ..) => {
-                inventory.discovery_failed(&owners, Uninspected::TokenQuery);
-                (Vec::new(), Vec::new())
-            }
-            (Some(_), None, _) => {
-                inventory.discovery_failed(&owners, Uninspected::HandleTable);
-                (Vec::new(), Vec::new())
-            }
-            (Some(_), Some(_), None) => {
-                inventory.discovery_failed(&owners, Uninspected::JobType);
-                (Vec::new(), Vec::new())
-            }
-            (Some(sid), Some(table), Some(job_type)) => {
-                inspect_owners(sid, table, job_type, &owners, &mut inventory)
-            }
-        };
+        let Discovery {
+            processes,
+            owned,
+            owner_handles,
+            inventory,
+            own_sid,
+        } = discover(me);
 
         let owned = with_nesting(owned, &owner_handles, inventory.complete());
         let jobs: Vec<JobInfo> = owned.iter().map(|j| j.info.clone()).collect();
@@ -140,6 +167,18 @@ impl super::Inspector for RealInspector {
             window_ms,
         }
     }
+}
+
+/// How many wnice-family jobs this very process is a member of, and whether
+/// the inventory behind that count was complete; `None` when a membership
+/// query failed. Two or more prove that its own job is nested; fewer prove
+/// nothing about a job that is not a wnice job or that was not inspected.
+pub fn jobs_containing_this_process() -> Option<(usize, bool)> {
+    let me = std::process::id();
+    let found = discover(me);
+    let own = win::open_query(me)?;
+    let ids = memberships(&own, &found.owned)?;
+    Some((ids.len(), found.inventory.complete()))
 }
 
 /// The wrapper processes worth inspecting, pid-ascending: this order decides

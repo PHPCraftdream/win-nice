@@ -16,7 +16,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `WNICE_AGENT_LIMITS`; refusals for other users' processes print nothing. A name
   starting with `-` is refused like a path or wildcard, so a forgotten name
   (`wnice --adopt -- cmd`) is a usage error instead of a silent search for
-  `--.exe`.
+  `--.exe`. `--adopt` together with `-n` is a usage error (exit 2, one line):
+  Windows terminates a process that joins a job past its active-process limit,
+  so wnice would kill the servers it was asked to cap. An adopted process counts
+  toward `-m` (the job's committed memory), so a large server may start failing
+  allocations. A process is told apart by PID and creation time, so a server
+  that restarts and is given its old PID is adopted again.
 
 - `wnice --audit` reports job accounting and same-user process suspects after
   the command ends. Legacy tools can opt in with `WNICE_AUDIT=1` (`wnice
@@ -41,7 +46,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only counted. Every value a query could not establish is shown as `?`,
   and a chain verdict (`UNCAPPED`, `NOT-IN-WNICE-JOB`) is given only when
   the inventory is complete - otherwise the fact carries an explicit
-  `- inventory incomplete` qualifier and a one-line legend explains it.
+  `- inventory incomplete` qualifier and a one-line legend explains it. A
+  partial process enumeration makes the inventory incomplete, an unproven
+  nested parent is never named, and an owner that failed is counted once in
+  the footer.
   A nested job (e.g. `capc 50 capm 50 ...`) shows its rate as a share of
   its parent job's allowance, never of the whole machine: the immediate
   parent is named when the answers prove it, otherwise the row shows it as
@@ -85,7 +93,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   refuses to elevate with exit 1 before the UAC prompt instead of running
   unlimited. Not kept by design: the wall-clock timeout (it lives
   in the wrapper process, not in the job) and the caps of outer jobs when the
-  caller's job is nested. Already elevated, the flag changes nothing.
+  caller's job is nested; when two or more wnice jobs around `admin` prove the
+  nesting, one stderr line says so (a CPU cap in the caller's job is a share of
+  its parent's, so the elevated command may get a larger share of the machine
+  than the caller; a nesting through a job that is not a wnice job is not
+  detected). Already elevated, the flag changes nothing.
   `admin <command>` without the flag, the `admin` usage text and every exit
   code are unchanged; only the `admin --help` text grew, which is the
   differential allowlist's second entry.
@@ -117,15 +129,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   usage error with exit 2. Of the other tools only `admin --help` grew
   (`--keep-limits`, above).
 
-- Internal `wnice --jobs` edge cases now flag partial process enumeration, avoid naming unproven nested parents, and count failed owners once in footer summaries.
-
-- Documentation only: README.md and skills/win-nice/SKILL.md now state what
-  `-c` measures (N percent of all logical processors, one hard cap per job -
-  not a share of one core and not a machine-wide pool), list what Job Object
-  limits do not cover (reused daemons, service-created processes, VM work,
-  work done by other processes, deliberate handle duplication) and document
-  `wnice --jobs`, `admin --keep-limits` and `WNICE_AGENT_LIMITS`. No code, CLI
-  or version change.
+- README.md and skills/win-nice/SKILL.md state what `-c` measures (N percent of
+  all logical processors, one hard cap per job - not a share of one core and
+  not a machine-wide pool), list what Job Object limits do not cover (reused
+  daemons, service-created processes, VM work, work done by other processes,
+  deliberate handle duplication) and document the new options above.
 
 ### Internal
 

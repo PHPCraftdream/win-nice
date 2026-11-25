@@ -28,7 +28,10 @@ a CPU rate control that is not a hard cap, an affinity mask that is not a
 contiguous run from CPU 0, an unknown priority class - gets its own stderr
 line and is left out; the rest is still kept. Not kept by design: the
 wall-clock timeout -s (it lives in the wrapper process, not in the job),
-and the caps of outer jobs when the caller's job is nested. In no job, or
+and the caps of outer jobs when the caller's job is nested; when two or more
+wnice jobs around admin prove the nesting, one line on stderr says so (a CPU
+cap there is a share of its parent's allowance, so the elevated tree may get
+a larger share of the machine than the caller). In no job, or
 with none of those limits, admin prints one note and behaves exactly like
 plain admin. When the caller's job limits cannot be read, or the wnice.exe
 next to admin.exe is not this executable's front, admin refuses to elevate
