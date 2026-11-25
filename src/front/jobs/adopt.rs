@@ -1,4 +1,4 @@
-use super::adopt_select::{attempt, select, AttemptResult, Candidate};
+use super::adopt_select::{attempt, is_wanted, select, AttemptResult, Candidate};
 use crate::front::jobs::win;
 use crate::Handle;
 use std::collections::HashSet;
@@ -89,6 +89,15 @@ fn ancestry(rows: &[Row], own: u32) -> HashSet<u32> {
     out
 }
 
+/// Creation time of `pid` (0 when it cannot be read): with the PID it is the
+/// identity of a process, so a PID the system reuses is not mistaken for the
+/// process that had it before.
+fn created_of(pid: u32) -> u64 {
+    win::open_query(pid)
+        .and_then(|process| win::creation_time(&process))
+        .unwrap_or(0)
+}
+
 /// Whether `pid` is provably a process of the current user (query-only open).
 fn same_user_pid(pid: u32, own: &win::OwnedSid) -> bool {
     win::open_query(pid).is_some_and(|process| win::same_user(&process, own) == Some(true))
@@ -152,6 +161,11 @@ impl Poller {
                 let excluded = ancestry(&rows, own);
                 for row in select(
                     rows.into_iter().map(|r| Candidate {
+                        created: if is_wanted(&r.name, &names) {
+                            created_of(r.pid)
+                        } else {
+                            0
+                        },
                         name: r.name,
                         pid: r.pid,
                     }),
@@ -187,10 +201,15 @@ impl Poller {
                         continue;
                     }
                     let process = Handle::from_raw(process);
+                    // The PID was handed to another process since the snapshot:
+                    // that one is picked up (or not) on its own, next round.
+                    if row.created != 0 && win::creation_time(&process) != Some(row.created) {
+                        continue;
+                    }
                     let query_error = std::cell::Cell::new(None);
                     let mut assignment_error = None;
                     let result = attempt(
-                        row.pid,
+                        (row.pid, row.created),
                         &mut decision_attempted,
                         || {
                             let result = win::same_user(&process, &own_sid);

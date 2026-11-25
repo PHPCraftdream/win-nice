@@ -857,6 +857,10 @@ const TESTS: &[(&str, fn())] = &[
         test_daemon_survives_wrapper_exit,
     ),
     ("adopt_processes", probe_support::adopt::run),
+    (
+        "adopt_procs_conflict",
+        probe_support::adopt::procs_conflict_is_refused,
+    ),
     ("no_shell_layer_between", test_no_shell_layer_between),
     (
         "bat_target_with_space_in_path",

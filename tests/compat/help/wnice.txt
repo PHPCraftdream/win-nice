@@ -168,8 +168,13 @@ adopt (--adopt):
                      exit does not. Do not adopt editors, IDEs or
                      anything that must outlive the command. A process in an
                      incompatible job may refuse (one line per process on
-                     stderr). Not available to the legacy names or
-                     WNICE_AGENT_LIMITS; with --wsl: usage error (exit 2).
+                     stderr). An adopted process counts toward -m (the job's
+                     committed memory), so a large server may start failing
+                     allocations. -n is refused with --adopt (exit 2): a
+                     process that would pass the active-process limit is
+                     terminated when it joins. Not available to the legacy
+                     names or WNICE_AGENT_LIMITS; with --wsl: usage error
+                     (exit 2).
 
 agent limits (WNICE_AGENT_LIMITS, read only by cy and cx):
   set WNICE_AGENT_LIMITS=-p idle -c 10 -m 10g

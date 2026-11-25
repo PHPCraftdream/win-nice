@@ -22,6 +22,15 @@ pub const KEEP_LIMITS: &str = "--keep-limits";
 pub const NOTHING_TO_KEEP: &str =
     "admin: --keep-limits: the caller's job has no limits to keep; running as plain admin.";
 
+/// The one stderr line for a caller whose job sits inside `outer` other wnice
+/// jobs: the elevated job is a new top-level one, so none of theirs applies.
+fn nested_note(outer: usize) -> String {
+    format!(
+        "admin: --keep-limits: the caller's job is nested inside {outer} other wnice job{},          whose limits are not carried; a CPU cap here is a share of its parent's allowance,          so the elevated command may get a larger share of the machine than the caller.",
+        if outer == 1 { "" } else { "s" }
+    )
+}
+
 /// How a not-yet-elevated `admin` launches its target.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Route {
@@ -299,12 +308,15 @@ fn split_keep_limits(args: &[String]) -> (bool, &[String]) {
 
 /// Decide the `--keep-limits` step and report every problem through `err`: one
 /// line per limit that cannot be kept, one line when there is nothing to keep,
-/// one line when the limits cannot be read or the front is not ours.
+/// one line when the limits cannot be read or the front is not ours, and one
+/// line when the caller's job is provably nested (`jobs_around_caller` is only
+/// asked once the elevation is certain).
 fn decide(
     job: CallerJob,
     logical_cpus: u32,
     args: &[String],
     front: &mut dyn FnMut() -> Result<String, String>,
+    jobs_around_caller: &mut dyn FnMut() -> Option<usize>,
     err: &mut dyn FnMut(&str),
 ) -> Elevation {
     let limits = match job {
@@ -332,10 +344,16 @@ fn decide(
         return Elevation::Plain;
     }
     match front() {
-        Ok(file) => Elevation::Keep {
-            file,
-            params: elevated_params(&plan.options, args),
-        },
+        Ok(file) => {
+            // Two or more wnice jobs around the caller prove that it is nested.
+            if let Some(around) = jobs_around_caller().filter(|n| *n >= 2) {
+                err(&nested_note(around - 1));
+            }
+            Elevation::Keep {
+                file,
+                params: elevated_params(&plan.options, args),
+            }
+        }
         Err(msg) => {
             err(&msg);
             Elevation::Fail
@@ -365,6 +383,7 @@ pub fn main(args: &[String]) -> i32 {
             sys.logical_processor_count(),
             args,
             &mut wnice_front,
+            &mut || super::jobs::inspect::jobs_containing_this_process().map(|(n, _)| n),
             &mut err,
         ) {
             Elevation::Plain => {}
@@ -387,6 +406,10 @@ pub fn main(args: &[String]) -> i32 {
 mod tests {
     use super::*;
     use crate::MemSpec;
+
+    fn no_nesting() -> Option<usize> {
+        None
+    }
 
     fn a(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -634,6 +657,7 @@ mod tests {
             8,
             &a(&["cmd"]),
             &mut front,
+            &mut no_nesting,
             &mut err,
         );
         assert_eq!(out, Elevation::Plain);
@@ -664,6 +688,7 @@ mod tests {
             8,
             &a(&["cmd"]),
             &mut front,
+            &mut no_nesting,
             &mut err,
         );
         assert_eq!(out, Elevation::Fail);
@@ -695,6 +720,7 @@ mod tests {
             8,
             &a(&["cmd"]),
             &mut front,
+            &mut no_nesting,
             &mut err,
         );
         assert_eq!(out, Elevation::Fail);
@@ -716,6 +742,7 @@ mod tests {
             8,
             &a(&["cmd", "/c", "x y"]),
             &mut front,
+            &mut no_nesting,
             &mut err,
         );
         match out {
@@ -737,10 +764,119 @@ mod tests {
             Ok("unused".to_string())
         };
         let mut err = |m: &str| lines.push(m.to_string());
-        let out = decide(CallerJob::NoJob, 8, &a(&["cmd"]), &mut front, &mut err);
+        let out = decide(
+            CallerJob::NoJob,
+            8,
+            &a(&["cmd"]),
+            &mut front,
+            &mut no_nesting,
+            &mut err,
+        );
         assert_eq!(out, Elevation::Plain);
         assert!(!front_called);
         assert_eq!(lines, a(&[NOTHING_TO_KEEP]));
+    }
+
+    fn keep_with(around: Option<usize>) -> (Elevation, Vec<String>) {
+        let mut lines: Vec<String> = Vec::new();
+        let mut front = || Ok(r"C:\tools\wnice.exe".to_string());
+        let mut jobs = || around;
+        let mut err = |m: &str| lines.push(m.to_string());
+        let out = decide(
+            CallerJob::Limits(full()),
+            8,
+            &a(&["cmd"]),
+            &mut front,
+            &mut jobs,
+            &mut err,
+        );
+        (out, lines)
+    }
+
+    #[test]
+    fn a_nested_caller_gets_one_note_and_is_still_elevated() {
+        for (around, want) in [
+            (2, "nested inside 1 other wnice job,"),
+            (3, "nested inside 2 other wnice jobs,"),
+        ] {
+            let (out, lines) = keep_with(Some(around));
+            assert!(matches!(out, Elevation::Keep { .. }), "{out:?}");
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(
+                lines[0].starts_with("admin: --keep-limits: "),
+                "{}",
+                lines[0]
+            );
+            assert!(lines[0].contains(want), "{}", lines[0]);
+            assert!(lines[0].contains("not carried"), "{}", lines[0]);
+            assert!(lines[0].contains("share of its parent"), "{}", lines[0]);
+        }
+    }
+
+    #[test]
+    fn no_note_without_proof_of_nesting() {
+        // Its own job only, no job seen, or a failed membership query: nothing
+        // is proven, so nothing is said (the docs name the limitation).
+        for around in [Some(1), Some(0), None] {
+            let (out, lines) = keep_with(around);
+            assert!(matches!(out, Elevation::Keep { .. }), "{out:?}");
+            assert!(lines.is_empty(), "{around:?}: {lines:?}");
+        }
+    }
+
+    #[test]
+    fn nesting_is_not_even_asked_when_nothing_is_elevated() {
+        let mut asked = false;
+        let mut jobs = || {
+            asked = true;
+            Some(5)
+        };
+        let mut lines: Vec<String> = Vec::new();
+        let mut err = |m: &str| lines.push(m.to_string());
+        let mut ok_front = || Ok("unused".to_string());
+        let mut bad_front = || Err("admin: --keep-limits: not our front".to_string());
+        let args = a(&["cmd"]);
+        let no_job = decide(
+            CallerJob::NoJob,
+            8,
+            &args,
+            &mut ok_front,
+            &mut jobs,
+            &mut err,
+        );
+        let failed = decide(
+            CallerJob::Failed {
+                query: "IsProcessInJob",
+                code: 5,
+            },
+            8,
+            &args,
+            &mut ok_front,
+            &mut jobs,
+            &mut err,
+        );
+        let wrong_front = decide(
+            CallerJob::Limits(full()),
+            8,
+            &args,
+            &mut bad_front,
+            &mut jobs,
+            &mut err,
+        );
+        let nothing = decide(
+            CallerJob::Limits(empty()),
+            8,
+            &args,
+            &mut ok_front,
+            &mut jobs,
+            &mut err,
+        );
+        assert_eq!(no_job, Elevation::Plain);
+        assert_eq!(failed, Elevation::Fail);
+        assert_eq!(wrong_front, Elevation::Fail);
+        assert_eq!(nothing, Elevation::Plain);
+        assert!(!asked);
+        assert!(lines.iter().all(|l| !l.contains("nested")), "{lines:?}");
     }
 
     #[test]

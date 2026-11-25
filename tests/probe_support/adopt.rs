@@ -262,3 +262,23 @@ pub fn run() {
         "wrapper logged adoption of unselected helper through exit: {stderr_lines:?}"
     );
 }
+
+/// `--adopt` with `-n` is refused at parse time: exit 2, one stderr line,
+/// nothing started (joining past the active-process limit would kill the process).
+pub fn procs_conflict_is_refused() {
+    let output = Command::new(env!("CARGO_BIN_EXE_wnice"))
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["--adopt", "wnice-no-such-image", "-n", "4", "--"])
+        .arg(probe_exe())
+        .args(["exit", "0"])
+        .output()
+        .expect("run wnice");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(output.stdout.is_empty());
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(
+        stderr.starts_with("wnice: --adopt cannot be combined with -n/--procs"),
+        "{stderr}"
+    );
+}
