@@ -4,6 +4,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-25
+
+Opt-in additions for running several agents at once: a read-only `--jobs`
+view, `--adopt`, `--audit`, `--no-servers` and `WNICE_AGENT_LIMITS` for
+`cy`/`cx`, plus a backward-compatibility safety net. There are no breaking CLI
+changes: every tool name, option, exit code and help-text prefix of 0.4.0
+behaves exactly as before, and every new feature is opt-in, per invocation or
+per environment variable. Upgrading from 0.4.0 is an ordinary
+`npm install -g win-nice`.
+
 ### Added
 
 - `wnice --adopt NAME[,NAME...]`: opt-in, puts already running same-user
@@ -103,6 +113,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   deliberate handle duplication), document the new options above and record
   that a command `admin` elevates through UAC stays in the caller's job
   (measured on Windows 10, build 19045; other Windows versions not verified).
+
+### Fixed
+
+- `npm run test:elevated` pointed at `test\run-elevated.ps1`, which had moved
+  to `test\pester\run-elevated.ps1`, so it failed with "file not found" (source
+  checkout only; the script is not part of the installed package). A Node test
+  now checks that every `.js`/`.ps1` file an npm script names exists.
 
 ### Internal
 
@@ -454,7 +471,8 @@ everything below shipped together as `0.2.0`.
 - Node test suite (installer logic) and Pester integration suite (real
   Windows process/priority/Job-Object behavior).
 
-[Unreleased]: https://github.com/PHPCraftdream/win-nice/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/PHPCraftdream/win-nice/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/PHPCraftdream/win-nice/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/PHPCraftdream/win-nice/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/PHPCraftdream/win-nice/compare/v0.2.1...v0.2.2

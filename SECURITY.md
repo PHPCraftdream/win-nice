@@ -63,10 +63,50 @@ processes or of system processes, and it never applies
 `REALTIME_PRIORITY_CLASS` (`realtime` still downgrades to `HIGH`). No
 elevation prompt is ever shown and no privilege is requested or held.
 
+## Threat-model notes for the 0.5 features
+
+All of these are opt-in and run with the caller's own rights: nothing here
+elevates, and nothing reaches a process the same user could not already
+open.
+
+### `wnice --jobs` and `wnice --audit` (read-only)
+
+- `--jobs` modifies nothing. It finds Job Objects through the system handle
+  table and duplicates handles with query-only rights, and only from
+  wnice-family processes of the same user: the owner's user SID is checked
+  before anything else is read from a process, and foreign owners are only
+  counted.
+- The report prints each wrapper's command line (cut at 1024 characters).
+  Arguments may hold secrets, so treat the output like the command line
+  itself before pasting it into an issue.
+- `--audit` only reads job accounting and the same user's process list; it
+  touches no process.
+
+### `wnice --adopt`
+
+- It opens only processes of the same user, with
+  `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA | PROCESS_TERMINATE`,
+  and assigns them to the command's job. Other users' processes are skipped
+  without output; wnice's own process, its ancestors and the root command
+  are never adopted.
+- Selection is by exact image name, so every same-user process with that
+  name is taken, not only the one meant. An adopted process keeps the job's
+  limits until it exits and is killed with the job on `--timeout` or when
+  wnice itself is killed. The job's memory limit counts it too, so a large
+  server may start failing allocations.
+
+### `WNICE_AGENT_LIMITS`
+
+- The value goes through the same parser as the `wnice` command line and
+  accepts limit options and `--no-servers` only. A command, `--`, `--wsl`,
+  `--jobs`, `--audit`, `--adopt` and the help/version flags are refused
+  (exit 1, nothing started), so setting the variable cannot change which
+  command `cy` or `cx` runs.
+
 ## Supported versions
 
-Only the latest published version on npm is supported - 0.4.x as of this
-writing; earlier versions (including 0.3.x) are not. This project is
+Only the latest published version on npm is supported - 0.5.x as of this
+writing; earlier versions (including 0.4.x) are not. This project is
 pre-1.0; no long-term-support branches exist yet.
 
 ## Verifying artifacts
