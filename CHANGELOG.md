@@ -70,38 +70,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `wnice --help` documents it; every invocation without `--jobs` among the
   wnice options behaves exactly as before.
 
-- `admin --keep-limits <command> [args...]`: opt-in, keeps the limits of the
-  job `admin` itself runs in when it has to elevate. A UAC-elevated process is
-  created by the AppInfo service, not as a child of `admin`, so it never
-  enters the caller's job: `capc 10 admin build.bat` used to run the elevated
-  command with no CPU cap, memory limit or process limit. With the flag,
-  `admin` reads the limits of the caller's immediate job
-  (`QueryInformationJobObject` with a NULL job handle) and elevates this
-  executable's `wnice` front instead of the command, as
-  `wnice <options> -- <command> [args...]`: `-c` CPU rate percent, `-m` job
-  memory limit, `-n` active-process limit, `-t` affinity (only when the mask
-  is a contiguous run from CPU 0) and `-p` priority class. The elevated
-  `wnice` creates its own new job, so the limits live in a separate pool,
-  never in the caller's job. A hard cap with a fractional percent is rounded
-  down to a whole percent (never below 1), with one stderr note naming both values; every
-  limit that cannot be kept (a CPU rate control that is not a hard cap, a
-  sparse affinity mask, an unknown priority class) gets its own stderr line
-  and is left out, and the rest is still kept. A job with no such limit - or
-  no job at all - prints one note and falls back to plain `admin`. If the
-  limits cannot be read, or the sibling `wnice.exe` is not this executable's
-  front (the same file, or the installer's byte-identical copy), `admin`
-  refuses to elevate with exit 1 before the UAC prompt instead of running
-  unlimited. Not kept by design: the wall-clock timeout (it lives
-  in the wrapper process, not in the job) and the caps of outer jobs when the
-  caller's job is nested; when two or more wnice jobs around `admin` prove the
-  nesting, one stderr line says so (a CPU cap in the caller's job is a share of
-  its parent's, so the elevated command may get a larger share of the machine
-  than the caller; a nesting through a job that is not a wnice job is not
-  detected). Already elevated, the flag changes nothing.
-  `admin <command>` without the flag, the `admin` usage text and every exit
-  code are unchanged; only the `admin --help` text grew, which is the
-  differential allowlist's second entry.
-
 - `WNICE_AGENT_LIMITS` (optional): limits for the agents `cy` and `cx`
   start. When set, its value is whitespace-separated `wnice` limit options
   (`-p/--priority`, `-c/--cpu`, `-t/--threads`, `-m/--memory`, `-n/--procs`,
@@ -126,14 +94,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   after the 0.4.0 text (which stays an exact prefix): `--jobs`,
   `--no-servers`, `--audit` / `WNICE_AUDIT=1`, `--adopt` and
   `WNICE_AGENT_LIMITS` for `cy`/`cx`, including which combinations are a
-  usage error with exit 2. Of the other tools only `admin --help` grew
-  (`--keep-limits`, above).
+  usage error with exit 2. The help texts of the other tools are unchanged.
 
 - README.md and skills/win-nice/SKILL.md state what `-c` measures (N percent of
   all logical processors, one hard cap per job - not a share of one core and
   not a machine-wide pool), list what Job Object limits do not cover (reused
   daemons, service-created processes, VM work, work done by other processes,
-  deliberate handle duplication) and document the new options above.
+  deliberate handle duplication), document the new options above and record
+  that a command `admin` elevates through UAC stays in the caller's job
+  (measured on Windows 10, build 19045; other Windows versions not verified).
 
 ### Internal
 

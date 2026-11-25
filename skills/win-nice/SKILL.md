@@ -196,8 +196,8 @@ job and nothing else. Not covered: daemons or servers reused from an earlier
 run (MSBuild node reuse, VBCSCompiler, a Gradle daemon, sccache/Bazel servers,
 an editor handing the work to an already-open instance); processes a service
 or broker starts (WMI `Win32_Process.Create`, Task Scheduler, out-of-process
-COM servers, UAC elevation - `admin --keep-limits` carries limits across that
-one); work inside a VM (WSL2, Docker, Hyper-V: use `wnice --wsl`, `.wslconfig`,
+COM servers; not `admin`: on Windows 10 its UAC-elevated process was measured
+staying in the caller's job); work inside a VM (WSL2, Docker, Hyper-V: use `wnice --wsl`, `.wslconfig`,
 or the container runtime's own limits); work other processes do on the
 command's behalf (antivirus, the search indexer, shared build services,
 kernel/driver time); and a process of the same user that takes the job handle
@@ -290,16 +290,9 @@ the scope keeps running in the guest until
   standard UAC consent prompt if the calling shell isn't already elevated, runs
   inline with no extra prompt if it is. Blocking elevation wrapper with the same
   wait-and-propagate-exit-code semantics as the other wrappers - it does not set
-  a priority class like `idle` does.
-- `admin --keep-limits <command> [args...]` — opt-in; when `admin` has to
-  elevate, carry the limits of the job it is in (hard CPU cap rounded down to
-  a whole percent, never below 1; job memory; active-process limit;
-  contiguous affinity; priority class) into the new job the elevated `wnice`
-  creates. Every limit that cannot be kept is reported on stderr; the
-  wall-clock timeout and outer-job caps are not carried (two or more wnice jobs
-  around `admin` prove the nesting and add one stderr line: a CPU cap there is
-  a share of its parent's, so the elevated command may get more of the machine;
-  other nesting is not detected); `admin` without the flag is unchanged.
+  a priority class like `idle` does. Under a limited job the elevated process
+  stays in that job (measured on Windows 10, build 19045; other Windows
+  versions not verified), so `capc 10 admin build.bat` caps the elevated work.
 - `uiup` (no arguments) — one-shot `HIGH` priority boost for the live
   shell/UI/audio processes (`explorer`, `dwm`, `sihost`,
   `ShellExperienceHost`, `StartMenuExperienceHost`, `StartMenu`, `SearchApp`,

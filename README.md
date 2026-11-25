@@ -211,10 +211,11 @@ Work outside the job stays outside the cap:
   reverse case - a daemon that *was* started under a cap and is still alive -
   is in the `capm` section: the limit then sticks to that daemon.)
 - **Processes a service or broker starts for the command.** WMI's
-  `Win32_Process.Create`, Task Scheduler, an out-of-process COM server and UAC
-  elevation all create processes that are not children of the job, so they
-  never join it and run outside its limits. `admin --keep-limits` is the one case with
-  a fix: it carries the caller's limits through the UAC prompt.
+  `Win32_Process.Create`, Task Scheduler and an out-of-process COM server
+  create processes that are not children of the job, so they never join it
+  and run outside its limits. UAC elevation through `admin` is not one of
+  them: measured on Windows 10 (build 19045), the elevated process stays a
+  member of the caller's job (other Windows versions not verified).
 - **Work inside a VM.** WSL2, Docker and Hyper-V guests are separate kernels:
   a host-side job cannot limit their processes (WSL2 shows up host-side as
   `vmmem`, which an un-elevated process cannot even open). Use `wnice --wsl`,
@@ -236,8 +237,8 @@ Work outside the job stays outside the cap:
   means it.
 
 What exists today to close the gaps that can be closed: `wnice --jobs` to see
-which processes are actually capped, `admin --keep-limits` to carry limits
-across UAC, `WNICE_AGENT_LIMITS` to cap every `cy`/`cx` agent, `wnice --wsl`
+which processes are actually capped, `WNICE_AGENT_LIMITS` to cap every
+`cy`/`cx` agent, `wnice --wsl`
 plus `.wslconfig`/container limits for VM work, and starting a reused daemon
 under the same wrapper (or turning reuse off, as shown under `capm`) when its
 work must be counted.
@@ -817,29 +818,10 @@ actually needed, since a direct launch is never exposed to `%` expansion at all.
 admin npm install -g some-package
 ```
 
-**`admin --keep-limits <command> [args...]`** (opt-in) keeps the job limits
-across the UAC prompt. The elevated process is created by the AppInfo service,
-not as a child of `admin`, so `capc 10 admin build.bat` otherwise runs the
-elevated work with no CPU cap, memory limit or process limit at all. With the
-flag, `admin` reads the job it is in and elevates this executable's `wnice`
-front as `wnice <options> -- <command> [args...]`, so the work starts in a new
-job with the same hard CPU cap, job memory limit, active-process limit,
-affinity (when the mask is a contiguous run from CPU 0) and priority class. A
-hard cap with a fractional percent is rounded down to a whole percent, never
-below 1, with a note on stderr. Every limit that cannot be kept - a soft cap,
-a sparse affinity mask, an unknown priority class - gets its own stderr line
-and is left out; the rest is still kept. Not carried: `-s` (the deadline lives
-in the wrapper process, not in the job) and the caps of outer jobs when the
-caller's job is nested. When two or more wnice jobs around `admin` prove the
-nesting, one stderr line says so: a CPU cap in the caller's job is a share of
-its parent's allowance, so the elevated command may get a larger share of the
-machine than the caller had (`wnice --jobs` shows the machine-wide ceiling). A
-nesting through a job that is not a wnice job, or that could not be inspected,
-is not detected and stays silent. No job, or a job with none of those limits: one note,
-then plain `admin`. If the limits cannot be read, or the `wnice.exe` next to
-`admin.exe` is not this executable's front, it exits 1 before any UAC prompt
-instead of running unlimited. Already elevated, the flag changes nothing - the
-command already inherits the job. `admin` without the flag is unchanged.
+Limits survive the UAC prompt: measured on Windows 10 (build 19045), the
+elevated process is created as a member of the caller's job, so
+`capc 10 admin build.bat` caps the elevated work like any other command. Other
+Windows versions are not verified.
 
 ## AI CLI launchers
 

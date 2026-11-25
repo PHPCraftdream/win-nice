@@ -170,14 +170,6 @@ pub fn probe_main(mode: &str) -> ! {
             }
             std::process::exit(0);
         }
-        "nesting-count" => {
-            // How many wnice jobs this probe belongs to (what admin --keep-limits asks).
-            match wnice::front::jobs::inspect::jobs_containing_this_process() {
-                Some((count, _)) => println!("nesting:{count}"),
-                None => println!("nesting:unknown"),
-            }
-            std::process::exit(0);
-        }
         "exit" => {
             let code: i32 = need(&rest, 0).parse().expect("exit code");
             std::process::exit(code);
