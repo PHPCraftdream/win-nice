@@ -42,7 +42,7 @@ wnice -p idle -c 50 -t 4 -m 50 -n 64 -s 600 -- npm run build
 | `--adopt <NAME[,NAME...]>` | — | put already running same-user processes with these exact image names into the command's job (details below; not accepted by the legacy names or `WNICE_AGENT_LIMITS`) |
 | `--boost` | — | with `-p`: skip the job priority limit and apply the priority to every process via the booster (see "Priority above NORMAL without elevation") |
 | `--audit` | — | after exit, report job accounting and same-user process suspects (not proven leaks) |
-| `--no-servers` | — | disable selected build-tool server/daemon reuse for the launched command (details below; also accepted by `WNICE_AGENT_LIMITS`) |
+| `--no-servers` | — | disable selected build-tool server reuse for the launched command (details below; also accepted by `WNICE_AGENT_LIMITS`) |
 | `--jobs` | — | read-only report of the wnice jobs running right now (see "Looking at what is running"); must be the whole command line, so it takes no command and no other option |
 | `-h` / `-V` | | help / version |
 
@@ -132,6 +132,17 @@ depends on it carries `- inventory incomplete` with a one-line legend, and
 the footer counts the owners that were skipped and why. A nested job shows
 `nested (job N): X% of parent`, because that number is a share of the
 parent's allowance, not of the machine.
+
+Under the job table come extra lines, only when there is something to say:
+`job N command: ...` prints the whole command line of a row whose `command`
+cell was cut at 34 characters (control characters become spaces, 1024
+characters at most - arguments may hold secrets, so look before pasting the
+report anywhere), and `job N machine share: at most 2.0% all / 32.0% one
+(20.0% of 10.0%)` gives the machine-wide ceiling of a nested job: the product of
+the hard caps along its proven parent chain, own cap first. An uncapped link
+passes the others through, a soft cap is not a ceiling (`no hard ceiling` when
+the chain has only soft ones), and a chain with an unknown or unproven link
+shows `?`.
 
 It changes nothing, needs no elevation (an owner it cannot inspect is counted,
 not dropped), and is accepted only as the whole command line: `wnice --jobs`
