@@ -177,8 +177,15 @@ pub fn jobs_containing_this_process() -> Option<(usize, bool)> {
     let me = std::process::id();
     let found = discover(me);
     let own = win::open_query(me)?;
-    let ids = memberships(&own, &found.owned)?;
-    Some((ids.len(), found.inventory.complete()))
+    // One entry per kernel job object; row ids are not assigned yet, so the
+    // members are counted, never deduplicated by id.
+    let mut count = 0;
+    for job in &found.owned {
+        if win::is_in_job(&own, &job.handle)? {
+            count += 1;
+        }
+    }
+    Some((count, found.inventory.complete()))
 }
 
 /// The wrapper processes worth inspecting, pid-ascending: this order decides
