@@ -63,6 +63,22 @@ test('README.md and skills/win-nice/SKILL.md agree on the %-argument fail-closed
   }
 });
 
+// `npm run test:elevated` once pointed at a moved script and failed with
+// "file not found"; every .js/.ps1 an npm script names must exist.
+test('package.json scripts only name files that exist', () => {
+  const root = path.join(__dirname, '..');
+  const { scripts } = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  const missing = [];
+  for (const [name, command] of Object.entries(scripts)) {
+    for (const raw of command.split(/\s+/)) {
+      const token = raw.replace(/^"|"$/g, '');
+      if (!/\.(js|ps1)$/.test(token) || token.startsWith('%')) continue;
+      if (!fs.existsSync(path.join(root, token.replace(/\\/g, '/')))) missing.push(`${name}: ${token}`);
+    }
+  }
+  assert.deepEqual(missing, []);
+});
+
 // Exported so the extraction can be exercised against synthetic docs
 // (drift-guard sanity checks) without editing the real files.
 module.exports = { DOCS, REQUIRED_PHRASES, extractSection, normalize };
