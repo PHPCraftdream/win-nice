@@ -97,6 +97,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+          package-manager-cache: false
 
       # Grabs the binary built once by build-exe on the SAME image; path: bin
       # drops it at bin/wnice.exe (gitignored, so the checkout never contains
